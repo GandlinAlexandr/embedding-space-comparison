@@ -27,18 +27,22 @@ _IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def default_transform_imagenet224() -> transforms.Compose:
-    return transforms.Compose([
-        transforms.Resize(224),  # чтобы всё приводилось к размеру под ImageNet-модели
-        transforms.ToTensor(),
-        transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
-    ])
+    return transforms.Compose(
+        [
+            transforms.Resize(
+                224
+            ),  # чтобы всё приводилось к размеру под ImageNet-модели
+            transforms.ToTensor(),
+            transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+        ]
+    )
 
 
 def build_dataset(
     dataset_name: str,
     data_root: str,
     split: str,
-    transform: Optional[transforms.Compose] = None
+    transform: Optional[transforms.Compose] = None,
 ) -> torch.utils.data.Dataset:
     """
     Построить датасет для извлечения эмбеддингов.
@@ -56,10 +60,7 @@ def build_dataset(
 
     if dataset_name in ("cifar10", "cifar-10", "cifar_10"):
         return datasets.CIFAR10(
-            root=data_root,
-            train=(split == "train"),
-            download=True,
-            transform=transform
+            root=data_root, train=(split == "train"), download=True, transform=transform
         )
 
     # TODO: сюда удобно добавлять другие датасеты.
@@ -70,14 +71,11 @@ def build_loader(
     dataset: torch.utils.data.Dataset,
     batch_size: int,
     num_workers: int = 4,
-    shuffle: bool = False
+    shuffle: bool = False,
 ) -> DataLoader:
     # ВАЖНО: shuffle=False, чтобы индексы subset_indices.npy однозначно соответствовали порядку объектов.
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers
+        dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers
     )
 
 

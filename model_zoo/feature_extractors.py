@@ -11,6 +11,7 @@ class VGGConvGAP(nn.Module):
 
     Это НЕ выход classifier (4096), а представление на основе сверточных признаков.
     """
+
     def __init__(self, vgg: nn.Module):
         super().__init__()
         self.features = vgg.features

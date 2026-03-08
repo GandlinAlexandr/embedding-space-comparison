@@ -31,6 +31,7 @@ from scipy.stats import spearmanr, pearsonr, kendalltau
 # Опционально для графиков (не делаем обязательной зависимостью)
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except Exception:  # pragma: no cover
@@ -40,6 +41,7 @@ except Exception:  # pragma: no cover
 # ================================================================
 # Загрузка матрицы метрики (.npz)
 # ================================================================
+
 
 def load_metric_matrix(path: str) -> Tuple[List[str], np.ndarray, Dict[str, Any]]:
     """
@@ -76,7 +78,11 @@ def load_metric_matrix(path: str) -> Tuple[List[str], np.ndarray, Dict[str, Any]
     meta: Dict[str, Any] = {}
     if "meta_json" in data.files:
         meta_json = data["meta_json"]
-        meta_json = meta_json.item() if getattr(meta_json, "shape", None) == () else meta_json.tolist()
+        meta_json = (
+            meta_json.item()
+            if getattr(meta_json, "shape", None) == ()
+            else meta_json.tolist()
+        )
 
         if isinstance(meta_json, str):
             try:
@@ -92,6 +98,7 @@ def load_metric_matrix(path: str) -> Tuple[List[str], np.ndarray, Dict[str, Any]
 # ================================================================
 # Загрузка downstream-оценок моделей
 # ================================================================
+
 
 def load_downstream_table(path: str) -> Dict[str, Dict[str, float]]:
     """
@@ -114,20 +121,25 @@ def load_downstream_table(path: str) -> Dict[str, Dict[str, float]]:
     return obj
 
 
-def intersect_models(metric_models: List[str], downstream: Dict[str, Dict[str, float]]) -> List[str]:
+def intersect_models(
+    metric_models: List[str], downstream: Dict[str, Dict[str, float]]
+) -> List[str]:
     """
     Оставляем только те модели, которые есть и в матрице метрики, и в downstream-таблице.
     """
     dset = set(downstream.keys())
     keep = [m for m in metric_models if m in dset]
     if len(keep) < 2:
-        raise RuntimeError("Слишком мало моделей на пересечении между metric и downstream.")
+        raise RuntimeError(
+            "Слишком мало моделей на пересечении между metric и downstream."
+        )
     return keep
 
 
 # ================================================================
 # Построение пар и оценка как в прошлом году
 # ================================================================
+
 
 @dataclass
 class TaskEval:
@@ -141,7 +153,9 @@ class TaskEval:
     correct_ratio_adjusted_like_last_year: float
 
 
-def _correct_ranking_ratio(metric_vals: np.ndarray, delta_vals: np.ndarray, boundary: float = 0.0) -> float:
+def _correct_ranking_ratio(
+    metric_vals: np.ndarray, delta_vals: np.ndarray, boundary: float = 0.0
+) -> float:
     """
     Как в прошлогоднем репозитории:
       correct = (metric>=b and delta>=0) or (metric<=b and delta<=0)
@@ -152,7 +166,9 @@ def _correct_ranking_ratio(metric_vals: np.ndarray, delta_vals: np.ndarray, boun
     return float(np.mean(ok)) if ok.size else float("nan")
 
 
-def _adjust_correct_ratio_like_last_year(cr: float, is_paired: bool, is_symmetric: bool) -> float:
+def _adjust_correct_ratio_like_last_year(
+    cr: float, is_paired: bool, is_symmetric: bool
+) -> float:
     """
     Ровно логика прошлого года:
 
@@ -252,21 +268,25 @@ def eval_one_metric(
         if eval_protocol == "delta_signed":
             cr = _correct_ranking_ratio(metric_vals, delta_vals, boundary=0.0)
             cr_flip = max(cr, 1.0 - cr) if not np.isnan(cr) else cr
-            cr_adj = _adjust_correct_ratio_like_last_year(cr, is_paired=is_paired, is_symmetric=is_symmetric)
+            cr_adj = _adjust_correct_ratio_like_last_year(
+                cr, is_paired=is_paired, is_symmetric=is_symmetric
+            )
         else:
             # Для протокола |Δacc| "correct ratio" по знаку не определено
             cr = cr_flip = cr_adj = float("nan")
 
-        per_task.append(TaskEval(
-            task=task,
-            n_pairs=int(metric_vals.size),
-            spearman=sp,
-            pearson=pr,
-            kendall=kd,
-            correct_ratio=cr,
-            correct_ratio_flip_invariant=cr_flip,
-            correct_ratio_adjusted_like_last_year=cr_adj,
-        ))
+        per_task.append(
+            TaskEval(
+                task=task,
+                n_pairs=int(metric_vals.size),
+                spearman=sp,
+                pearson=pr,
+                kendall=kd,
+                correct_ratio=cr,
+                correct_ratio_flip_invariant=cr_flip,
+                correct_ratio_adjusted_like_last_year=cr_adj,
+            )
+        )
 
     # Сводка: средние по задачам (как в логе)
     def _nanmean(vals: List[float]) -> float:
@@ -280,8 +300,12 @@ def eval_one_metric(
         "pearson_mean": _nanmean([t.pearson for t in per_task]),
         "kendall_mean": _nanmean([t.kendall for t in per_task]),
         "correct_ratio_mean": _nanmean([t.correct_ratio for t in per_task]),
-        "correct_ratio_flip_mean": _nanmean([t.correct_ratio_flip_invariant for t in per_task]),
-        "correct_ratio_adjusted_mean": _nanmean([t.correct_ratio_adjusted_like_last_year for t in per_task]),
+        "correct_ratio_flip_mean": _nanmean(
+            [t.correct_ratio_flip_invariant for t in per_task]
+        ),
+        "correct_ratio_adjusted_mean": _nanmean(
+            [t.correct_ratio_adjusted_like_last_year for t in per_task]
+        ),
     }
 
     # meta -> добавим то, что полезно видеть в отчёте
@@ -360,7 +384,9 @@ def _compute_pair_cloud(
         kd = float(kendalltau(x, y).correlation)
         if eval_protocol == "delta_signed":
             cr = _correct_ranking_ratio(x, y, boundary=0.0)
-            cr_adj = _adjust_correct_ratio_like_last_year(cr, is_paired=is_paired, is_symmetric=is_symmetric)
+            cr_adj = _adjust_correct_ratio_like_last_year(
+                cr, is_paired=is_paired, is_symmetric=is_symmetric
+            )
         else:
             cr_adj = float("nan")
     else:
@@ -420,10 +446,10 @@ def _maybe_make_plots(
     eval_protocol: str,
 ) -> None:
     """plots_mode:
-      - none
-      - all (ALL_TASKS + per-task)
-      - alltasks (только ALL_TASKS)
-      - tasks (только per-task)
+    - none
+    - all (ALL_TASKS + per-task)
+    - alltasks (только ALL_TASKS)
+    - tasks (только per-task)
     """
     if plots_mode == "none":
         return
@@ -434,7 +460,7 @@ def _maybe_make_plots(
     tasks = use_tasks if use_tasks else all_tasks
     tasks = [t for t in tasks if t in all_tasks]
 
-    single_task = (len(tasks) == 1)
+    single_task = len(tasks) == 1
 
     stem = os.path.splitext(os.path.basename(metric_path))[0]
 
@@ -447,24 +473,47 @@ def _maybe_make_plots(
         )
 
     if plots_mode in {"all", "alltasks"}:
-        x, y, info = _compute_pair_cloud(metric_path, downstream, task=None, eval_protocol=eval_protocol)
+        x, y, info = _compute_pair_cloud(
+            metric_path, downstream, task=None, eval_protocol=eval_protocol
+        )
         out = os.path.join(plots_dir, f"{_safe_filename(stem)}__ALLTASKS.{plots_ext}")
-        _plot_scatter(x, y, title=f"{stem} | ALL TASKS | {eval_protocol}", out_path=out, subtitle=_subtitle(info))
+        _plot_scatter(
+            x,
+            y,
+            title=f"{stem} | ALL TASKS | {eval_protocol}",
+            out_path=out,
+            subtitle=_subtitle(info),
+        )
 
     if plots_mode in {"all", "tasks"}:
         if single_task:
             return
         for t in tasks:
-            x, y, info = _compute_pair_cloud(metric_path, downstream, task=t, eval_protocol=eval_protocol)
-            out = os.path.join(plots_dir, f"{_safe_filename(stem)}__task_{_safe_filename(str(t))}.{plots_ext}")
-            _plot_scatter(x, y, title=f"{stem} | task={t} | {eval_protocol}", out_path=out, subtitle=_subtitle(info))
+            x, y, info = _compute_pair_cloud(
+                metric_path, downstream, task=t, eval_protocol=eval_protocol
+            )
+            out = os.path.join(
+                plots_dir,
+                f"{_safe_filename(stem)}__task_{_safe_filename(str(t))}.{plots_ext}",
+            )
+            _plot_scatter(
+                x,
+                y,
+                title=f"{stem} | task={t} | {eval_protocol}",
+                out_path=out,
+                subtitle=_subtitle(info),
+            )
 
 
 # ================================================================
 # CSV / Markdown-отчёты
 # ================================================================
 
-def save_csv(out_csv: str, reports: List[Tuple[str, Dict[str, Any], List[TaskEval], Dict[str, float]]]) -> None:
+
+def save_csv(
+    out_csv: str,
+    reports: List[Tuple[str, Dict[str, Any], List[TaskEval], Dict[str, float]]],
+) -> None:
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     # Плоская таблица: одна строка на метрику, агрегаты по задачам
@@ -498,7 +547,10 @@ def save_csv(out_csv: str, reports: List[Tuple[str, Dict[str, Any], List[TaskEva
             w.writerow(row)
 
 
-def save_md(out_md: str, reports: List[Tuple[str, Dict[str, Any], List[TaskEval], Dict[str, float]]]) -> None:
+def save_md(
+    out_md: str,
+    reports: List[Tuple[str, Dict[str, Any], List[TaskEval], Dict[str, float]]],
+) -> None:
     os.makedirs(os.path.dirname(out_md), exist_ok=True)
 
     # Простая таблица Markdown
@@ -516,19 +568,62 @@ def save_md(out_md: str, reports: List[Tuple[str, Dict[str, Any], List[TaskEval]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Оценить матрицы метрик эмбеддингов по downstream-оценкам.")
-    parser.add_argument("--experiment_dir", type=str, default="", help="Если задано, использовать стандартную структуру эксперимента внутри этой папки.")
-    parser.add_argument("--metrics_dir", type=str, default="", help="Папка с матрицами метрик (*.npz). Если пусто, путь берётся из --experiment_dir.")
+    parser = argparse.ArgumentParser(
+        description="Оценить матрицы метрик эмбеддингов по downstream-оценкам."
+    )
+    parser.add_argument(
+        "--experiment_dir",
+        type=str,
+        default="",
+        help="Если задано, использовать стандартную структуру эксперимента внутри этой папки.",
+    )
+    parser.add_argument(
+        "--metrics_dir",
+        type=str,
+        default="",
+        help="Папка с матрицами метрик (*.npz). Если пусто, путь берётся из --experiment_dir.",
+    )
     parser.add_argument("--downstream_json", type=str, required=True)
-    parser.add_argument("--out_csv", type=str, default="", help="Путь к выходному CSV. Если пусто, путь берётся из --experiment_dir.")
-    parser.add_argument("--tasks", type=str, default="", help="Имена задач через запятую для использования (пусто = все задачи).")
-    parser.add_argument("--out_md", type=str, default="", help="Необязательный путь для сохранения сводной таблицы в Markdown.")
-    parser.add_argument("--eval_protocol", type=str, default="delta_signed", choices=["delta_signed", "delta_abs"],
-                        help="Как строить supervision из downstream: delta_signed использует упорядоченные пары и Δacc(B)-Δacc(A); delta_abs использует неупорядоченные пары и |Δacc|.")
+    parser.add_argument(
+        "--out_csv",
+        type=str,
+        default="",
+        help="Путь к выходному CSV. Если пусто, путь берётся из --experiment_dir.",
+    )
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        default="",
+        help="Имена задач через запятую для использования (пусто = все задачи).",
+    )
+    parser.add_argument(
+        "--out_md",
+        type=str,
+        default="",
+        help="Необязательный путь для сохранения сводной таблицы в Markdown.",
+    )
+    parser.add_argument(
+        "--eval_protocol",
+        type=str,
+        default="delta_signed",
+        choices=["delta_signed", "delta_abs"],
+        help="Как строить supervision из downstream: delta_signed использует упорядоченные пары и Δacc(B)-Δacc(A); delta_abs использует неупорядоченные пары и |Δacc|.",
+    )
 
     # Построение графиков (необязательно)
-    parser.add_argument("--plots_dir", type=str, default="", help="Если задано, дополнительно сохранять scatter-графики в эту папку.")
-    parser.add_argument("--plots_ext", type=str, default="png", choices=["png", "pdf", "svg"], help="Расширение файлов графиков.")
+    parser.add_argument(
+        "--plots_dir",
+        type=str,
+        default="",
+        help="Если задано, дополнительно сохранять scatter-графики в эту папку.",
+    )
+    parser.add_argument(
+        "--plots_ext",
+        type=str,
+        default="png",
+        choices=["png", "pdf", "svg"],
+        help="Расширение файлов графиков.",
+    )
     parser.add_argument(
         "--plots_mode",
         type=str,
@@ -544,16 +639,18 @@ def main():
 
     if args.experiment_dir:
         if not args.metrics_dir:
-            args.metrics_dir = os.path.join(args.experiment_dir, 'metric_matrices')
+            args.metrics_dir = os.path.join(args.experiment_dir, "metric_matrices")
         if not args.out_csv:
             # Пытаемся получить стабильное имя из downstream_json (например, cifar10_linear_probe.json -> cifar10_eval.csv)
             stem = os.path.splitext(os.path.basename(args.downstream_json))[0]
-            dataset = stem.split('_')[0] if stem else 'eval'
-            args.out_csv = os.path.join(args.experiment_dir, 'reports', f'{dataset}_eval.csv')
+            dataset = stem.split("_")[0] if stem else "eval"
+            args.out_csv = os.path.join(
+                args.experiment_dir, "reports", f"{dataset}_eval.csv"
+            )
         if args.plots_dir == "":
-            args.plots_dir = os.path.join(args.experiment_dir, 'plots')
+            args.plots_dir = os.path.join(args.experiment_dir, "plots")
         # Сохраняем копию downstream_json внутри эксперимента для воспроизводимости
-        dstdir = os.path.join(args.experiment_dir, 'downstream')
+        dstdir = os.path.join(args.experiment_dir, "downstream")
         os.makedirs(dstdir, exist_ok=True)
         dst = os.path.join(dstdir, os.path.basename(args.downstream_json))
         try:
@@ -563,13 +660,15 @@ def main():
             pass
 
     if not args.metrics_dir:
-        raise ValueError('Нужно указать либо --metrics_dir, либо --experiment_dir.')
+        raise ValueError("Нужно указать либо --metrics_dir, либо --experiment_dir.")
     if not args.out_csv:
-        raise ValueError('Нужно указать либо --out_csv, либо --experiment_dir.')
+        raise ValueError("Нужно указать либо --out_csv, либо --experiment_dir.")
 
     downstream = load_downstream_table(args.downstream_json)
 
-    use_tasks = [t.strip() for t in args.tasks.split(",") if t.strip()] if args.tasks else None
+    use_tasks = (
+        [t.strip() for t in args.tasks.split(",") if t.strip()] if args.tasks else None
+    )
 
     # Метрики = все .npz в metrics_dir
     files = [f for f in os.listdir(args.metrics_dir) if f.endswith(".npz")]
@@ -587,21 +686,35 @@ def main():
 
     for fname in chosen:
         path = os.path.join(args.metrics_dir, fname)
-        metric_file, meta, per_task, summary = eval_one_metric(path, downstream, use_tasks=use_tasks, eval_protocol=args.eval_protocol)
+        metric_file, meta, per_task, summary = eval_one_metric(
+            path, downstream, use_tasks=use_tasks, eval_protocol=args.eval_protocol
+        )
         reports.append((metric_file, meta, per_task, summary))
 
         print(f"Метрика: {metric_file}")
         print(f"  pairs_total: {summary['pairs_total']}, tasks: {summary['tasks']}")
-        print(f"  meta: is_paired={meta.get('is_paired')}, is_symmetric={meta.get('is_symmetric')}, pair_agg={meta.get('pair_agg')}")
+        print(
+            f"  meta: is_paired={meta.get('is_paired')}, is_symmetric={meta.get('is_symmetric')}, pair_agg={meta.get('pair_agg')}"
+        )
         print(f"  Spearman (среднее по задачам): {summary['spearman_mean']:.4f}")
         print(f"  Pearson  (среднее по задачам): {summary['pearson_mean']:.4f}")
         print(f"  Kendall  (среднее по задачам): {summary['kendall_mean']:.4f}")
-        print(f"  correct_ratio_adjusted_mean: {summary['correct_ratio_adjusted_mean']:.4f}")
+        print(
+            f"  correct_ratio_adjusted_mean: {summary['correct_ratio_adjusted_mean']:.4f}"
+        )
         print("-" * 100)
 
         # Графики
         if args.plots_dir:
-            _maybe_make_plots(path, downstream, plots_dir=args.plots_dir, plots_ext=args.plots_ext, plots_mode=args.plots_mode, use_tasks=use_tasks, eval_protocol=args.eval_protocol)
+            _maybe_make_plots(
+                path,
+                downstream,
+                plots_dir=args.plots_dir,
+                plots_ext=args.plots_ext,
+                plots_mode=args.plots_mode,
+                use_tasks=use_tasks,
+                eval_protocol=args.eval_protocol,
+            )
 
     save_csv(args.out_csv, reports)
     print(f"\nСохранён CSV: {args.out_csv}")

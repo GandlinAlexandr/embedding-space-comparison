@@ -24,6 +24,7 @@ class ModelSpec:
     - extractor_id: строка для логов и воспроизводимости
     - apply_extractor: функция, превращающая модель в экстрактор признаков
     """
+
     base_name: str
     extractor_id: str
     apply_extractor: Callable[[torch.nn.Module], torch.nn.Module]
@@ -128,7 +129,9 @@ def get_model(model_name: str) -> Tuple[torch.nn.Module, ModelSpec]:
     """
     name = model_name.lower()
     if name not in _REGISTRY:
-        raise ValueError(f"Неизвестная модель: {model_name}. Доступные варианты: {available_models()}")
+        raise ValueError(
+            f"Неизвестная модель: {model_name}. Доступные варианты: {available_models()}"
+        )
 
     spec = _REGISTRY[name]
 

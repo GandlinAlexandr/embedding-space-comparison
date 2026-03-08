@@ -53,6 +53,7 @@ from configs.metric_configs import get_embedding_metric_configs
 # 0) Вспомогательные функции: загрузка эмбеддингов
 # ============================================================
 
+
 def _load_embeddings(path: str) -> np.ndarray:
     """
     Загружает эмбеддинги из .npy или .npz в массив float32 формы (N, D).
@@ -96,6 +97,7 @@ def _list_models(embeddings_dir: str) -> Tuple[List[str], Dict[str, str]]:
 # 1) RankMe (мягкий ранг) и метрика локального ранга отображения
 # ============================================================
 
+
 def rankme(s: np.ndarray) -> float:
     norm_1 = np.sum(np.abs(s))
     p_k = np.abs(s) / (norm_1 + 1e-10)
@@ -113,10 +115,14 @@ def _solve_local_linear_map_and_rank(Xc: np.ndarray, Yc: np.ndarray) -> float:
     return rankme(s)
 
 
-def _rff_features(X: np.ndarray, n_features: int = 256, gamma: float = 1.0, seed: int = 42) -> np.ndarray:
+def _rff_features(
+    X: np.ndarray, n_features: int = 256, gamma: float = 1.0, seed: int = 42
+) -> np.ndarray:
     rng = np.random.RandomState(seed)
     d = X.shape[1]
-    W = rng.normal(loc=0.0, scale=np.sqrt(2 * gamma), size=(d, n_features)).astype(np.float32)
+    W = rng.normal(loc=0.0, scale=np.sqrt(2 * gamma), size=(d, n_features)).astype(
+        np.float32
+    )
     b = rng.uniform(low=0.0, high=2 * np.pi, size=(n_features,)).astype(np.float32)
     Z = np.sqrt(2.0 / n_features) * np.cos(X @ W + b)
     return Z.astype(np.float32)
@@ -125,6 +131,7 @@ def _rff_features(X: np.ndarray, n_features: int = 256, gamma: float = 1.0, seed
 # ============================================================
 # 2) Разбор конфигов (устойчивый к текущей схеме именования)
 # ============================================================
+
 
 @dataclass(frozen=True)
 class MetricSpec:
@@ -182,13 +189,21 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     m = re.search(r"linear_knn_k(\d+)", lower)
     if m:
         k = int(m.group(1))
-        return MetricSpec(name=name, kind="linear_knn", pair_agg=pair_agg, k=k, n_centers=n_centers)
+        return MetricSpec(
+            name=name, kind="linear_knn", pair_agg=pair_agg, k=k, n_centers=n_centers
+        )
 
     # linear epsilon
     m = re.search(r"linear_eps_percentile_(\d+)", lower)
     if m:
         p = int(m.group(1))
-        return MetricSpec(name=name, kind="linear_eps", pair_agg=pair_agg, eps_percentile=p, n_centers=n_centers)
+        return MetricSpec(
+            name=name,
+            kind="linear_eps",
+            pair_agg=pair_agg,
+            eps_percentile=p,
+            n_centers=n_centers,
+        )
 
     # multiscale knn
     m = re.search(r"multiscale_knn_(mean|median|min|max)", lower)
@@ -205,7 +220,14 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                     k_list = None
         if k_list is None:
             k_list = (5, 10, 20, 40)
-        return MetricSpec(name=name, kind="multiscale_knn", pair_agg=pair_agg, k_list=k_list, aggregator=agg, n_centers=n_centers)
+        return MetricSpec(
+            name=name,
+            kind="multiscale_knn",
+            pair_agg=pair_agg,
+            k_list=k_list,
+            aggregator=agg,
+            n_centers=n_centers,
+        )
 
     # rff knn
     m = re.search(r"rff_knn_k(\d+)", lower)
@@ -239,13 +261,16 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
 # 3) Кэш окрестностей для заданной модели (центры + соседи)
 # ============================================================
 
+
 @dataclass
 class NeighborCache:
-    centers: np.ndarray               # (C, D)
-    knn: Dict[int, np.ndarray]        # k -> (C, k) индексы
-    eps: Dict[int, np.ndarray]        # percentile -> список индексов, упакованный в object-массив
-    X_norm: np.ndarray                # (N, D) нормализованные данные
-    eps_values: Dict[int, float]      # percentile -> скалярный eps
+    centers: np.ndarray  # (C, D)
+    knn: Dict[int, np.ndarray]  # k -> (C, k) индексы
+    eps: Dict[
+        int, np.ndarray
+    ]  # percentile -> список индексов, упакованный в object-массив
+    X_norm: np.ndarray  # (N, D) нормализованные данные
+    eps_values: Dict[int, float]  # percentile -> скалярный eps
 
 
 def _zscore_rows(X: np.ndarray) -> np.ndarray:
@@ -315,7 +340,7 @@ def _build_neighbor_cache(
         #
         D = cdist(centers, Xn, metric="euclidean")
         for p in [spec.eps_percentile]:
-            mask = (D <= eps_val)
+            mask = D <= eps_val
             neigh = []
             for r in range(mask.shape[0]):
                 neigh.append(np.where(mask[r])[0].astype(np.int32))
@@ -334,6 +359,7 @@ def _build_neighbor_cache(
 # 4) Направленная метрика m(X->Y) для пары
 # ============================================================
 
+
 def _metric_directed_for_pair(
     spec: MetricSpec,
     X: np.ndarray,
@@ -351,8 +377,12 @@ def _metric_directed_for_pair(
     Yn = _zscore_rows(Y)
 
     if spec.kind == "rff_knn":
-        Xn = _rff_features(Xn, n_features=spec.rff_n_features, gamma=spec.rff_gamma, seed=spec.rff_seed)
-        Yn = _rff_features(Yn, n_features=spec.rff_n_features, gamma=spec.rff_gamma, seed=spec.rff_seed)
+        Xn = _rff_features(
+            Xn, n_features=spec.rff_n_features, gamma=spec.rff_gamma, seed=spec.rff_seed
+        )
+        Yn = _rff_features(
+            Yn, n_features=spec.rff_n_features, gamma=spec.rff_gamma, seed=spec.rff_seed
+        )
 
     vals = []
 
@@ -410,17 +440,24 @@ def _metric_directed_for_pair(
 # 5) Вспомогательные функции для инкрементального ввода-вывода (.npz)
 # ============================================================
 
-def _load_existing_metric_npz(path: str) -> Tuple[np.ndarray, List[str], Dict[str, Any]]:
+
+def _load_existing_metric_npz(
+    path: str,
+) -> Tuple[np.ndarray, List[str], Dict[str, Any]]:
     data = np.load(path, allow_pickle=True)
     if "matrix" in data.files:
         M = np.asarray(data["matrix"], dtype=np.float32)
     elif "scores" in data.files:
         M = np.asarray(data["scores"], dtype=np.float32)
     else:
-        raise KeyError(f"В существующем файле метрики нет ни 'matrix', ни 'scores': {path}")
+        raise KeyError(
+            f"В существующем файле метрики нет ни 'matrix', ни 'scores': {path}"
+        )
 
     if "model_names" not in data.files:
-        raise KeyError(f"В существующем файле метрики отсутствует 'model_names': {path}")
+        raise KeyError(
+            f"В существующем файле метрики отсутствует 'model_names': {path}"
+        )
     names = list(data["model_names"].tolist())
 
     meta: Dict[str, Any] = {}
@@ -480,25 +517,55 @@ def _extend_matrix_with_old_block(M_old: np.ndarray, n_total: int) -> np.ndarray
 # 6) Основной запуск
 # ============================================================
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Вычислить попарные метрики эмбеддингов для всех файлов моделей.")
-    parser.add_argument("--embeddings_dir", type=str, required=True, help="Папка с эмбеддингами моделей (.npy/.npz).")
-    parser.add_argument("--experiment_dir", type=str, default="", help="Если задано, записывать результаты в стандартную структуру внутри этой папки эксперимента.")
-    parser.add_argument("--out_dir", type=str, default="", help="Куда сохранять вычисленные матрицы метрик (.npz). Если пусто, путь берётся из --experiment_dir.")
-    parser.add_argument("--include", type=str, default="", help="Имена конфигов для включения через запятую (пусто = все).")
-    parser.add_argument("--exclude", type=str, default="", help="Имена конфигов для исключения через запятую.")
-    parser.add_argument("--seed", type=int, default=42, help="Случайный seed для подвыборки строк.")
+    parser = argparse.ArgumentParser(
+        description="Вычислить попарные метрики эмбеддингов для всех файлов моделей."
+    )
+    parser.add_argument(
+        "--embeddings_dir",
+        type=str,
+        required=True,
+        help="Папка с эмбеддингами моделей (.npy/.npz).",
+    )
+    parser.add_argument(
+        "--experiment_dir",
+        type=str,
+        default="",
+        help="Если задано, записывать результаты в стандартную структуру внутри этой папки эксперимента.",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="",
+        help="Куда сохранять вычисленные матрицы метрик (.npz). Если пусто, путь берётся из --experiment_dir.",
+    )
+    parser.add_argument(
+        "--include",
+        type=str,
+        default="",
+        help="Имена конфигов для включения через запятую (пусто = все).",
+    )
+    parser.add_argument(
+        "--exclude",
+        type=str,
+        default="",
+        help="Имена конфигов для исключения через запятую.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Случайный seed для подвыборки строк."
+    )
     parser.add_argument(
         "--incremental",
         action="store_true",
-        help="Если флаг задан и файл метрики существует, расширить его и вычислить только отсутствующие пары (старый блок не трогать)."
+        help="Если флаг задан и файл метрики существует, расширить его и вычислить только отсутствующие пары (старый блок не трогать).",
     )
     args = parser.parse_args()
 
     if not args.out_dir:
         if not args.experiment_dir:
-            raise ValueError('Нужно указать либо --out_dir, либо --experiment_dir.')
-        args.out_dir = os.path.join(args.experiment_dir, 'metric_matrices')
+            raise ValueError("Нужно указать либо --out_dir, либо --experiment_dir.")
+        args.out_dir = os.path.join(args.experiment_dir, "metric_matrices")
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -509,8 +576,16 @@ def main():
 
     cfgs = get_embedding_metric_configs()
 
-    include = [x.strip() for x in args.include.split(",") if x.strip()] if args.include else []
-    exclude = set([x.strip() for x in args.exclude.split(",") if x.strip()]) if args.exclude else set()
+    include = (
+        [x.strip() for x in args.include.split(",") if x.strip()]
+        if args.include
+        else []
+    )
+    exclude = (
+        set([x.strip() for x in args.exclude.split(",") if x.strip()])
+        if args.exclude
+        else set()
+    )
 
     chosen = []
     for name in cfgs.keys():
@@ -521,7 +596,9 @@ def main():
         chosen.append(name)
 
     if not chosen:
-        raise RuntimeError("Не выбрано ни одного конфига метрик. Проверь --include/--exclude.")
+        raise RuntimeError(
+            "Не выбрано ни одного конфига метрик. Проверь --include/--exclude."
+        )
 
     print(f"\nБудет вычислено {len(chosen)} конфигураций метрик:")
     for name in chosen:
@@ -537,7 +614,9 @@ def main():
             N0 = X.shape[0]
         else:
             if X.shape[0] != N0:
-                raise RuntimeError(f"У всех эмбеддингов должно совпадать N. У {m}: {X.shape[0]} против {N0}")
+                raise RuntimeError(
+                    f"У всех эмбеддингов должно совпадать N. У {m}: {X.shape[0]} против {N0}"
+                )
 
     # Необязательная подвыборка,
     # делаем ОДИН общий индекс для всех моделей, чтобы пары были сопоставимы.
@@ -560,7 +639,11 @@ def main():
     # Вычисление отдельно для каждой метрики.
     for name in chosen:
         cfg = cfgs[name]
-        spec = _infer_metric_spec(name, cfg.get("meta", {}) if isinstance(cfg, dict) else cfg, default_n_centers=200)
+        spec = _infer_metric_spec(
+            name,
+            cfg.get("meta", {}) if isinstance(cfg, dict) else cfg,
+            default_n_centers=200,
+        )
 
         out_path = os.path.join(args.out_dir, f"{name}.npz")
         # ------------------------------------------------------------
@@ -574,7 +657,9 @@ def main():
 
         def get_cache_for_model_i(model_i: str) -> NeighborCache:
             if model_i not in caches:
-                caches[model_i] = _build_neighbor_cache(embeddings[model_i], spec, seed=args.seed)
+                caches[model_i] = _build_neighbor_cache(
+                    embeddings[model_i], spec, seed=args.seed
+                )
             return caches[model_i]
 
         # ============================================================
@@ -590,14 +675,22 @@ def main():
             # Расширить матрицу (старый блок копируется как есть)
             out_matrix = _extend_matrix_with_old_block(M_old, n_total=len(model_names))
 
-            print(f"\n[INCREMENTAL] Расширяем существующий файл метрики: {os.path.basename(out_path)}")
-            print(f"[INCREMENTAL] Старые модели: {len(names_old)} | Текущие модели: {len(model_names_current)} | Всего: {len(model_names)}")
+            print(
+                f"\n[INCREMENTAL] Расширяем существующий файл метрики: {os.path.basename(out_path)}"
+            )
+            print(
+                f"[INCREMENTAL] Старые модели: {len(names_old)} | Текущие модели: {len(model_names_current)} | Всего: {len(model_names)}"
+            )
             if len(model_names) == len(names_old):
-                print("[INCREMENTAL] Новых моделей не обнаружено; файл будет только (пере)сохранён как есть (без пересчёта).")
+                print(
+                    "[INCREMENTAL] Новых моделей не обнаружено; файл будет только (пере)сохранён как есть (без пересчёта)."
+                )
         else:
             # Обычный режим: используем только текущие модели
             model_names = list(model_names_current)
-            out_matrix = np.full((len(model_names), len(model_names)), np.nan, dtype=np.float32)
+            out_matrix = np.full(
+                (len(model_names), len(model_names)), np.nan, dtype=np.float32
+            )
 
         # ============================================================
         # Вычисление значений
@@ -626,18 +719,24 @@ def main():
                         continue
 
                     # Если вычисления уже сделаны (с обеих сторон), ничего не делаем.
-                    if not np.isnan(out_matrix[i, j]) and not np.isnan(out_matrix[j, i]):
+                    if not np.isnan(out_matrix[i, j]) and not np.isnan(
+                        out_matrix[j, i]
+                    ):
                         continue
 
                     # Вычисляем в обоих направлениях
                     Yj = embeddings[mj]
                     # m(i->j)
-                    mij = _metric_directed_for_pair(spec, Xi, Yj, cache_i, seed=args.seed)
+                    mij = _metric_directed_for_pair(
+                        spec, Xi, Yj, cache_i, seed=args.seed
+                    )
 
                     # m(j->i)
                     Xj = embeddings[mj]
                     cache_j = get_cache_for_model_i(mj)
-                    mji = _metric_directed_for_pair(spec, Xj, Xi, cache_j, seed=args.seed)
+                    mji = _metric_directed_for_pair(
+                        spec, Xj, Xi, cache_j, seed=args.seed
+                    )
 
                     aij = np.float32(mij - mji)
                     out_matrix[i, j] = aij
@@ -666,15 +765,21 @@ def main():
                         continue
 
                     # Если вычисления уже сделаны (с обеих сторон), ничего не делаем.
-                    if not np.isnan(out_matrix[i, j]) and not np.isnan(out_matrix[j, i]):
+                    if not np.isnan(out_matrix[i, j]) and not np.isnan(
+                        out_matrix[j, i]
+                    ):
                         continue
 
                     Yj = embeddings[mj]
-                    mij = _metric_directed_for_pair(spec, Xi, Yj, cache_i, seed=args.seed)
+                    mij = _metric_directed_for_pair(
+                        spec, Xi, Yj, cache_i, seed=args.seed
+                    )
 
                     Xj = embeddings[mj]
                     cache_j = get_cache_for_model_i(mj)
-                    mji = _metric_directed_for_pair(spec, Xj, Xi, cache_j, seed=args.seed)
+                    mji = _metric_directed_for_pair(
+                        spec, Xj, Xi, cache_j, seed=args.seed
+                    )
 
                     sij = np.float32(0.5 * (mij + mji))
                     out_matrix[i, j] = sij
@@ -697,7 +802,9 @@ def main():
                     if not np.isnan(out_matrix[i, j]):
                         continue
                     Yj = embeddings[mj]
-                    val = _metric_directed_for_pair(spec, Xi, Yj, cache_i, seed=args.seed)
+                    val = _metric_directed_for_pair(
+                        spec, Xi, Yj, cache_i, seed=args.seed
+                    )
                     out_matrix[i, j] = np.float32(val)
 
         # Флаги:

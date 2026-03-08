@@ -105,7 +105,9 @@ def _train_probe(
 
     ds = TensorDataset(X_train, y_train)
     g = _make_torch_generator(seed)
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, generator=g, num_workers=num_workers)
+    loader = DataLoader(
+        ds, batch_size=batch_size, shuffle=True, generator=g, num_workers=num_workers
+    )
 
     best_val = -1.0
     bad = 0
@@ -164,7 +166,11 @@ def _eval_probe_holdout(
     n_classes = int(np.max(y) + 1)
 
     return _train_probe(
-        X_train_t, y_train_t, X_val_t, y_val_t, n_classes,
+        X_train_t,
+        y_train_t,
+        X_val_t,
+        y_val_t,
+        n_classes,
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
@@ -209,7 +215,11 @@ def _eval_probe_train_test(
     n_classes = int(np.max(y_train) + 1)
 
     best_val = _train_probe(
-        X_tr_t, y_tr_t, X_val_t, y_val_t, n_classes,
+        X_tr_t,
+        y_tr_t,
+        X_val_t,
+        y_val_t,
+        n_classes,
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
@@ -234,63 +244,123 @@ def main():
     # Два режима:
     # 1) Отложенный режим: embeddings_dir содержит ОДНО разделение, мы выполняем разделение на обучающую и валидационную выборки внутри него.
     # 2) Обучающий/тестовый режим: train_embeddings_dir + test_embeddings_dir.
-    parser.add_argument("--embeddings_dir", type=str, default=None,
-                        help="Режим holdout: папка с эмбеддингами моделей для одного сплита.")
-    parser.add_argument("--train_embeddings_dir", type=str, default=None,
-                        help="Режим train/test: папка с TRAIN-эмбеддингами моделей.")
-    parser.add_argument("--test_embeddings_dir", type=str, default=None,
-                        help="Режим train/test: папка с TEST-эмбеддингами моделей.")
+    parser.add_argument(
+        "--embeddings_dir",
+        type=str,
+        default=None,
+        help="Режим holdout: папка с эмбеддингами моделей для одного сплита.",
+    )
+    parser.add_argument(
+        "--train_embeddings_dir",
+        type=str,
+        default=None,
+        help="Режим train/test: папка с TRAIN-эмбеддингами моделей.",
+    )
+    parser.add_argument(
+        "--test_embeddings_dir",
+        type=str,
+        default=None,
+        help="Режим train/test: папка с TEST-эмбеддингами моделей.",
+    )
 
-    parser.add_argument("--labels_path", type=str, required=True,
-                        help="Путь к меткам (.npy или .npz) в том же порядке, что и эмбеддинги.")
+    parser.add_argument(
+        "--labels_path",
+        type=str,
+        required=True,
+        help="Путь к меткам (.npy или .npz) в том же порядке, что и эмбеддинги.",
+    )
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--probe_epochs", type=int, default=50,
-                        help="Максимальное число эпох обучения MLP-probe.")
-    parser.add_argument("--probe_batch_size", type=int, default=256,
-                        help="Размер батча для обучения MLP-probe.")
-    parser.add_argument("--probe_lr", type=float, default=1e-3,
-                        help="Скорость обучения для MLP-probe.")
-    parser.add_argument("--probe_weight_decay", type=float, default=5e-4,
-                        help="Weight decay для MLP-probe.")
-    parser.add_argument("--probe_dropout", type=float, default=0.3,
-                        help="Доля dropout для MLP-probe.")
+    parser.add_argument(
+        "--probe_epochs",
+        type=int,
+        default=50,
+        help="Максимальное число эпох обучения MLP-probe.",
+    )
+    parser.add_argument(
+        "--probe_batch_size",
+        type=int,
+        default=256,
+        help="Размер батча для обучения MLP-probe.",
+    )
+    parser.add_argument(
+        "--probe_lr", type=float, default=1e-3, help="Скорость обучения для MLP-probe."
+    )
+    parser.add_argument(
+        "--probe_weight_decay",
+        type=float,
+        default=5e-4,
+        help="Weight decay для MLP-probe.",
+    )
+    parser.add_argument(
+        "--probe_dropout", type=float, default=0.3, help="Доля dropout для MLP-probe."
+    )
 
-    parser.add_argument("--probe_val_size", type=float, default=0.1,
-                        help="Размер валидационной части, выделяемой из TRAIN.")
-    parser.add_argument("--probe_patience", type=int, default=7,
-                        help="Терпение early stopping по валидационной точности.")
-    parser.add_argument("--probe_min_delta", type=float, default=0.0,
-                        help="Минимальное улучшение val accuracy для сброса счётчика терпения.")
+    parser.add_argument(
+        "--probe_val_size",
+        type=float,
+        default=0.1,
+        help="Размер валидационной части, выделяемой из TRAIN.",
+    )
+    parser.add_argument(
+        "--probe_patience",
+        type=int,
+        default=7,
+        help="Терпение early stopping по валидационной точности.",
+    )
+    parser.add_argument(
+        "--probe_min_delta",
+        type=float,
+        default=0.0,
+        help="Минимальное улучшение val accuracy для сброса счётчика терпения.",
+    )
 
-    parser.add_argument("--num_workers", type=int, default=0,
-                        help="num_workers для DataLoader. По умолчанию 0 для детерминизма на разных платформах.")
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="num_workers для DataLoader. По умолчанию 0 для детерминизма на разных платформах.",
+    )
 
-    parser.add_argument("--experiment_dir", type=str, default="",
-                        help="Если задано, результаты будут записаны в стандартную структуру внутри experiment_dir.")
-    parser.add_argument("--out_json", type=str, default="",
-                        help="Выходной json-файл с downstream-оценками по моделям. Если пусто, путь выводится из --experiment_dir.")
-    parser.add_argument("--task_name", type=str, default=None,
-                        help="Необязательная метка для логов; на вычисления не влияет.")
+    parser.add_argument(
+        "--experiment_dir",
+        type=str,
+        default="",
+        help="Если задано, результаты будут записаны в стандартную структуру внутри experiment_dir.",
+    )
+    parser.add_argument(
+        "--out_json",
+        type=str,
+        default="",
+        help="Выходной json-файл с downstream-оценками по моделям. Если пусто, путь выводится из --experiment_dir.",
+    )
+    parser.add_argument(
+        "--task_name",
+        type=str,
+        default=None,
+        help="Необязательная метка для логов; на вычисления не влияет.",
+    )
 
     args = parser.parse_args()
 
     if not args.out_json:
         if not args.experiment_dir:
-            raise ValueError('Нужно указать либо --out_json, либо --experiment_dir.')
-        dstdir = os.path.join(args.experiment_dir, 'downstream')
+            raise ValueError("Нужно указать либо --out_json, либо --experiment_dir.")
+        dstdir = os.path.join(args.experiment_dir, "downstream")
         os.makedirs(dstdir, exist_ok=True)
         # Идентификатор набора данных с наилучшими усилиями для имени файла
         if args.embeddings_dir:
             ds = os.path.basename(os.path.normpath(args.embeddings_dir))
         else:
             ds = os.path.basename(os.path.normpath(args.train_embeddings_dir))
-        args.out_json = os.path.join(dstdir, f'{ds}_linear_probe.json')
+        args.out_json = os.path.join(dstdir, f"{ds}_linear_probe.json")
 
     os.makedirs(os.path.dirname(args.out_json), exist_ok=True)
 
-    use_train_test = (args.train_embeddings_dir is not None and args.test_embeddings_dir is not None)
-    use_holdout = (args.embeddings_dir is not None)
+    use_train_test = (
+        args.train_embeddings_dir is not None and args.test_embeddings_dir is not None
+    )
+    use_holdout = args.embeddings_dir is not None
 
     if (use_train_test and use_holdout) or (not use_train_test and not use_holdout):
         raise ValueError(
@@ -311,20 +381,28 @@ def main():
 
         common = sorted(set(train_models.keys()) & set(test_models.keys()))
         if not common:
-            raise RuntimeError("Нет общих моделей между train_embeddings_dir и test_embeddings_dir.")
+            raise RuntimeError(
+                "Нет общих моделей между train_embeddings_dir и test_embeddings_dir."
+            )
 
         for m in tqdm(common, desc="Модели", unit="model"):
             X_train = _load_embeddings_file(train_models[m])
             X_test = _load_embeddings_file(test_models[m])
 
             if X_train.shape[0] != y.shape[0]:
-                raise RuntimeError(f"Несовпадение размера меток: y={y.shape[0]} против X_train={X_train.shape[0]} для модели {m}")
+                raise RuntimeError(
+                    f"Несовпадение размера меток: y={y.shape[0]} против X_train={X_train.shape[0]} для модели {m}"
+                )
             if X_test.shape[0] != y.shape[0]:
-                raise RuntimeError(f"Несовпадение размера меток: y={y.shape[0]} против X_test={X_test.shape[0]} для модели {m}")
+                raise RuntimeError(
+                    f"Несовпадение размера меток: y={y.shape[0]} против X_test={X_test.shape[0]} для модели {m}"
+                )
 
             score = _eval_probe_train_test(
-                X_train, y,
-                X_test, y,
+                X_train,
+                y,
+                X_test,
+                y,
                 val_size=args.probe_val_size,
                 seed=args.seed,
                 device=device,
@@ -344,10 +422,13 @@ def main():
         for m in tqdm(sorted(models.keys()), desc="Модели", unit="model"):
             X = _load_embeddings_file(models[m])
             if X.shape[0] != y.shape[0]:
-                raise RuntimeError(f"Несовпадение размера меток: y={y.shape[0]} против X={X.shape[0]} для модели {m}")
+                raise RuntimeError(
+                    f"Несовпадение размера меток: y={y.shape[0]} против X={X.shape[0]} для модели {m}"
+                )
 
             score = _eval_probe_holdout(
-                X, y,
+                X,
+                y,
                 val_size=args.probe_val_size,
                 seed=args.seed,
                 device=device,

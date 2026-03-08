@@ -112,12 +112,26 @@ def _is_all_nan(series: pd.Series) -> bool:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--eval_csv", required=True, help="CSV с оценкой, полученный из run_evaluate_metrics.py")
+    ap.add_argument(
+        "--eval_csv",
+        required=True,
+        help="CSV с оценкой, полученный из run_evaluate_metrics.py",
+    )
     ap.add_argument("--out_dir", required=True, help="Куда сохранить график")
-    ap.add_argument("--dataset", required=True, help="Имя датасета в заголовке (например, cifar10, imagenet100)")
-    ap.add_argument("--protocol", default="Δacc protocol", help="Подпись протокола в заголовке")
-    ap.add_argument("--title", default="", help="Необязательный дополнительный суффикс заголовка")
-    ap.add_argument("--out_name", default="metrics_summary.png", help="Имя выходного файла (png)")
+    ap.add_argument(
+        "--dataset",
+        required=True,
+        help="Имя датасета в заголовке (например, cifar10, imagenet100)",
+    )
+    ap.add_argument(
+        "--protocol", default="Δacc protocol", help="Подпись протокола в заголовке"
+    )
+    ap.add_argument(
+        "--title", default="", help="Необязательный дополнительный суффикс заголовка"
+    )
+    ap.add_argument(
+        "--out_name", default="metrics_summary.png", help="Имя выходного файла (png)"
+    )
     args = ap.parse_args()
 
     _ensure_dir(args.out_dir)
@@ -127,7 +141,9 @@ def main():
     required = ["metric_file", "spearman_mean", "pearson_mean", "kendall_mean"]
     for c in required:
         if c not in df.columns:
-            raise KeyError(f"Столбец '{c}' не найден в CSV. Доступные столбцы: {list(df.columns)}")
+            raise KeyError(
+                f"Столбец '{c}' не найден в CSV. Доступные столбцы: {list(df.columns)}"
+            )
 
     df = df.copy()
     df["metric"] = df["metric_file"].apply(short_metric_name)
@@ -175,7 +191,9 @@ def main():
         ax1.invert_yaxis()
         ax1.set_xlim(0.0, 1.0)
         ax1.set_xlabel(
-            "Доля правильного ранжирования (с поправкой)" if cr_col == "correct_ratio_adjusted_mean" else "Доля правильного ранжирования"
+            "Доля правильного ранжирования (с поправкой)"
+            if cr_col == "correct_ratio_adjusted_mean"
+            else "Доля правильного ранжирования"
         )
         ax1.set_title("Доля правильного ранжирования")
         ax1.grid(True, axis="x", alpha=0.3)
@@ -194,7 +212,7 @@ def main():
         pe = df["pearson_mean"].to_numpy(dtype=float)
 
         ax2.barh(y - width, sp, height=width, label="Spearman")
-        ax2.barh(y,         ke, height=width, label="Kendall")
+        ax2.barh(y, ke, height=width, label="Kendall")
         ax2.barh(y + width, pe, height=width, label="Pearson")
 
         ax2.set_yticks(y)
@@ -224,7 +242,7 @@ def main():
     pe = df["pearson_mean"].to_numpy(dtype=float)
 
     ax.barh(y - width, sp, height=width, label="Spearman")
-    ax.barh(y,         ke, height=width, label="Kendall")
+    ax.barh(y, ke, height=width, label="Kendall")
     ax.barh(y + width, pe, height=width, label="Pearson")
 
     ax.set_yticks(y)

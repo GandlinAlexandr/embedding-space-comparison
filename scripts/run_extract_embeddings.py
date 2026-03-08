@@ -21,8 +21,14 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from datasets.io import build_dataset, build_loader  # вынесено в отдельный пакет datasets/
-from model_zoo.registry import get_model, available_models  # вынесено в отдельный пакет model_zoo/
+from datasets.io import (
+    build_dataset,
+    build_loader,
+)  # вынесено в отдельный пакет datasets/
+from model_zoo.registry import (
+    get_model,
+    available_models,
+)  # вынесено в отдельный пакет model_zoo/
 
 
 def _subset_indices(n: int, num_samples: int, strategy: str, seed: int) -> np.ndarray:
@@ -39,9 +45,9 @@ def _subset_indices(n: int, num_samples: int, strategy: str, seed: int) -> np.nd
     raise ValueError(f"Неизвестная стратегия подвыборки: {strategy}")
 
 
-def extract_embeddings_from_model(model: torch.nn.Module,
-                                 loader: DataLoader,
-                                 device: torch.device) -> np.ndarray:
+def extract_embeddings_from_model(
+    model: torch.nn.Module, loader: DataLoader, device: torch.device
+) -> np.ndarray:
     model = model.to(device)
     model.eval()
 
@@ -59,7 +65,9 @@ def extract_embeddings_from_model(model: torch.nn.Module,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Извлечь эмбеддинги из torchvision-моделей.")
+    parser = argparse.ArgumentParser(
+        description="Извлечь эмбеддинги из torchvision-моделей."
+    )
     parser.add_argument("--dataset", type=str, default="cifar10")
     parser.add_argument("--split", type=str, default="test", help="train|test")
     parser.add_argument("--data_root", type=str, required=True)
@@ -72,16 +80,24 @@ def main():
         "--models",
         type=str,
         default="resnet18,resnet50,vgg16,vit_b_16,wide_resnet50_2",
-        help=f"Имена моделей через запятую. Доступные варианты: {', '.join(available_models())}"
+        help=f"Имена моделей через запятую. Доступные варианты: {', '.join(available_models())}",
     )
 
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--num_samples", type=int, default=0,
-                        help="Необязательный размер подвыборки (0 = использовать весь сплит).")
-    parser.add_argument("--subset_strategy", type=str, default="random",
-                        help="Стратегия подвыборки (по умолчанию: random).")
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=0,
+        help="Необязательный размер подвыборки (0 = использовать весь сплит).",
+    )
+    parser.add_argument(
+        "--subset_strategy",
+        type=str,
+        default="random",
+        help="Стратегия подвыборки (по умолчанию: random).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -93,7 +109,9 @@ def main():
     dataset = build_dataset(args.dataset, args.data_root, split=args.split)
 
     # Необязательная подвыборка
-    subset_indices = _subset_indices(len(dataset), args.num_samples, args.subset_strategy, args.seed)
+    subset_indices = _subset_indices(
+        len(dataset), args.num_samples, args.subset_strategy, args.seed
+    )
     if len(subset_indices) != len(dataset):
         dataset = Subset(dataset, subset_indices)
 
@@ -104,7 +122,9 @@ def main():
     else:
         print(f"Используется полный сплит: {args.split} (n={len(dataset)})")
 
-    loader = build_loader(dataset, batch_size=args.batch_size, num_workers=args.num_workers)
+    loader = build_loader(
+        dataset, batch_size=args.batch_size, num_workers=args.num_workers
+    )
 
     model_names = [m.strip() for m in args.models.split(",") if m.strip()]
     for model_name in model_names:
