@@ -22,6 +22,9 @@
     </li>
     <li>
       <a href="#технологии">Технологии</a>
+          <li><a href="#лицензия">Лицензия</a></li>
+    <li><a href="#контакты">Контакты</a></li>
+  </ol>
 </details>
 
 
@@ -44,6 +47,20 @@
   * [![Pytorch][Pytorch]][Pytorch-url]
   * [![scikit-learn][scikit-learn]][scikit-learn-url]
 
+
+<p align="right">(<a href="#readme-top">Вернуться к началу</a>)</p>
+
+# Лицензия
+
+Распространяется по лицензии MIT. Дополнительную информацию см. в файле [`LICENSE`][license-url].
+
+<p align="right">(<a href="#readme-top">Вернуться к началу</a>)</p>
+
+# Контакты
+
+Гандлин Александр — [Stepik](https://stepik.org/users/79694206/profile)
+
+Ссылка на проект: [https://github.com/GandlinAlexandr/embedding-space-comparison](https://github.com/GandlinAlexandr/embedding-space-comparison)
 
 <p align="right">(<a href="#readme-top">Вернуться к началу</a>)</p>
 
