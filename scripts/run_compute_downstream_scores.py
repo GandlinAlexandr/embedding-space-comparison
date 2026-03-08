@@ -362,7 +362,6 @@ def main():
             )
             results[m] = float(score)
 
-    # Формат «как ты уже используешь»: model -> {"task": score}
     # Для совместимости оставим task="main", если task_name не задан.
     task = args.task_name if args.task_name else "main"
     out: Dict[str, Dict[str, float]] = {m: {task: float(s)} for m, s in results.items()}
