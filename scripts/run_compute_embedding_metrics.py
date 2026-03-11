@@ -34,11 +34,11 @@ run_compute_embedding_metrics.py
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
-import json
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.linalg import svd
@@ -91,6 +91,80 @@ def _list_models(embeddings_dir: str) -> Tuple[List[str], Dict[str, str]]:
         model_to_path[name] = os.path.join(embeddings_dir, fn)
 
     return sorted(model_to_path.keys()), model_to_path
+
+
+def _model_list_paths(out_dir: str) -> Tuple[str, str]:
+    """
+    Пути к manifest-файлам со списком моделей, лежащим рядом с таблицами метрик.
+    """
+    json_path = os.path.join(out_dir, "model_names.json")
+    txt_path = os.path.join(out_dir, "model_names.txt")
+    return json_path, txt_path
+
+
+def _load_saved_model_list(out_dir: str) -> List[str]:
+    """
+    Загружает ранее сохранённый список моделей из out_dir.
+    Если файла нет — возвращает пустой список.
+    """
+    json_path, txt_path = _model_list_paths(out_dir)
+
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "model_names" in data:
+            names = data["model_names"]
+        else:
+            names = data
+        return [str(x) for x in names]
+
+    if os.path.exists(txt_path):
+        with open(txt_path, "r", encoding="utf-8") as f:
+            names = [line.strip() for line in f if line.strip()]
+        return names
+
+    return []
+
+
+def _save_model_list(out_dir: str, model_names: List[str]) -> None:
+    """
+    Сохраняет список моделей рядом с таблицами метрик.
+    """
+    json_path, txt_path = _model_list_paths(out_dir)
+
+    payload = {"model_names": list(model_names)}
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    with open(txt_path, "w", encoding="utf-8") as f:
+        for name in model_names:
+            f.write(f"{name}\n")
+
+
+def _merge_model_lists_preserve_order(
+    current_names: List[str], saved_names: List[str]
+) -> List[str]:
+    """
+    Объединяет текущий список моделей с уже сохранённым manifest-списком.
+
+    Логика:
+    - сначала сохраняем старый порядок saved_names;
+    - затем в конец дописываем новые модели из current_names, которых раньше не было.
+    """
+    merged: List[str] = []
+    seen = set()
+
+    for name in saved_names:
+        if name not in seen:
+            merged.append(name)
+            seen.add(name)
+
+    for name in current_names:
+        if name not in seen:
+            merged.append(name)
+            seen.add(name)
+
+    return merged
 
 
 # ============================================================
@@ -337,7 +411,6 @@ def _build_neighbor_cache(
         eps_val = float(np.percentile(d, spec.eps_percentile))
         eps_values[spec.eps_percentile] = eps_val
 
-        #
         D = cdist(centers, Xn, metric="euclidean")
         for p in [spec.eps_percentile]:
             mask = D <= eps_val
@@ -378,10 +451,16 @@ def _metric_directed_for_pair(
 
     if spec.kind == "rff_knn":
         Xn = _rff_features(
-            Xn, n_features=spec.rff_n_features, gamma=spec.rff_gamma, seed=spec.rff_seed
+            Xn,
+            n_features=spec.rff_n_features,
+            gamma=spec.rff_gamma,
+            seed=spec.rff_seed,
         )
         Yn = _rff_features(
-            Yn, n_features=spec.rff_n_features, gamma=spec.rff_gamma, seed=spec.rff_seed
+            Yn,
+            n_features=spec.rff_n_features,
+            gamma=spec.rff_gamma,
+            seed=spec.rff_seed,
         )
 
     vals = []
@@ -570,9 +649,26 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     model_names_current, model_to_path = _list_models(args.embeddings_dir)
+
+    # Общий manifest списка моделей в out_dir:
+    # - создаётся автоматически;
+    # - при добавлении новых моделей дополняется;
+    # - лежит рядом с .npz таблицами.
+    saved_model_names = _load_saved_model_list(args.out_dir)
+    manifest_model_names = _merge_model_lists_preserve_order(
+        model_names_current, saved_model_names
+    )
+    _save_model_list(args.out_dir, manifest_model_names)
+
     print(f"Найдено {len(model_names_current)} моделей в embeddings_dir:")
     for m in model_names_current:
         print(f"  - {m}")
+
+    print(
+        f"\nСохранён / обновлён общий список моделей в out_dir: {len(manifest_model_names)}"
+    )
+    for name in manifest_model_names:
+        print(f"  * {name}")
 
     cfgs = get_embedding_metric_configs()
 
@@ -664,13 +760,21 @@ def main():
 
         # ============================================================
         # ИНКРЕМЕНТАЛЬНО: определить имена моделей и инициализировать матрицу
-        # ===========================================================
+        # ============================================================
         if args.incremental and os.path.exists(out_path):
             M_old, names_old, meta_old = _load_existing_metric_npz(out_path)
             _ensure_meta_compatible(meta_old, spec)
 
             # Привязать к старому порядку, добавить новые модели, существующие в embeddings_dir
             model_names = _build_model_list_incremental(model_names_current, names_old)
+
+            # Дополнительно обновляем общий manifest в директории:
+            # если у конкретной таблицы был более старый список, сохраняем его порядок
+            # и дописываем новые модели в конец.
+            manifest_model_names = _merge_model_lists_preserve_order(
+                model_names, _load_saved_model_list(args.out_dir)
+            )
+            _save_model_list(args.out_dir, manifest_model_names)
 
             # Расширить матрицу (старый блок копируется как есть)
             out_matrix = _extend_matrix_with_old_block(M_old, n_total=len(model_names))
@@ -692,12 +796,17 @@ def main():
                 (len(model_names), len(model_names)), np.nan, dtype=np.float32
             )
 
+            manifest_model_names = _merge_model_lists_preserve_order(
+                model_names, _load_saved_model_list(args.out_dir)
+            )
+            _save_model_list(args.out_dir, manifest_model_names)
+
         # ============================================================
         # Вычисление значений
         # - directed: out_matrix — направленная M (может быть несимметричной)
         # - antisym: out_matrix — антисимметричная A
         # - sym: out_matrix — симметричная sim
-        # ===========================================================
+        # ============================================================
 
         if spec.pair_agg == "antisym":
             # out_matrix хранит A. Мы никогда не трогаем старый блок. Вычисляем только NaN.
@@ -818,7 +927,7 @@ def main():
             "is_symmetric": bool(spec.pair_agg in {"antisym", "sym"}),
             "pair_agg": spec.pair_agg,
             "metric_spec": asdict(spec),
-            "metric_config": cfg.get("meta", {}),
+            "metric_config": cfg.get("meta", {}) if isinstance(cfg, dict) else {},
         }
 
         np.savez_compressed(

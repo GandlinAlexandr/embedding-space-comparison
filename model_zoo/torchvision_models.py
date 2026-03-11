@@ -26,6 +26,7 @@ def build_torchvision_model(model_name: str) -> torch.nn.Module:
         ),
         "vgg11": lambda: M.vgg11(weights=M.VGG11_Weights.IMAGENET1K_V1),
         "vgg16": lambda: M.vgg16(weights=M.VGG16_Weights.IMAGENET1K_V1),
+        "vgg19": lambda: M.vgg19(weights=M.VGG19_Weights.IMAGENET1K_V1),
         "densenet121": lambda: M.densenet121(
             weights=M.DenseNet121_Weights.IMAGENET1K_V1
         ),
@@ -33,6 +34,8 @@ def build_torchvision_model(model_name: str) -> torch.nn.Module:
             weights=M.MobileNet_V2_Weights.IMAGENET1K_V1
         ),
         "vit_b_16": lambda: M.vit_b_16(weights=M.ViT_B_16_Weights.IMAGENET1K_V1),
+        "vit_b_32": lambda: M.vit_b_32(weights=M.ViT_B_32_Weights.IMAGENET1K_V1),
+        "vit_l_16": lambda: M.vit_l_16(weights=M.ViT_L_16_Weights.IMAGENET1K_V1),
     }
 
     if name not in factories:

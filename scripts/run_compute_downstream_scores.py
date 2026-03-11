@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
+import re
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -49,6 +51,23 @@ def _load_embeddings_file(path: str) -> np.ndarray:
     raise ValueError(f"Неподдерживаемый файл эмбеддингов: {path}")
 
 
+def _load_labels_file(path: str) -> np.ndarray:
+    if path.endswith(".npy"):
+        return np.asarray(np.load(path), dtype=np.int64)
+    if path.endswith(".npz"):
+        data = np.load(path)
+        if "arr_0" in data:
+            return np.asarray(data["arr_0"], dtype=np.int64)
+        keys = list(data.keys())
+        if len(keys) == 1:
+            return np.asarray(data[keys[0]], dtype=np.int64)
+        for k in ["labels", "y", "targets"]:
+            if k in data:
+                return np.asarray(data[k], dtype=np.int64)
+        return np.asarray(data[keys[0]], dtype=np.int64)
+    raise ValueError(f"Неподдерживаемый файл меток: {path}")
+
+
 def _list_models(embeddings_dir: str) -> Dict[str, str]:
     files = {}
     for fn in os.listdir(embeddings_dir):
@@ -58,6 +77,110 @@ def _list_models(embeddings_dir: str) -> Dict[str, str]:
     if not files:
         raise RuntimeError(f"В папке нет эмбеддингов: {embeddings_dir}")
     return files
+
+
+def _infer_dataset_name_from_path(path: Optional[str]) -> Optional[str]:
+    """
+    Пытается угадать имя датасета по имени папки.
+
+    Примеры:
+    - .../cifar10_train      -> cifar10
+    - .../cifar10_test       -> cifar10
+    - .../cifar10_train_xxx  -> cifar10
+    - .../cifar10            -> cifar10
+    """
+    if not path:
+        return None
+
+    base = os.path.basename(os.path.normpath(path)).lower()
+
+    m = re.match(r"^(.+?)_(train|test)(?:_.*)?$", base)
+    if m:
+        return m.group(1)
+
+    return base
+
+
+def _resolve_dataset_name(
+    dataset_arg: Optional[str],
+    embeddings_dir: Optional[str],
+    train_embeddings_dir: Optional[str],
+    test_embeddings_dir: Optional[str],
+) -> Optional[str]:
+    if dataset_arg:
+        return dataset_arg.lower()
+
+    for p in [embeddings_dir, train_embeddings_dir, test_embeddings_dir]:
+        inferred = _infer_dataset_name_from_path(p)
+        if inferred:
+            return inferred
+
+    return None
+
+
+def _resolve_labels_holdout(
+    *,
+    labels_path: Optional[str],
+    dataset_name: Optional[str],
+    data_root: Optional[str],
+    embeddings_dir: str,
+) -> np.ndarray:
+    """
+    Метки для holdout-режима:
+    - если labels_path задан, грузим из файла;
+    - иначе пытаемся загрузить по (dataset_name, data_root, split), где split
+      выводится из имени папки embeddings_dir:
+        *_train* -> train
+        *_test*  -> test
+      если не удалось — считаем split='test' по умолчанию.
+    """
+    if labels_path:
+        return _load_labels_file(labels_path)
+
+    if not dataset_name or not data_root:
+        raise ValueError(
+            "Если --labels_path не задан, нужно указать --dataset и --data_root "
+            "(или чтобы --dataset можно было вывести из имени папки эмбеддингов)."
+        )
+
+    base = os.path.basename(os.path.normpath(embeddings_dir)).lower()
+    if "_train" in base:
+        split = "train"
+    elif "_test" in base:
+        split = "test"
+    else:
+        # Для режима вида embeddings/cifar10 считаем test по умолчанию
+        split = "test"
+
+    return load_labels(dataset_name, data_root, split).astype(np.int64)
+
+
+def _resolve_labels_train_test(
+    *,
+    labels_path: Optional[str],
+    dataset_name: Optional[str],
+    data_root: Optional[str],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Метки для train/test-режима:
+    - если labels_path задан, считаем это старым совместимым режимом и используем
+      один и тот же массив меток для train и test;
+    - иначе грузим train/test метки отдельно через datasets.io.load_labels.
+    """
+    if labels_path:
+        y = _load_labels_file(labels_path)
+        return y, y
+
+    if not dataset_name or not data_root:
+        raise ValueError(
+            "Для режима --train_embeddings_dir/--test_embeddings_dir без --labels_path "
+            "нужно указать --dataset и --data_root "
+            "(или чтобы --dataset можно было вывести из имени папок эмбеддингов)."
+        )
+
+    y_train = load_labels(dataset_name, data_root, "train").astype(np.int64)
+    y_test = load_labels(dataset_name, data_root, "test").astype(np.int64)
+    return y_train, y_test
 
 
 class MLPProbe(nn.Module):
@@ -80,6 +203,19 @@ def _accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
     return float((pred == y).float().mean().item())
 
 
+@torch.no_grad()
+def _eval_model_accuracy(
+    model: nn.Module,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    device: torch.device,
+) -> float:
+    model.eval()
+    logits = model(X.to(device))
+    return _accuracy(logits, y.to(device))
+
+
 def _train_probe(
     X_train: torch.Tensor,
     y_train: torch.Tensor,
@@ -97,7 +233,7 @@ def _train_probe(
     device: torch.device,
     seed: int,
     num_workers: int,
-) -> float:
+) -> Tuple[nn.Module, float]:
     dim = X_train.shape[1]
     model = MLPProbe(dim, n_classes=n_classes, dropout=dropout).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -111,6 +247,7 @@ def _train_probe(
 
     best_val = -1.0
     bad = 0
+    best_state = copy.deepcopy(model.state_dict())
 
     for _ in range(epochs):
         model.train()
@@ -123,19 +260,20 @@ def _train_probe(
             loss.backward()
             opt.step()
 
-        model.eval()
-        logits_val = model(X_val.to(device))
-        val_acc = _accuracy(logits_val, y_val.to(device))
+        val_acc = _eval_model_accuracy(model, X_val, y_val, device=device)
 
         if val_acc > best_val + min_delta:
             best_val = val_acc
             bad = 0
+            best_state = copy.deepcopy(model.state_dict())
         else:
             bad += 1
             if bad >= patience:
                 break
 
-    return float(best_val)
+    model.load_state_dict(best_state)
+    model.eval()
+    return model, float(best_val)
 
 
 def _eval_probe_holdout(
@@ -165,7 +303,7 @@ def _eval_probe_holdout(
 
     n_classes = int(np.max(y) + 1)
 
-    return _train_probe(
+    _, best_val = _train_probe(
         X_train_t,
         y_train_t,
         X_val_t,
@@ -182,6 +320,8 @@ def _eval_probe_holdout(
         seed=seed,
         num_workers=num_workers,
     )
+
+    return float(best_val)
 
 
 def _eval_probe_train_test(
@@ -211,10 +351,12 @@ def _eval_probe_train_test(
     y_tr_t = torch.from_numpy(y_tr).long()
     X_val_t = torch.from_numpy(X_val)
     y_val_t = torch.from_numpy(y_val).long()
+    X_test_t = torch.from_numpy(X_test)
+    y_test_t = torch.from_numpy(y_test).long()
 
     n_classes = int(np.max(y_train) + 1)
 
-    best_val = _train_probe(
+    model, _ = _train_probe(
         X_tr_t,
         y_tr_t,
         X_val_t,
@@ -232,8 +374,8 @@ def _eval_probe_train_test(
         num_workers=num_workers,
     )
 
-    # На данный момент оценка downstream — это наилучшее достигнутое значение.
-    return float(best_val)
+    test_acc = _eval_model_accuracy(model, X_test_t, y_test_t, device=device)
+    return float(test_acc)
 
 
 def main():
@@ -266,8 +408,21 @@ def main():
     parser.add_argument(
         "--labels_path",
         type=str,
-        required=True,
-        help="Путь к меткам (.npy или .npz) в том же порядке, что и эмбеддинги.",
+        default=None,
+        help="Необязательный путь к меткам (.npy или .npz) в том же порядке, что и эмбеддинги. "
+        "Если не задан, метки будут загружены через datasets.io.load_labels по --dataset и --data_root.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Имя датасета (например, cifar10). Если не задано, будет предпринята попытка вывести его из имени папки эмбеддингов.",
+    )
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        default=None,
+        help="Корневая папка данных для загрузки меток через datasets.io.load_labels.",
     )
     parser.add_argument("--seed", type=int, default=42)
 
@@ -371,7 +526,12 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    y = load_labels(args.labels_path).astype(np.int64)
+    dataset_name = _resolve_dataset_name(
+        args.dataset,
+        args.embeddings_dir,
+        args.train_embeddings_dir,
+        args.test_embeddings_dir,
+    )
 
     results: Dict[str, float] = {}
 
@@ -385,24 +545,30 @@ def main():
                 "Нет общих моделей между train_embeddings_dir и test_embeddings_dir."
             )
 
+        y_train, y_test = _resolve_labels_train_test(
+            labels_path=args.labels_path,
+            dataset_name=dataset_name,
+            data_root=args.data_root,
+        )
+
         for m in tqdm(common, desc="Модели", unit="model"):
             X_train = _load_embeddings_file(train_models[m])
             X_test = _load_embeddings_file(test_models[m])
 
-            if X_train.shape[0] != y.shape[0]:
+            if X_train.shape[0] != y_train.shape[0]:
                 raise RuntimeError(
-                    f"Несовпадение размера меток: y={y.shape[0]} против X_train={X_train.shape[0]} для модели {m}"
+                    f"Несовпадение размера меток: y_train={y_train.shape[0]} против X_train={X_train.shape[0]} для модели {m}"
                 )
-            if X_test.shape[0] != y.shape[0]:
+            if X_test.shape[0] != y_test.shape[0]:
                 raise RuntimeError(
-                    f"Несовпадение размера меток: y={y.shape[0]} против X_test={X_test.shape[0]} для модели {m}"
+                    f"Несовпадение размера меток: y_test={y_test.shape[0]} против X_test={X_test.shape[0]} для модели {m}"
                 )
 
             score = _eval_probe_train_test(
                 X_train,
-                y,
+                y_train,
                 X_test,
-                y,
+                y_test,
                 val_size=args.probe_val_size,
                 seed=args.seed,
                 device=device,
@@ -419,6 +585,14 @@ def main():
 
     else:
         models = _list_models(args.embeddings_dir)
+
+        y = _resolve_labels_holdout(
+            labels_path=args.labels_path,
+            dataset_name=dataset_name,
+            data_root=args.data_root,
+            embeddings_dir=args.embeddings_dir,
+        )
+
         for m in tqdm(sorted(models.keys()), desc="Модели", unit="model"):
             X = _load_embeddings_file(models[m])
             if X.shape[0] != y.shape[0]:
