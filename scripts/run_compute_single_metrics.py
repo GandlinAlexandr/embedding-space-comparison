@@ -20,6 +20,7 @@ SUPPORTED_EXTENSIONS = {".npy", ".npz", ".pt", ".pth"}
 def _maybe_import_torch():
     try:
         import torch  # type: ignore
+
         return torch
     except Exception:
         return None
@@ -190,13 +191,14 @@ def infer_model_name(path: Path) -> str:
 # Метрики
 # ============================================================
 
+
 def stable_rank(x: np.ndarray, epsilon: float = 1e-12) -> float:
     s = np.linalg.svd(x, full_matrices=False, compute_uv=False)
     if s.size == 0:
         return 0.0
 
-    fro_sq = float(np.sum(s ** 2))
-    max_sq = float(np.max(s ** 2)) + epsilon
+    fro_sq = float(np.sum(s**2))
+    max_sq = float(np.max(s**2)) + epsilon
     return fro_sq / max_sq
 
 
@@ -219,7 +221,7 @@ def coherence(x: np.ndarray) -> float:
     if u.size == 0:
         return 0.0
 
-    row_sq = np.sum(u ** 2, axis=1)
+    row_sq = np.sum(u**2, axis=1)
     return float(np.max(row_sq))
 
 
@@ -335,6 +337,7 @@ METRICS: dict[str, MetricSpec] = {
 # IO
 # ============================================================
 
+
 def save_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -348,6 +351,7 @@ def build_output_path(out_dir: Path, metric_name: str, model_name: str) -> Path:
 # ============================================================
 # Основная программа
 # ============================================================
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -411,7 +415,9 @@ def main() -> None:
     metric_names: list[str] = args.metrics
 
     if not embeddings_dir.exists():
-        raise FileNotFoundError(f"Директория с эмбеддингами не найдена: {embeddings_dir}")
+        raise FileNotFoundError(
+            f"Директория с эмбеддингами не найдена: {embeddings_dir}"
+        )
 
     files = discover_embedding_files(embeddings_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

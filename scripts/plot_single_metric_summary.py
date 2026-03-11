@@ -14,6 +14,7 @@ import pandas as pd
 # Utils
 # ============================================================
 
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -43,6 +44,7 @@ def load_csv(path: Path, name: str) -> pd.DataFrame:
 # ============================================================
 # Labels by protocol
 # ============================================================
+
 
 def target_label(protocol: str) -> str:
     if protocol == "signed":
@@ -76,6 +78,7 @@ def build_title_prefix(base_title: str, protocol: str) -> str:
 # ============================================================
 # Short names
 # ============================================================
+
 
 def short_pairwise_name(metric_file: str) -> str:
     name = os.path.basename(str(metric_file))
@@ -125,6 +128,7 @@ def short_single_name(metric_name: str) -> str:
 # metric_file, spearman_mean, pearson_mean, kendall_mean, ...
 # ============================================================
 
+
 def load_pairwise_table(pairwise_csv: Path) -> pd.DataFrame:
     df = load_csv(pairwise_csv, "pairwise_csv")
     require_cols(
@@ -144,7 +148,12 @@ def load_pairwise_table(pairwise_csv: Path) -> pd.DataFrame:
     )
 
     out = out.dropna(
-        subset=["pairwise_metric", "pairwise_spearman", "pairwise_pearson", "pairwise_kendall"]
+        subset=[
+            "pairwise_metric",
+            "pairwise_spearman",
+            "pairwise_pearson",
+            "pairwise_kendall",
+        ]
     ).reset_index(drop=True)
 
     return out
@@ -155,6 +164,7 @@ def load_pairwise_table(pairwise_csv: Path) -> pd.DataFrame:
 # single CSV from run_evaluate_single_metrics.py:
 # metric_name, protocol, task, spearman, pearson, kendall, ...
 # ============================================================
+
 
 def load_single_table(single_csv: Path, protocol: str) -> pd.DataFrame:
     df = load_csv(single_csv, "single_csv")
@@ -173,10 +183,9 @@ def load_single_table(single_csv: Path, protocol: str) -> pd.DataFrame:
         if not mean_rows.empty:
             work = mean_rows
         else:
-            work = (
-                work.groupby("metric_name", as_index=False)[["spearman", "pearson", "kendall"]]
-                .mean()
-            )
+            work = work.groupby("metric_name", as_index=False)[
+                ["spearman", "pearson", "kendall"]
+            ].mean()
 
     out = pd.DataFrame(
         {
@@ -188,7 +197,12 @@ def load_single_table(single_csv: Path, protocol: str) -> pd.DataFrame:
     )
 
     out = out.dropna(
-        subset=["baseline_metric", "single_spearman", "single_pearson", "single_kendall"]
+        subset=[
+            "baseline_metric",
+            "single_spearman",
+            "single_pearson",
+            "single_kendall",
+        ]
     ).reset_index(drop=True)
 
     return out
@@ -197,6 +211,7 @@ def load_single_table(single_csv: Path, protocol: str) -> pd.DataFrame:
 # ============================================================
 # Plot helpers
 # ============================================================
+
 
 def plot_grouped_three(
     labels: list[str],
@@ -265,6 +280,7 @@ def plot_two_series(
 # Best pairwise by each correlation
 # ============================================================
 
+
 def select_best_pairwise(pairwise_df: pd.DataFrame, corr_col: str) -> pd.Series:
     idx = pairwise_df[corr_col].astype(float).idxmax()
     return pairwise_df.loc[idx]
@@ -298,6 +314,7 @@ def build_best_vs_single_table(
 # ============================================================
 # Main plotting routines
 # ============================================================
+
 
 def plot_pairwise_only(
     pairwise_df: pd.DataFrame,
@@ -396,6 +413,7 @@ def plot_best_pairwise_vs_single(
 # CLI
 # ============================================================
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Нормальные графики для pairwise-метрик и single-diff baseline."
@@ -465,6 +483,7 @@ def parse_args() -> argparse.Namespace:
 # MAIN
 # ============================================================
 
+
 def main() -> None:
     args = parse_args()
 
@@ -477,7 +496,9 @@ def main() -> None:
 
     if args.save_pairwise_table_csv is not None:
         args.save_pairwise_table_csv.parent.mkdir(parents=True, exist_ok=True)
-        pairwise_df.to_csv(args.save_pairwise_table_csv, index=False, encoding="utf-8-sig")
+        pairwise_df.to_csv(
+            args.save_pairwise_table_csv, index=False, encoding="utf-8-sig"
+        )
 
     if args.save_single_table_csv is not None:
         args.save_single_table_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -485,7 +506,9 @@ def main() -> None:
 
     if args.save_best_comparison_csv is not None:
         args.save_best_comparison_csv.parent.mkdir(parents=True, exist_ok=True)
-        best_vs_single_df.to_csv(args.save_best_comparison_csv, index=False, encoding="utf-8-sig")
+        best_vs_single_df.to_csv(
+            args.save_best_comparison_csv, index=False, encoding="utf-8-sig"
+        )
 
     print("============================================================")
     print("ПОСТРОЕНИЕ ГРАФИКОВ ДЛЯ PAIRWISE И SINGLE-DIFF")
@@ -501,7 +524,9 @@ def main() -> None:
 
     plot_pairwise_only(pairwise_df, args.out_dir, title_prefix, args.single_protocol)
     plot_single_only(single_df, args.out_dir, title_prefix, args.single_protocol)
-    plot_best_pairwise_vs_single(best_vs_single_df, args.out_dir, title_prefix, args.single_protocol)
+    plot_best_pairwise_vs_single(
+        best_vs_single_df, args.out_dir, title_prefix, args.single_protocol
+    )
 
     print("============================================================")
     print("ГОТОВО")

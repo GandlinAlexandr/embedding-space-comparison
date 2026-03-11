@@ -228,9 +228,7 @@ class MetricSpec:
     rff_seed: int = 42
 
 
-def _infer_metric_spec(
-    name: str, cfg: Any, default_n_centers: int = 200
-) -> MetricSpec:
+def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> MetricSpec:
     """
     Восстанавливает параметры по имени конфига и словарю конфигурации (если он есть).
     Поддерживает текущую схему именования:
@@ -830,7 +828,9 @@ def main():
                         continue
 
                     # Если вычисления уже сделаны (с обеих сторон), ничего не делаем.
-                    if not np.isnan(out_matrix[i, j]) and not np.isnan(out_matrix[j, i]):
+                    if not np.isnan(out_matrix[i, j]) and not np.isnan(
+                        out_matrix[j, i]
+                    ):
                         continue
 
                     # Вычисляем в обоих направлениях
@@ -874,7 +874,9 @@ def main():
                         continue
 
                     # Если вычисления уже сделаны (с обеих сторон), ничего не делаем.
-                    if not np.isnan(out_matrix[i, j]) and not np.isnan(out_matrix[j, i]):
+                    if not np.isnan(out_matrix[i, j]) and not np.isnan(
+                        out_matrix[j, i]
+                    ):
                         continue
 
                     Yj = embeddings[mj]

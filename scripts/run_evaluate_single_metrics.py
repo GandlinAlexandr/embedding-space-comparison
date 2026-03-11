@@ -15,6 +15,7 @@ from scipy.stats import kendalltau, pearsonr, spearmanr
 # Вспомогательные функции
 # ============================================================
 
+
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -76,6 +77,7 @@ def compute_correlations(x: np.ndarray, y: np.ndarray) -> dict[str, float]:
 # Формат: <single_metrics_dir>/<metric_name>/<model>.json
 # ============================================================
 
+
 def discover_metric_dirs(single_metrics_dir: Path) -> list[Path]:
     return sorted([p for p in single_metrics_dir.iterdir() if p.is_dir()])
 
@@ -129,17 +131,22 @@ def load_single_metric_scores(metric_dir: Path) -> tuple[str, dict[str, float], 
 # Формат проекта: model -> task -> score
 # ============================================================
 
+
 def load_downstream_table(path: Path) -> dict[str, dict[str, float]]:
     obj = load_json(path)
 
     if not isinstance(obj, dict):
-        raise ValueError("Downstream json должен быть словарём вида model -> task -> score")
+        raise ValueError(
+            "Downstream json должен быть словарём вида model -> task -> score"
+        )
 
     table: dict[str, dict[str, float]] = {}
 
     for model_name, task_scores in obj.items():
         if not isinstance(task_scores, dict):
-            raise ValueError("Downstream json должен быть словарём вида model -> task -> score")
+            raise ValueError(
+                "Downstream json должен быть словарём вида model -> task -> score"
+            )
 
         row: dict[str, float] = {}
         for task_name, score in task_scores.items():
@@ -154,6 +161,7 @@ def load_downstream_table(path: Path) -> dict[str, dict[str, float]]:
 # Построение пар
 # ============================================================
 
+
 def align_scores(scores: dict[str, float], higher_is_better: bool) -> dict[str, float]:
     if higher_is_better:
         return dict(scores)
@@ -167,8 +175,7 @@ def intersect_models(
     common = sorted(set(single_scores.keys()) & set(downstream.keys()))
     if len(common) < 2:
         raise ValueError(
-            "Слишком мало общих моделей между single-metrics и downstream: "
-            f"{common}"
+            "Слишком мало общих моделей между single-metrics и downstream: " f"{common}"
         )
     return common
 
@@ -235,6 +242,7 @@ def build_pairs_for_task(
 # ============================================================
 # Evaluation
 # ============================================================
+
 
 def evaluate_pairs_dataframe(df_pairs: pd.DataFrame, protocol: str) -> dict[str, float]:
     if protocol == "signed":
@@ -305,7 +313,9 @@ def evaluate_single_metric(
             "task": "__mean__",
             "target": "delta_signed" if protocol == "signed" else "delta_abs",
             "n_models_common": len(common_models),
-            "n_pairs": int(mean_ignore_nan([float(r["n_pairs"]) for r in rows_protocol])),
+            "n_pairs": int(
+                mean_ignore_nan([float(r["n_pairs"]) for r in rows_protocol])
+            ),
             "spearman": mean_ignore_nan([float(r["spearman"]) for r in rows_protocol]),
             "pearson": mean_ignore_nan([float(r["pearson"]) for r in rows_protocol]),
             "kendall": mean_ignore_nan([float(r["kendall"]) for r in rows_protocol]),
@@ -323,6 +333,7 @@ def evaluate_single_metric(
 # ============================================================
 # CLI
 # ============================================================
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -370,6 +381,7 @@ def parse_args() -> argparse.Namespace:
 # MAIN
 # ============================================================
 
+
 def main() -> None:
     args = parse_args()
 
@@ -380,7 +392,9 @@ def main() -> None:
     protocol: str = args.protocol
 
     if not single_metrics_dir.exists():
-        raise FileNotFoundError(f"Папка single-metrics не найдена: {single_metrics_dir}")
+        raise FileNotFoundError(
+            f"Папка single-metrics не найдена: {single_metrics_dir}"
+        )
 
     if not downstream_json.exists():
         raise FileNotFoundError(f"Файл downstream_json не найден: {downstream_json}")

@@ -15,6 +15,7 @@ import numpy as np
 # Utility
 # ============================================================
 
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +69,9 @@ def zscore_population(x: np.ndarray) -> np.ndarray:
     return (x - mu) / sigma
 
 
-def finite_pair_arrays(x: Iterable[float], y: Iterable[float]) -> Tuple[np.ndarray, np.ndarray]:
+def finite_pair_arrays(
+    x: Iterable[float], y: Iterable[float]
+) -> Tuple[np.ndarray, np.ndarray]:
     xx = np.asarray(list(x), dtype=float)
     yy = np.asarray(list(y), dtype=float)
     valid = np.isfinite(xx) & np.isfinite(yy)
@@ -123,7 +126,10 @@ def safe_nanmean(arr: np.ndarray) -> float:
 # Downstream loading
 # ============================================================
 
-def load_downstream_scores(path: Path, task_name: str | None = None) -> Dict[str, float]:
+
+def load_downstream_scores(
+    path: Path, task_name: str | None = None
+) -> Dict[str, float]:
     """
     Поддерживает форматы:
         1) {"resnet18": 0.81, ...}
@@ -169,6 +175,7 @@ def load_downstream_scores(path: Path, task_name: str | None = None) -> Dict[str
 # Single metrics loading
 # ============================================================
 
+
 def load_single_metric_scalar(path: Path) -> float:
     """
     Поддерживает JSON:
@@ -203,7 +210,9 @@ def load_single_metric_scalar(path: Path) -> float:
     raise ValueError(f"Неподдерживаемый формат single-metric файла: {path}")
 
 
-def collect_single_metric_values(single_metrics_dir: Path) -> Dict[str, Dict[str, float]]:
+def collect_single_metric_values(
+    single_metrics_dir: Path,
+) -> Dict[str, Dict[str, float]]:
     """
     Ожидается структура:
         single_metrics/
@@ -215,7 +224,9 @@ def collect_single_metric_values(single_metrics_dir: Path) -> Dict[str, Dict[str
                 ...
     """
     if not single_metrics_dir.exists():
-        raise FileNotFoundError(f"Папка single_metrics_dir не найдена: {single_metrics_dir}")
+        raise FileNotFoundError(
+            f"Папка single_metrics_dir не найдена: {single_metrics_dir}"
+        )
 
     result: Dict[str, Dict[str, float]] = {}
 
@@ -239,7 +250,9 @@ def collect_single_metric_values(single_metrics_dir: Path) -> Dict[str, Dict[str
             result[metric_name] = metric_values
 
     if not result:
-        raise ValueError(f"Не удалось загрузить ни одной single-метрики из {single_metrics_dir}")
+        raise ValueError(
+            f"Не удалось загрузить ни одной single-метрики из {single_metrics_dir}"
+        )
 
     return result
 
@@ -248,7 +261,10 @@ def collect_single_metric_values(single_metrics_dir: Path) -> Dict[str, Dict[str
 # Pairwise metrics loading
 # ============================================================
 
-def load_pairwise_metric_npz(path: Path) -> Tuple[List[str], np.ndarray, Dict[str, Any]]:
+
+def load_pairwise_metric_npz(
+    path: Path,
+) -> Tuple[List[str], np.ndarray, Dict[str, Any]]:
     """
     Поддерживает форматы:
       - model_names + matrix
@@ -271,7 +287,11 @@ def load_pairwise_metric_npz(path: Path) -> Tuple[List[str], np.ndarray, Dict[st
     meta: Dict[str, Any] = {}
     if "meta_json" in data.files:
         meta_json = data["meta_json"]
-        meta_json = meta_json.item() if getattr(meta_json, "shape", None) == () else meta_json.tolist()
+        meta_json = (
+            meta_json.item()
+            if getattr(meta_json, "shape", None) == ()
+            else meta_json.tolist()
+        )
 
         if isinstance(meta_json, str):
             try:
@@ -284,7 +304,9 @@ def load_pairwise_metric_npz(path: Path) -> Tuple[List[str], np.ndarray, Dict[st
     return model_names, mat, meta
 
 
-def collect_pairwise_metric_matrices(pairwise_metrics_dir: Path) -> Dict[str, Dict[str, Any]]:
+def collect_pairwise_metric_matrices(
+    pairwise_metrics_dir: Path,
+) -> Dict[str, Dict[str, Any]]:
     """
     Ожидается структура:
         metric_matrices/
@@ -293,7 +315,9 @@ def collect_pairwise_metric_matrices(pairwise_metrics_dir: Path) -> Dict[str, Di
             ...
     """
     if not pairwise_metrics_dir.exists():
-        raise FileNotFoundError(f"Папка pairwise_metrics_dir не найдена: {pairwise_metrics_dir}")
+        raise FileNotFoundError(
+            f"Папка pairwise_metrics_dir не найдена: {pairwise_metrics_dir}"
+        )
 
     result: Dict[str, Dict[str, Any]] = {}
 
@@ -317,6 +341,7 @@ def collect_pairwise_metric_matrices(pairwise_metrics_dir: Path) -> Dict[str, Di
 # ============================================================
 # Family map
 # ============================================================
+
 
 def load_family_map(path: Path) -> Dict[str, str]:
     """
@@ -348,7 +373,9 @@ def ordered_models(
         models = [m for m in model_order if m in available_models]
         missing = [m for m in model_order if m not in available_models]
         if missing:
-            print(f"[warn] Эти модели отсутствуют в данных и будут пропущены: {missing}")
+            print(
+                f"[warn] Эти модели отсутствуют в данных и будут пропущены: {missing}"
+            )
 
         rest = sorted([m for m in available_models if m not in set(models)])
         return models + rest
@@ -360,7 +387,10 @@ def ordered_models(
 # Pairwise matrices
 # ============================================================
 
-def build_pairwise_matrix(values: Dict[str, float], models: List[str], protocol: str) -> np.ndarray:
+
+def build_pairwise_matrix(
+    values: Dict[str, float], models: List[str], protocol: str
+) -> np.ndarray:
     arr = np.array([float(values[m]) for m in models], dtype=float)
     n = len(models)
     mat = np.full((n, n), np.nan, dtype=float)
@@ -406,6 +436,7 @@ def align_pairwise_matrix_to_models(
 # ============================================================
 # Family-wise statistics
 # ============================================================
+
 
 def iter_family_subset_pairs(
     models: List[str],
@@ -603,7 +634,11 @@ def compute_leave_one_family_out(
                 "n_full": full_n,
                 "corr_without_family": corr_wo,
                 "n_without_family": int(len(x)),
-                "delta_corr": corr_wo - full_corr if np.isfinite(corr_wo) and np.isfinite(full_corr) else float("nan"),
+                "delta_corr": (
+                    corr_wo - full_corr
+                    if np.isfinite(corr_wo) and np.isfinite(full_corr)
+                    else float("nan")
+                ),
             }
         )
 
@@ -613,6 +648,7 @@ def compute_leave_one_family_out(
 # ============================================================
 # Plotting
 # ============================================================
+
 
 def setup_matplotlib() -> None:
     plt.rcParams["figure.dpi"] = 140
@@ -664,7 +700,9 @@ def draw_heatmap(
     return im
 
 
-def make_corr_annotation_text(corr_mat: np.ndarray, count_mat: np.ndarray) -> np.ndarray:
+def make_corr_annotation_text(
+    corr_mat: np.ndarray, count_mat: np.ndarray
+) -> np.ndarray:
     out = np.empty(corr_mat.shape, dtype=object)
     for i in range(corr_mat.shape[0]):
         for j in range(corr_mat.shape[1]):
@@ -678,12 +716,16 @@ def make_corr_annotation_text(corr_mat: np.ndarray, count_mat: np.ndarray) -> np
     return out
 
 
-def make_value_count_annotation_text(value_mat: np.ndarray, count_mat: np.ndarray, fmt: str) -> np.ndarray:
+def make_value_count_annotation_text(
+    value_mat: np.ndarray, count_mat: np.ndarray, fmt: str
+) -> np.ndarray:
     out = np.empty(value_mat.shape, dtype=object)
     for i in range(value_mat.shape[0]):
         for j in range(value_mat.shape[1]):
             if np.isfinite(value_mat[i, j]):
-                out[i, j] = f"{format(value_mat[i, j], fmt)}\n(n={int(count_mat[i, j])})"
+                out[i, j] = (
+                    f"{format(value_mat[i, j], fmt)}\n(n={int(count_mat[i, j])})"
+                )
             else:
                 if int(count_mat[i, j]) > 0:
                     out[i, j] = f"nan\n(n={int(count_mat[i, j])})"
@@ -705,20 +747,32 @@ def save_family_target_heatmap(
 
     if protocol == "signed":
         target_label = "mean(Δacc)"
-        vmax = float(np.nanmax(np.abs(target_mean_mat))) if np.isfinite(target_mean_mat).any() else 1.0
+        vmax = (
+            float(np.nanmax(np.abs(target_mean_mat)))
+            if np.isfinite(target_mean_mat).any()
+            else 1.0
+        )
         if not np.isfinite(vmax) or vmax <= 0:
             vmax = 1.0
         vmin = -vmax
         cmap = "coolwarm"
     else:
         target_label = "mean(|Δacc|)"
-        vmax = float(np.nanmax(target_mean_mat)) if np.isfinite(target_mean_mat).any() else 1.0
+        vmax = (
+            float(np.nanmax(target_mean_mat))
+            if np.isfinite(target_mean_mat).any()
+            else 1.0
+        )
         if not np.isfinite(vmax) or vmax <= 0:
             vmax = 1.0
         vmin = 0.0
         cmap = "viridis"
 
-    annotate_text = make_value_count_annotation_text(target_mean_mat, count_mat, ".3f") if annotate else None
+    annotate_text = (
+        make_value_count_annotation_text(target_mean_mat, count_mat, ".3f")
+        if annotate
+        else None
+    )
 
     draw_heatmap(
         ax=ax,
@@ -825,7 +879,9 @@ def save_family_correlation_grid(
         corr_mat = family_corr_mats[metric_name]
         count_mat = family_count_mats[metric_name]
 
-        annotate_text = make_corr_annotation_text(corr_mat, count_mat) if annotate else None
+        annotate_text = (
+            make_corr_annotation_text(corr_mat, count_mat) if annotate else None
+        )
 
         im = draw_heatmap(
             ax=ax,
@@ -915,6 +971,7 @@ def save_leave_one_family_out_barplot(
 # CSV summary
 # ============================================================
 
+
 def save_global_summary_csv(
     path: Path,
     rows: List[Dict[str, Any]],
@@ -982,6 +1039,7 @@ def save_leave_one_family_out_csv(
 # ============================================================
 # CLI
 # ============================================================
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1058,7 +1116,9 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     if args.single_metrics_dir is None and args.pairwise_metrics_dir is None:
-        parser.error("Нужно указать хотя бы один из аргументов: --single_metrics_dir или --pairwise_metrics_dir")
+        parser.error(
+            "Нужно указать хотя бы один из аргументов: --single_metrics_dir или --pairwise_metrics_dir"
+        )
 
     return args
 
@@ -1067,12 +1127,15 @@ def parse_args() -> argparse.Namespace:
 # Main
 # ============================================================
 
+
 def main() -> None:
     args = parse_args()
     setup_matplotlib()
     ensure_dir(args.out_dir)
 
-    downstream_scores = load_downstream_scores(args.downstream_json, task_name=args.task_name)
+    downstream_scores = load_downstream_scores(
+        args.downstream_json, task_name=args.task_name
+    )
     family_map = load_family_map(args.family_map_json)
 
     single_metrics: Dict[str, Dict[str, float]] = {}
@@ -1104,7 +1167,9 @@ def main() -> None:
     if not available_models:
         raise ValueError("Нет общего множества моделей между downstream и family_map")
 
-    models = ordered_models(available_models=available_models, model_order=args.model_order)
+    models = ordered_models(
+        available_models=available_models, model_order=args.model_order
+    )
 
     # Оставляем только модели, которые реально имеют family label и downstream score
     models = [m for m in models if m in family_map and m in downstream_scores]
@@ -1314,7 +1379,9 @@ def main() -> None:
                 )
 
     if not family_corr_mats:
-        raise ValueError("Не удалось построить family-wise heatmaps: нет совместимых метрик")
+        raise ValueError(
+            "Не удалось построить family-wise heatmaps: нет совместимых метрик"
+        )
 
     assert families_ref is not None
     assert target_mean_ref is not None
@@ -1324,7 +1391,9 @@ def main() -> None:
     # Save target / count heatmaps
     # --------------------------------------------------------
     target_png = args.out_dir / (
-        "family_target_mean_signed.png" if args.protocol == "signed" else "family_target_mean_abs.png"
+        "family_target_mean_signed.png"
+        if args.protocol == "signed"
+        else "family_target_mean_abs.png"
     )
     save_family_target_heatmap(
         families=families_ref,
@@ -1337,7 +1406,9 @@ def main() -> None:
     )
 
     count_png = args.out_dir / (
-        "family_pair_counts_signed.png" if args.protocol == "signed" else "family_pair_counts_abs.png"
+        "family_pair_counts_signed.png"
+        if args.protocol == "signed"
+        else "family_pair_counts_abs.png"
     )
     save_family_count_heatmap(
         families=families_ref,
@@ -1350,7 +1421,10 @@ def main() -> None:
     # --------------------------------------------------------
     # Save main correlation grid
     # --------------------------------------------------------
-    corr_png = args.out_dir / f"family_subset_correlations_{args.corr_type}_{args.protocol}.png"
+    corr_png = (
+        args.out_dir
+        / f"family_subset_correlations_{args.corr_type}_{args.protocol}.png"
+    )
     save_family_correlation_grid(
         family_corr_mats=family_corr_mats,
         family_count_mats=family_count_mats,
@@ -1366,10 +1440,15 @@ def main() -> None:
     # --------------------------------------------------------
     # Save CSVs
     # --------------------------------------------------------
-    global_csv = args.out_dir / f"family_subset_global_summary_{args.corr_type}_{args.protocol}.csv"
+    global_csv = (
+        args.out_dir
+        / f"family_subset_global_summary_{args.corr_type}_{args.protocol}.csv"
+    )
     save_global_summary_csv(global_csv, global_rows)
 
-    family_csv = args.out_dir / f"family_subset_details_{args.corr_type}_{args.protocol}.csv"
+    family_csv = (
+        args.out_dir / f"family_subset_details_{args.corr_type}_{args.protocol}.csv"
+    )
     save_family_summary_csv(family_csv, family_rows)
 
     # --------------------------------------------------------
@@ -1379,10 +1458,14 @@ def main() -> None:
     loo_png = None
 
     if not args.skip_leave_one_family_out and leave_one_family_out_by_metric:
-        loo_csv = args.out_dir / f"leave_one_family_out_{args.corr_type}_{args.protocol}.csv"
+        loo_csv = (
+            args.out_dir / f"leave_one_family_out_{args.corr_type}_{args.protocol}.csv"
+        )
         save_leave_one_family_out_csv(loo_csv, loo_rows_all)
 
-        loo_png = args.out_dir / f"leave_one_family_out_{args.corr_type}_{args.protocol}.png"
+        loo_png = (
+            args.out_dir / f"leave_one_family_out_{args.corr_type}_{args.protocol}.png"
+        )
         save_leave_one_family_out_barplot(
             metric_rows=leave_one_family_out_by_metric,
             out_path=loo_png,
