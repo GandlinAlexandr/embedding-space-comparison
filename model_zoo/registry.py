@@ -73,6 +73,16 @@ def _make_registry() -> Dict[str, ModelSpec]:
         extractor_id="vit_heads_identity",
         apply_extractor=as_vit_feature_extractor,
     )
+    reg["vit_b_32"] = ModelSpec(
+        base_name="vit_b_32",
+        extractor_id="vit_heads_identity",
+        apply_extractor=as_vit_feature_extractor,
+    )
+    reg["vit_l_16"] = ModelSpec(
+        base_name="vit_l_16",
+        extractor_id="vit_heads_identity",
+        apply_extractor=as_vit_feature_extractor,
+    )
 
     # DenseNet / MobileNet
     reg["densenet121"] = ModelSpec(
@@ -111,6 +121,19 @@ def _make_registry() -> Dict[str, ModelSpec]:
         apply_extractor=as_vgg_conv512,
     )
     reg["vgg16"] = reg["vgg16_conv512"]
+
+    # VGG19: два варианта (чтобы было честно и воспроизводимо)
+    reg["vgg19_fc4096"] = ModelSpec(
+        base_name="vgg19",
+        extractor_id="vgg_classifier_last_identity_4096",
+        apply_extractor=as_vgg_classifier4096,
+    )
+    reg["vgg19_conv512"] = ModelSpec(
+        base_name="vgg19",
+        extractor_id="vgg_features_gap_512",
+        apply_extractor=as_vgg_conv512,
+    )
+    reg["vgg19"] = reg["vgg19_conv512"]
 
     return reg
 
