@@ -21,7 +21,8 @@ def ensure_dir(path: Path) -> None:
 
 
 def pretty_metric_name(name: str) -> str:
-    mapping = {
+    # Single-метрики: полные читаемые названия
+    single_mapping = {
         "stable_rank": "Стабильный ранг",
         "rankme": "RankMe",
         "coherence": "Когерентность",
@@ -31,7 +32,59 @@ def pretty_metric_name(name: str) -> str:
         "self_cluster": "SelfCluster",
         "alpha_req": "α-ReQ",
     }
-    return mapping.get(name, name)
+    if name in single_mapping:
+        return single_mapping[name]
+
+    # Pairwise-метрики: короткие имена по подстрокам имени файла/ключа.
+    # Порядок важен: более специфичные паттерны — раньше.
+    n = name.replace("local_map_rank_", "")
+
+    if "linear_eps_percentile_5_antisym" in n:
+        return "lin_eps_5"
+    if "linear_eps_percentile_10_antisym" in n:
+        return "lin_eps_10"
+    if "linear_eps_percentile_20_antisym" in n:
+        return "lin_eps_20"
+    if "linear_eps_percentile_5_sym" in n:
+        return "lin_eps_5_sym"
+    if "linear_eps_percentile_10_sym" in n:
+        return "lin_eps_10_sym"
+    if "linear_eps_percentile_20_sym" in n:
+        return "lin_eps_20_sym"
+
+    if "linear_knn_k5_antisym" in n:
+        return "lin_k5"
+    if "linear_knn_k10_antisym" in n:
+        return "lin_k10"
+    if "linear_knn_k20_antisym" in n:
+        return "lin_k20"
+    if "linear_knn_k40_antisym" in n:
+        return "lin_k40"
+    if "linear_knn_k5_sym" in n:
+        return "lin_k5_sym"
+    if "linear_knn_k10_sym" in n:
+        return "lin_k10_sym"
+    if "linear_knn_k20_sym" in n:
+        return "lin_k20_sym"
+    if "linear_knn_k40_sym" in n:
+        return "lin_k40_sym"
+
+    if "multiscale_knn_mean_antisym" in n:
+        return "multiscale_mean"
+    if "multiscale_knn_mean_sym" in n:
+        return "multiscale_mean_sym"
+
+    if "rff_knn_k10_antisym" in n:
+        return "rff_k10"
+    if "rff_knn_k10_sym" in n:
+        return "rff_k10_sym"
+
+    if n == "local_map_rank_linear_knn_k10":
+        return "directed_k10"
+    if "linear_knn_k10" in n and "antisym" not in n and "_sym" not in n:
+        return "directed_k10"
+
+    return name
 
 
 def load_json(path: Path):
@@ -433,6 +486,33 @@ def align_pairwise_matrix_to_models(
     return out
 
 
+def enforce_matrix_protocol(mat: np.ndarray, protocol: str) -> np.ndarray:
+    """
+    Приводит уже загруженную pairwise-матрицу к нужному протоколу,
+    не пересчитывая её заново из скалярных значений моделей.
+
+    protocol == "signed":
+        Антисимметризация: out[i,j] = (mat[i,j] - mat[j,i]) / 2
+        Гарантирует out[i,j] == -out[j,i].
+        Если исходная матрица уже антисимметрична — значения не меняются.
+
+    protocol == "abs":
+        Симметризация + модуль: out[i,j] = |( mat[i,j] + mat[j,i] )| / 2
+        Гарантирует out[i,j] == out[j,i] >= 0.
+        Если исходная матрица уже симметрична — значения не меняются (кроме знака).
+
+    NaN обрабатывается аккуратно: если хотя бы одна сторона пары — nan,
+    результат тоже nan.
+    """
+    if protocol == "signed":
+        return (mat - mat.T) / 2.0
+    elif protocol == "abs":
+        sym = (mat + mat.T) / 2.0
+        return np.abs(sym)
+    else:
+        raise ValueError(f"Unknown protocol: {protocol}")
+
+
 # ============================================================
 # Family-wise statistics
 # ============================================================
@@ -832,6 +912,52 @@ def save_family_count_heatmap(
     plt.close(fig)
 
 
+def _draw_metric_group_grid(
+    fig: plt.Figure,
+    axes: np.ndarray,
+    metric_names: List[str],
+    family_corr_mats: Dict[str, np.ndarray],
+    family_count_mats: Dict[str, np.ndarray],
+    global_corrs: Dict[str, float],
+    global_counts: Dict[str, int],
+    families: List[str],
+    corr_label: str,
+    vmin: float,
+    vmax: float,
+    annotate: bool,
+    protocol: str = "abs",
+) -> Any:
+    """Заполняет подграфики для одной группы метрик. Возвращает последний AxesImage."""
+    last_im = None
+    for ax, metric_name in zip(axes.flat, metric_names):
+        corr_mat = family_corr_mats[metric_name]
+        count_mat = family_count_mats[metric_name]
+        annotate_text = (
+            make_corr_annotation_text(corr_mat, count_mat) if annotate else None
+        )
+        title_text = (
+            f"{pretty_metric_name(metric_name)}\n"
+            f"global {corr_label} = {global_corrs[metric_name]:.3f}"
+            f" (n={global_counts[metric_name]})"
+        )
+        im = draw_heatmap(
+            ax=ax,
+            mat=corr_mat,
+            labels_x=families,
+            labels_y=families,
+            title=title_text,
+            cmap="coolwarm",
+            vmin=vmin,
+            vmax=vmax,
+            annotate=annotate,
+            annotate_text=annotate_text,
+        )
+        last_im = im
+    for ax in axes.flat[len(metric_names):]:
+        ax.axis("off")
+    return last_im
+
+
 def save_family_correlation_grid(
     family_corr_mats: Dict[str, np.ndarray],
     family_count_mats: Dict[str, np.ndarray],
@@ -842,10 +968,197 @@ def save_family_correlation_grid(
     title_prefix: str,
     corr_type: str,
     annotate: bool,
+    metric_sources: Optional[Dict[str, str]] = None,
+    protocol: str = "abs",
 ) -> None:
-    metric_names = sorted(family_corr_mats.keys())
-    n_metrics = len(metric_names)
+    sources = metric_sources or {}
 
+    single_names = sorted(
+        m for m in family_corr_mats if sources.get(m, "single") == "single"
+    )
+    pairwise_names = sorted(
+        m for m in family_corr_mats if sources.get(m, "single") == "pairwise"
+    )
+
+    # Если источники не различаются — рисуем один grid без разделения
+    if not single_names or not pairwise_names:
+        all_names = single_names or pairwise_names
+        _save_flat_corr_grid(
+            family_corr_mats=family_corr_mats,
+            family_count_mats=family_count_mats,
+            global_corrs=global_corrs,
+            global_counts=global_counts,
+            families=families,
+            metric_names=all_names,
+            out_path=out_path,
+            title_prefix=title_prefix,
+            corr_type=corr_type,
+            annotate=annotate,
+            protocol=protocol,
+        )
+        return
+
+    NCOLS = 3
+    corr_label = "Пирсон" if corr_type == "pearson" else "Спирмен"
+
+    # Общий диапазон цветовой шкалы по всем метрикам
+    all_vals = []
+    for m in family_corr_mats:
+        vals = family_corr_mats[m][np.isfinite(family_corr_mats[m])]
+        if vals.size:
+            all_vals.append(vals)
+    if all_vals:
+        vmax = float(np.nanmax(np.abs(np.concatenate(all_vals))))
+        if not np.isfinite(vmax) or vmax <= 0:
+            vmax = 1.0
+    else:
+        vmax = 1.0
+    vmin = -vmax
+
+    s_rows = math.ceil(len(single_names) / NCOLS)
+    p_rows = math.ceil(len(pairwise_names) / NCOLS)
+
+    # Высота: на каждую строку подграфиков 4.6, плюс 0.45 на section-заголовок,
+    # плюс 0.7 на общий suptitle, плюс 0.5 зазор между секциями
+    row_h = 4.6
+    sec_h = 0.45
+    gap_h = 0.5
+    sup_h = 0.7
+    total_h = sup_h + sec_h + s_rows * row_h + gap_h + sec_h + p_rows * row_h
+
+    fig = plt.figure(figsize=(5.8 * NCOLS + 1.2, total_h))
+
+    # Нормируем высоты строк в figure-координатах
+    fig_h = total_h
+    # Вертикальные позиции секций (сверху вниз, в figure-координатах)
+    # suptitle занимает sup_h сверху
+    single_top = 1.0 - sup_h / fig_h
+    single_sec_h_frac = sec_h / fig_h
+    single_grid_h_frac = (s_rows * row_h) / fig_h
+    pairwise_top = single_top - single_sec_h_frac - single_grid_h_frac - gap_h / fig_h
+    pairwise_sec_h_frac = sec_h / fig_h
+    pairwise_grid_h_frac = (p_rows * row_h) / fig_h
+
+    # --- Section label: single ---
+    fig.text(
+        0.01,
+        single_top - single_sec_h_frac / 2,
+        "── single metrics ──────────────────────────",
+        fontsize=10,
+        color="#2266aa",
+        va="center",
+        fontstyle="italic",
+    )
+
+    # --- Single grid ---
+    s_axes = np.array(
+        [
+            fig.add_axes(
+                [
+                    (c * (1.0 / NCOLS)) * 0.88 + 0.04,
+                    single_top - single_sec_h_frac - (r + 1) * single_grid_h_frac / s_rows + 0.01,
+                    0.88 / NCOLS - 0.03,
+                    single_grid_h_frac / s_rows - 0.04,
+                ]
+            )
+            for r in range(s_rows)
+            for c in range(NCOLS)
+        ]
+    ).reshape(s_rows, NCOLS)
+
+    last_im = _draw_metric_group_grid(
+        fig=fig,
+        axes=s_axes,
+        metric_names=single_names,
+        family_corr_mats=family_corr_mats,
+        family_count_mats=family_count_mats,
+        global_corrs=global_corrs,
+        global_counts=global_counts,
+        families=families,
+        corr_label=corr_label,
+        vmin=vmin,
+        vmax=vmax,
+        annotate=annotate,
+        protocol=protocol,
+    )
+
+    # --- Section label: pairwise ---
+    fig.text(
+        0.01,
+        pairwise_top - pairwise_sec_h_frac / 2,
+        "── pairwise metrics ────────────────────────",
+        fontsize=10,
+        color="#aa6622",
+        va="center",
+        fontstyle="italic",
+    )
+
+    # --- Pairwise grid ---
+    p_axes = np.array(
+        [
+            fig.add_axes(
+                [
+                    (c * (1.0 / NCOLS)) * 0.88 + 0.04,
+                    pairwise_top - pairwise_sec_h_frac - (r + 1) * pairwise_grid_h_frac / p_rows + 0.01,
+                    0.88 / NCOLS - 0.03,
+                    pairwise_grid_h_frac / p_rows - 0.04,
+                ]
+            )
+            for r in range(p_rows)
+            for c in range(NCOLS)
+        ]
+    ).reshape(p_rows, NCOLS)
+
+    last_im2 = _draw_metric_group_grid(
+        fig=fig,
+        axes=p_axes,
+        metric_names=pairwise_names,
+        family_corr_mats=family_corr_mats,
+        family_count_mats=family_count_mats,
+        global_corrs=global_corrs,
+        global_counts=global_counts,
+        families=families,
+        corr_label=corr_label,
+        vmin=vmin,
+        vmax=vmax,
+        annotate=annotate,
+        protocol=protocol,
+    )
+
+    final_im = last_im2 or last_im
+
+    x_label = "m(i→j) − m(j→i)" if protocol == "signed" else "½(m(i→j) + m(j→i))"
+    y_label = "acc_i − acc_j"    if protocol == "signed" else "|acc_i − acc_j|"
+
+    fig.suptitle(
+        f"{title_prefix} | {corr_label}({x_label}, {y_label}) по подмножествам пар семейств",
+        fontsize=13,
+    )
+
+    if final_im is not None:
+        cbar_ax = fig.add_axes([0.92, 0.08, 0.016, 0.82])
+        cbar = fig.colorbar(final_im, cax=cbar_ax)
+        cbar.set_label(f"{corr_label} corr", rotation=90, labelpad=10)
+
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_flat_corr_grid(
+    family_corr_mats: Dict[str, np.ndarray],
+    family_count_mats: Dict[str, np.ndarray],
+    global_corrs: Dict[str, float],
+    global_counts: Dict[str, int],
+    families: List[str],
+    metric_names: List[str],
+    out_path: Path,
+    title_prefix: str,
+    corr_type: str,
+    annotate: bool,
+    protocol: str = "abs",
+) -> None:
+    """Fallback: один flat grid без разделения на секции."""
+    n_metrics = len(metric_names)
     ncols = min(3, n_metrics)
     nrows = math.ceil(n_metrics / ncols)
 
@@ -854,68 +1167,39 @@ def save_family_correlation_grid(
         vals = family_corr_mats[m][np.isfinite(family_corr_mats[m])]
         if vals.size:
             all_vals.append(vals)
-
     if all_vals:
-        all_concat = np.concatenate(all_vals)
-        vmax = float(np.nanmax(np.abs(all_concat)))
+        vmax = float(np.nanmax(np.abs(np.concatenate(all_vals))))
         if not np.isfinite(vmax) or vmax <= 0:
             vmax = 1.0
     else:
         vmax = 1.0
-
     vmin = -vmax
 
+    corr_label = "Пирсон" if corr_type == "pearson" else "Спирмен"
     fig, axes = plt.subplots(
-        nrows=nrows,
-        ncols=ncols,
+        nrows=nrows, ncols=ncols,
         figsize=(5.8 * ncols, 5.0 * nrows),
         squeeze=False,
     )
-
-    last_im = None
-    corr_label = "Пирсон" if corr_type == "pearson" else "Спирмен"
-
-    for ax, metric_name in zip(axes.flat, metric_names):
-        corr_mat = family_corr_mats[metric_name]
-        count_mat = family_count_mats[metric_name]
-
-        annotate_text = (
-            make_corr_annotation_text(corr_mat, count_mat) if annotate else None
-        )
-
-        im = draw_heatmap(
-            ax=ax,
-            mat=corr_mat,
-            labels_x=families,
-            labels_y=families,
-            title=(
-                f"{pretty_metric_name(metric_name)}\n"
-                f"global {corr_label} = {global_corrs[metric_name]:.3f} (n={global_counts[metric_name]})"
-            ),
-            cmap="coolwarm",
-            vmin=vmin,
-            vmax=vmax,
-            annotate=annotate,
-            annotate_text=annotate_text,
-        )
-        last_im = im
-
-    for ax in axes.flat[n_metrics:]:
-        ax.axis("off")
-
-    fig.suptitle(
-        f"{title_prefix} | корреляция по подмножествам пар семейств",
-        fontsize=13,
-        y=0.98,
+    last_im = _draw_metric_group_grid(
+        fig=fig, axes=axes, metric_names=metric_names,
+        family_corr_mats=family_corr_mats, family_count_mats=family_count_mats,
+        global_corrs=global_corrs, global_counts=global_counts,
+        families=families, corr_label=corr_label,
+        vmin=vmin, vmax=vmax, annotate=annotate,
+        protocol=protocol,
     )
-
-    fig.subplots_adjust(right=0.88, top=0.90, wspace=0.28, hspace=0.40)
-
+    x_label = "m(i→j) − m(j→i)" if protocol == "signed" else "½(m(i→j) + m(j→i))"
+    y_label = "acc_i − acc_j"    if protocol == "signed" else "|acc_i − acc_j|"
+    fig.suptitle(
+        f"{title_prefix} | {corr_label}({x_label}, {y_label}) по подмножествам пар семейств",
+        fontsize=13,
+    )
+    fig.subplots_adjust(right=0.88, top=0.93, wspace=0.28, hspace=0.45)
     if last_im is not None:
         cbar_ax = fig.add_axes([0.90, 0.18, 0.018, 0.62])
         cbar = fig.colorbar(last_im, cax=cbar_ax)
         cbar.set_label(f"{corr_label} corr", rotation=90, labelpad=10)
-
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
 
@@ -925,46 +1209,137 @@ def save_leave_one_family_out_barplot(
     out_path: Path,
     title_prefix: str,
     corr_type: str,
+    metric_sources: Optional[Dict[str, str]] = None,
 ) -> None:
-    metric_names = sorted(metric_rows.keys())
-    n_metrics = len(metric_names)
-
-    ncols = min(3, n_metrics)
-    nrows = math.ceil(n_metrics / ncols)
-
-    fig, axes = plt.subplots(
-        nrows=nrows,
-        ncols=ncols,
-        figsize=(5.6 * ncols, 4.4 * nrows),
-        squeeze=False,
-    )
-
+    sources = metric_sources or {}
     corr_label = "Пирсон" if corr_type == "pearson" else "Спирмен"
 
-    for ax, metric_name in zip(axes.flat, metric_names):
-        rows = metric_rows[metric_name]
-        families = [r["family"] for r in rows]
-        vals = [r["delta_corr"] for r in rows]
+    single_names = sorted(
+        m for m in metric_rows if sources.get(m, "single") == "single"
+    )
+    pairwise_names = sorted(
+        m for m in metric_rows if sources.get(m, "single") == "pairwise"
+    )
 
-        x = np.arange(len(families))
-        ax.bar(x, vals)
-        ax.axhline(0.0, linestyle="--", linewidth=1.0)
-        ax.set_xticks(x)
-        ax.set_xticklabels(families, rotation=45, ha="right")
-        ax.set_ylabel("corr_without - corr_full")
-        ax.set_title(pretty_metric_name(metric_name))
+    # Если только один вид источников — рисуем без разделения
+    if not single_names or not pairwise_names:
+        all_names = single_names or pairwise_names
+        n = len(all_names)
+        ncols = min(3, n)
+        nrows = math.ceil(n / ncols)
+        fig, axes = plt.subplots(
+            nrows=nrows, ncols=ncols,
+            figsize=(5.6 * ncols, 4.4 * nrows),
+            squeeze=False,
+        )
+        _fill_loo_axes(axes, all_names, metric_rows, corr_label)
+        for ax in axes.flat[n:]:
+            ax.axis("off")
+        fig.suptitle(
+            f"{title_prefix} | leave-one-family-out ({corr_label})",
+            fontsize=13,
+        )
+        fig.subplots_adjust(top=0.93, hspace=0.55, wspace=0.35)
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        return
 
-    for ax in axes.flat[n_metrics:]:
+    NCOLS = 3
+    bar_h = 3.6   # высота одной строки барплотов
+    sec_h = 0.40  # высота section-заголовка
+    gap_h = 0.45  # зазор между секциями
+    sup_h = 0.65  # место под общий заголовок
+
+    s_rows = math.ceil(len(single_names) / NCOLS)
+    p_rows = math.ceil(len(pairwise_names) / NCOLS)
+    total_h = sup_h + sec_h + s_rows * bar_h + gap_h + sec_h + p_rows * bar_h
+
+    fig = plt.figure(figsize=(5.6 * NCOLS, total_h))
+
+    fh = total_h
+    single_top = 1.0 - sup_h / fh
+    s_sec_frac = sec_h / fh
+    s_grid_frac = (s_rows * bar_h) / fh
+    pw_top = single_top - s_sec_frac - s_grid_frac - gap_h / fh
+    p_sec_frac = sec_h / fh
+    p_grid_frac = (p_rows * bar_h) / fh
+
+    # Section label: single
+    fig.text(
+        0.01, single_top - s_sec_frac / 2,
+        "── single metrics ──────────────────────────",
+        fontsize=10, color="#2266aa", va="center", fontstyle="italic",
+    )
+
+    s_axes = np.array(
+        [
+            fig.add_axes(
+                [
+                    c / NCOLS * 0.92 + 0.04,
+                    single_top - s_sec_frac - (r + 1) * s_grid_frac / s_rows + 0.02,
+                    0.92 / NCOLS - 0.04,
+                    s_grid_frac / s_rows - 0.05,
+                ]
+            )
+            for r in range(s_rows)
+            for c in range(NCOLS)
+        ]
+    ).reshape(s_rows, NCOLS)
+    _fill_loo_axes(s_axes, single_names, metric_rows, corr_label)
+    for ax in s_axes.flat[len(single_names):]:
+        ax.axis("off")
+
+    # Section label: pairwise
+    fig.text(
+        0.01, pw_top - p_sec_frac / 2,
+        "── pairwise metrics ────────────────────────",
+        fontsize=10, color="#aa6622", va="center", fontstyle="italic",
+    )
+
+    p_axes = np.array(
+        [
+            fig.add_axes(
+                [
+                    c / NCOLS * 0.92 + 0.04,
+                    pw_top - p_sec_frac - (r + 1) * p_grid_frac / p_rows + 0.02,
+                    0.92 / NCOLS - 0.04,
+                    p_grid_frac / p_rows - 0.05,
+                ]
+            )
+            for r in range(p_rows)
+            for c in range(NCOLS)
+        ]
+    ).reshape(p_rows, NCOLS)
+    _fill_loo_axes(p_axes, pairwise_names, metric_rows, corr_label)
+    for ax in p_axes.flat[len(pairwise_names):]:
         ax.axis("off")
 
     fig.suptitle(
         f"{title_prefix} | leave-one-family-out ({corr_label})",
         fontsize=13,
-        y=0.98,
     )
-    fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
+
+
+def _fill_loo_axes(
+    axes: np.ndarray,
+    metric_names: List[str],
+    metric_rows: Dict[str, List[Dict[str, Any]]],
+    corr_label: str,
+) -> None:
+    """Заполняет барплоты LOO для переданного списка метрик."""
+    for ax, metric_name in zip(axes.flat, metric_names):
+        rows = metric_rows[metric_name]
+        families = [r["family"] for r in rows]
+        vals = [r["delta_corr"] for r in rows]
+        x = np.arange(len(families))
+        ax.bar(x, vals)
+        ax.axhline(0.0, linestyle="--", linewidth=1.0)
+        ax.set_xticks(x)
+        ax.set_xticklabels(families, rotation=40, ha="right")
+        ax.set_ylabel("corr_without − corr_full", fontsize=8)
+        ax.set_title(pretty_metric_name(metric_name))
 
 
 # ============================================================
@@ -1190,6 +1565,7 @@ def main() -> None:
     family_count_mats: Dict[str, np.ndarray] = {}
     global_corrs: Dict[str, float] = {}
     global_counts: Dict[str, int] = {}
+    metric_sources: Dict[str, str] = {}  # "single" | "pairwise" для каждой метрики
     leave_one_family_out_by_metric: Dict[str, List[Dict[str, Any]]] = {}
 
     target_mean_ref: np.ndarray | None = None
@@ -1228,6 +1604,7 @@ def main() -> None:
         family_count_mats[metric_name] = count_mat
         global_corrs[metric_name] = global_corr
         global_counts[metric_name] = global_n
+        metric_sources[metric_name] = "single"
 
         if families_ref is None:
             families_ref = families
@@ -1302,6 +1679,11 @@ def main() -> None:
             models_dst=models,
         )
 
+        # Приводим загруженную матрицу к протоколу без пересчёта из скалярных значений.
+        # signed -> антисимметризация (m[i,j] = -m[j,i])
+        # abs    -> симметризация + |·|  (m[i,j] = m[j,i] >= 0)
+        metric_mat = enforce_matrix_protocol(metric_mat, args.protocol)
+
         families, corr_mat, target_mean_mat, count_mat = compute_family_subset_matrices(
             metric_mat=metric_mat,
             target_mat=target_mat,
@@ -1323,6 +1705,7 @@ def main() -> None:
         family_count_mats[metric_name] = count_mat
         global_corrs[metric_name] = global_corr
         global_counts[metric_name] = global_n
+        metric_sources[metric_name] = "pairwise"
 
         if families_ref is None:
             families_ref = families
@@ -1435,6 +1818,8 @@ def main() -> None:
         title_prefix=title_prefix,
         corr_type=args.corr_type,
         annotate=args.annotate,
+        metric_sources=metric_sources,
+        protocol=args.protocol,
     )
 
     # --------------------------------------------------------
@@ -1471,6 +1856,7 @@ def main() -> None:
             out_path=loo_png,
             title_prefix=title_prefix,
             corr_type=args.corr_type,
+            metric_sources=metric_sources,
         )
 
     print("Saved:")
