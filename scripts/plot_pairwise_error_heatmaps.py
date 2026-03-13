@@ -953,7 +953,7 @@ def _draw_metric_group_grid(
             annotate_text=annotate_text,
         )
         last_im = im
-    for ax in axes.flat[len(metric_names):]:
+    for ax in axes.flat[len(metric_names) :]:
         ax.axis("off")
     return last_im
 
@@ -1056,7 +1056,10 @@ def save_family_correlation_grid(
             fig.add_axes(
                 [
                     (c * (1.0 / NCOLS)) * 0.88 + 0.04,
-                    single_top - single_sec_h_frac - (r + 1) * single_grid_h_frac / s_rows + 0.01,
+                    single_top
+                    - single_sec_h_frac
+                    - (r + 1) * single_grid_h_frac / s_rows
+                    + 0.01,
                     0.88 / NCOLS - 0.03,
                     single_grid_h_frac / s_rows - 0.04,
                 ]
@@ -1099,7 +1102,10 @@ def save_family_correlation_grid(
             fig.add_axes(
                 [
                     (c * (1.0 / NCOLS)) * 0.88 + 0.04,
-                    pairwise_top - pairwise_sec_h_frac - (r + 1) * pairwise_grid_h_frac / p_rows + 0.01,
+                    pairwise_top
+                    - pairwise_sec_h_frac
+                    - (r + 1) * pairwise_grid_h_frac / p_rows
+                    + 0.01,
                     0.88 / NCOLS - 0.03,
                     pairwise_grid_h_frac / p_rows - 0.04,
                 ]
@@ -1128,7 +1134,7 @@ def save_family_correlation_grid(
     final_im = last_im2 or last_im
 
     x_label = "m(i→j) − m(j→i)" if protocol == "signed" else "½(m(i→j) + m(j→i))"
-    y_label = "acc_i − acc_j"    if protocol == "signed" else "|acc_i − acc_j|"
+    y_label = "acc_i − acc_j" if protocol == "signed" else "|acc_i − acc_j|"
 
     fig.suptitle(
         f"{title_prefix} | {corr_label}({x_label}, {y_label}) по подмножествам пар семейств",
@@ -1177,20 +1183,28 @@ def _save_flat_corr_grid(
 
     corr_label = "Пирсон" if corr_type == "pearson" else "Спирмен"
     fig, axes = plt.subplots(
-        nrows=nrows, ncols=ncols,
+        nrows=nrows,
+        ncols=ncols,
         figsize=(5.8 * ncols, 5.0 * nrows),
         squeeze=False,
     )
     last_im = _draw_metric_group_grid(
-        fig=fig, axes=axes, metric_names=metric_names,
-        family_corr_mats=family_corr_mats, family_count_mats=family_count_mats,
-        global_corrs=global_corrs, global_counts=global_counts,
-        families=families, corr_label=corr_label,
-        vmin=vmin, vmax=vmax, annotate=annotate,
+        fig=fig,
+        axes=axes,
+        metric_names=metric_names,
+        family_corr_mats=family_corr_mats,
+        family_count_mats=family_count_mats,
+        global_corrs=global_corrs,
+        global_counts=global_counts,
+        families=families,
+        corr_label=corr_label,
+        vmin=vmin,
+        vmax=vmax,
+        annotate=annotate,
         protocol=protocol,
     )
     x_label = "m(i→j) − m(j→i)" if protocol == "signed" else "½(m(i→j) + m(j→i))"
-    y_label = "acc_i − acc_j"    if protocol == "signed" else "|acc_i − acc_j|"
+    y_label = "acc_i − acc_j" if protocol == "signed" else "|acc_i − acc_j|"
     fig.suptitle(
         f"{title_prefix} | {corr_label}({x_label}, {y_label}) по подмножествам пар семейств",
         fontsize=13,
@@ -1228,7 +1242,8 @@ def save_leave_one_family_out_barplot(
         ncols = min(3, n)
         nrows = math.ceil(n / ncols)
         fig, axes = plt.subplots(
-            nrows=nrows, ncols=ncols,
+            nrows=nrows,
+            ncols=ncols,
             figsize=(5.6 * ncols, 4.4 * nrows),
             squeeze=False,
         )
@@ -1245,7 +1260,7 @@ def save_leave_one_family_out_barplot(
         return
 
     NCOLS = 3
-    bar_h = 3.6   # высота одной строки барплотов
+    bar_h = 3.6  # высота одной строки барплотов
     sec_h = 0.40  # высота section-заголовка
     gap_h = 0.45  # зазор между секциями
     sup_h = 0.65  # место под общий заголовок
@@ -1266,9 +1281,13 @@ def save_leave_one_family_out_barplot(
 
     # Section label: single
     fig.text(
-        0.01, single_top - s_sec_frac / 2,
+        0.01,
+        single_top - s_sec_frac / 2,
         "── single metrics ──────────────────────────",
-        fontsize=10, color="#2266aa", va="center", fontstyle="italic",
+        fontsize=10,
+        color="#2266aa",
+        va="center",
+        fontstyle="italic",
     )
 
     s_axes = np.array(
@@ -1286,14 +1305,18 @@ def save_leave_one_family_out_barplot(
         ]
     ).reshape(s_rows, NCOLS)
     _fill_loo_axes(s_axes, single_names, metric_rows, corr_label)
-    for ax in s_axes.flat[len(single_names):]:
+    for ax in s_axes.flat[len(single_names) :]:
         ax.axis("off")
 
     # Section label: pairwise
     fig.text(
-        0.01, pw_top - p_sec_frac / 2,
+        0.01,
+        pw_top - p_sec_frac / 2,
         "── pairwise metrics ────────────────────────",
-        fontsize=10, color="#aa6622", va="center", fontstyle="italic",
+        fontsize=10,
+        color="#aa6622",
+        va="center",
+        fontstyle="italic",
     )
 
     p_axes = np.array(
@@ -1311,7 +1334,7 @@ def save_leave_one_family_out_barplot(
         ]
     ).reshape(p_rows, NCOLS)
     _fill_loo_axes(p_axes, pairwise_names, metric_rows, corr_label)
-    for ax in p_axes.flat[len(pairwise_names):]:
+    for ax in p_axes.flat[len(pairwise_names) :]:
         ax.axis("off")
 
     fig.suptitle(
