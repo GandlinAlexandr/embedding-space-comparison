@@ -195,7 +195,7 @@ B) Ниже представлены примеры команд запуска 
    * Вырожденность по направлениям (по парам)
    * Одновременная вырожденность (по парам)
 
-2. Данне по конкретной паре моделей
+2. Даннsе по конкретной паре моделей
    ```powershell
    python -m scripts.run_diagnose_local_map `
       --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\local_map_rank_linear_knn_k10_antisym_artifacts.npz `
