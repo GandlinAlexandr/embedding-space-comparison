@@ -10,6 +10,9 @@ from typing import Dict, List, Tuple, Iterable, Any, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 
+# ВАЖНО: запускаем как модуль: python -m scripts.plot_pairwise_error_heatmaps
+from configs.metric_configs import short_metric_name as _short_metric_name
+
 
 # ============================================================
 # Utility
@@ -35,56 +38,8 @@ def pretty_metric_name(name: str) -> str:
     if name in single_mapping:
         return single_mapping[name]
 
-    # Pairwise-метрики: короткие имена по подстрокам имени файла/ключа.
-    # Порядок важен: более специфичные паттерны — раньше.
-    n = name.replace("local_map_rank_", "")
-
-    if "linear_eps_percentile_5_antisym" in n:
-        return "lin_eps_5"
-    if "linear_eps_percentile_10_antisym" in n:
-        return "lin_eps_10"
-    if "linear_eps_percentile_20_antisym" in n:
-        return "lin_eps_20"
-    if "linear_eps_percentile_5_sym" in n:
-        return "lin_eps_5_sym"
-    if "linear_eps_percentile_10_sym" in n:
-        return "lin_eps_10_sym"
-    if "linear_eps_percentile_20_sym" in n:
-        return "lin_eps_20_sym"
-
-    if "linear_knn_k5_antisym" in n:
-        return "lin_k5"
-    if "linear_knn_k10_antisym" in n:
-        return "lin_k10"
-    if "linear_knn_k20_antisym" in n:
-        return "lin_k20"
-    if "linear_knn_k40_antisym" in n:
-        return "lin_k40"
-    if "linear_knn_k5_sym" in n:
-        return "lin_k5_sym"
-    if "linear_knn_k10_sym" in n:
-        return "lin_k10_sym"
-    if "linear_knn_k20_sym" in n:
-        return "lin_k20_sym"
-    if "linear_knn_k40_sym" in n:
-        return "lin_k40_sym"
-
-    if "multiscale_knn_mean_antisym" in n:
-        return "multiscale_mean"
-    if "multiscale_knn_mean_sym" in n:
-        return "multiscale_mean_sym"
-
-    if "rff_knn_k10_antisym" in n:
-        return "rff_k10"
-    if "rff_knn_k10_sym" in n:
-        return "rff_k10_sym"
-
-    if n == "local_map_rank_linear_knn_k10":
-        return "directed_k10"
-    if "linear_knn_k10" in n and "antisym" not in n and "_sym" not in n:
-        return "directed_k10"
-
-    return name
+    # Pairwise-метрики: делегируем в configs.metric_configs.short_metric_name.
+    return _short_metric_name(name)
 
 
 def load_json(path: Path):

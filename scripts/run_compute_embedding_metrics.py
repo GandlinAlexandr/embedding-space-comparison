@@ -29,6 +29,16 @@ run_compute_embedding_metrics.py
 - Для sym-метрик в файле хранится симметричная матрица sim.
   В incremental-режиме мы оставляем старый блок как есть и досчитываем только новые пары,
   заполняя sim[i,j] = 0.5*(m(i->j)+m(j->i)) и симметризуя.
+
+АРТЕФАКТЫ:
+- Вместе с матрицей метрики всегда сохраняется файл {metric_name}_artifacts.npz.
+- Артефакты содержат сырые данные по каждому центру для каждого направления (i->j):
+    singular_values: (n_centers, d) — сингулярные значения матрицы M
+    residuals:       (n_centers,)   — норма невязки ||Xc @ M - Yc||_F
+    ranks:           (n_centers,)   — жёсткий ранг M по порогу
+- Инкрементальность артефактов синхронна с инкрементальностью матрицы:
+  если пара уже посчитана (не NaN в матрице), артефакты для неё тоже уже есть.
+- Ключи в файле артефактов: "{model_i}_to_{model_j}/{поле}"
 """
 
 from __future__ import annotations
@@ -179,14 +189,23 @@ def rankme(s: np.ndarray) -> float:
     return float(np.exp(entropy))
 
 
-def _solve_local_linear_map_and_rank(Xc: np.ndarray, Yc: np.ndarray) -> float:
+def _solve_local_linear_map_and_rank(
+    Xc: np.ndarray, Yc: np.ndarray
+) -> Tuple[float, np.ndarray, float]:
     """
-    Решает Xc * M ≈ Yc и возвращает RankMe по сингулярным значениям M.
+    Решает Xc * M ≈ Yc и возвращает:
+      - RankMe по сингулярным значениям M
+      - сингулярные значения M (для диагностики)
+      - residual ||Xc @ M - Yc||_F (для диагностики)
     """
     # lstsq быстрее, чем pinv-dot, на малых окрестностях.
     M, *_ = np.linalg.lstsq(Xc, Yc, rcond=None)
     s = svd(M, full_matrices=False, compute_uv=False)
-    return rankme(s)
+
+    # Невязка: насколько хорошо линейное приближение работает в данной точке.
+    residual = float(np.linalg.norm(Xc @ M - Yc, "fro"))
+
+    return rankme(s), s, residual
 
 
 def _rff_features(
@@ -433,18 +452,31 @@ def _build_neighbor_cache(
 # ============================================================
 
 
+# Структура для хранения диагностических данных одного направления (i->j).
+@dataclass
+class DirectedArtifacts:
+    singular_values: List[np.ndarray]  # список (d,) — по одному на центр
+    residuals: List[float]  # невязка по каждому центру
+    ranks: List[int]  # жёсткий ранг M по каждому центру
+
+
 def _metric_directed_for_pair(
     spec: MetricSpec,
     X: np.ndarray,
     Y: np.ndarray,
     cache_X: NeighborCache,
     seed: int = 42,
-) -> float:
+) -> Tuple[float, DirectedArtifacts]:
     """
     Вычисляет направленную m(X->Y) как среднее по центрам:
       - выбираем окрестность в X вокруг каждого центра (kNN или eps)
       - берём соответствующие строки в Y (те же индексы)
       - решаем локальное линейное отображение и считаем RankMe по сингулярным значениям
+
+    Дополнительно собирает DiagnosticData для каждого центра:
+      - сингулярные значения M
+      - residual ||Xc @ M - Yc||_F
+      - жёсткий ранг M
     """
     Xn = cache_X.X_norm
     Yn = _zscore_rows(Y)
@@ -464,6 +496,20 @@ def _metric_directed_for_pair(
         )
 
     vals = []
+    artifacts = DirectedArtifacts(singular_values=[], residuals=[], ranks=[])
+
+    # Порог для жёсткого ранга (относительный, от максимального сингулярного значения).
+    rank_tol_ratio = 1e-10
+
+    def _accumulate(Xc: np.ndarray, Yc: np.ndarray) -> Optional[float]:
+        """Решает одну локальную задачу и накапливает артефакты."""
+        rankme_val, s, residual = _solve_local_linear_map_and_rank(Xc, Yc)
+        tol = rank_tol_ratio * float(np.max(s)) if len(s) > 0 else 0.0
+        hard_rank = int(np.sum(s > tol))
+        artifacts.singular_values.append(s)
+        artifacts.residuals.append(residual)
+        artifacts.ranks.append(hard_rank)
+        return rankme_val
 
     if spec.kind in {"linear_knn", "rff_knn"}:
         assert spec.k is not None
@@ -471,7 +517,7 @@ def _metric_directed_for_pair(
         for idxs in nn:
             Xc = Xn[idxs]
             Yc = Yn[idxs]
-            vals.append(_solve_local_linear_map_and_rank(Xc, Yc))
+            vals.append(_accumulate(Xc, Yc))
 
     elif spec.kind == "multiscale_knn":
         assert spec.k_list is not None
@@ -482,7 +528,7 @@ def _metric_directed_for_pair(
             for idxs in nn:
                 Xc = Xn[idxs]
                 Yc = Yn[idxs]
-                tmp.append(_solve_local_linear_map_and_rank(Xc, Yc))
+                tmp.append(_accumulate(Xc, Yc))
             per_scale.append(np.asarray(tmp, dtype=np.float32))
         # Агрегируем масштабы.
         stack = np.stack(per_scale, axis=0)  # (S, C)
@@ -505,18 +551,70 @@ def _metric_directed_for_pair(
                 continue
             Xc = Xn[idxs]
             Yc = Yn[idxs]
-            vals.append(_solve_local_linear_map_and_rank(Xc, Yc))
+            vals.append(_accumulate(Xc, Yc))
 
     else:
         raise ValueError(f"Неизвестный spec.kind: {spec.kind}")
 
     if not vals:
-        return float("nan")
-    return float(np.mean(vals))
+        return float("nan"), artifacts
+    return float(np.mean(vals)), artifacts
 
 
 # ============================================================
-# 5) Вспомогательные функции для инкрементального ввода-вывода (.npz)
+# 5) Артефакты: загрузка и дозапись в единый .npz на метрику
+# ============================================================
+
+
+def _artifacts_path(out_dir: str, metric_name: str) -> str:
+    return os.path.join(out_dir, f"{metric_name}_artifacts.npz")
+
+
+def _load_artifacts(path: str) -> Dict[str, Any]:
+    """
+    Загружает существующий файл артефактов в словарь {ключ -> массив}.
+    Если файл не существует — возвращает пустой словарь.
+    """
+    if not os.path.exists(path):
+        return {}
+    data = np.load(path, allow_pickle=True)
+    return {k: data[k] for k in data.files}
+
+
+def _artifact_key_exists(artifacts: Dict[str, Any], model_i: str, model_j: str) -> bool:
+    """Проверяет, есть ли уже артефакты для направления model_i -> model_j."""
+    key = f"{model_i}_to_{model_j}/residuals"
+    return key in artifacts
+
+
+def _save_artifacts(
+    path: str,
+    artifacts: Dict[str, Any],
+    model_i: str,
+    model_j: str,
+    directed: DirectedArtifacts,
+) -> None:
+    """
+    Дописывает артефакты направления model_i -> model_j в общий файл метрики.
+    Существующие ключи не трогает — только добавляет новые.
+    """
+    prefix = f"{model_i}_to_{model_j}"
+
+    # Сингулярные значения могут иметь разную длину по центрам (eps-окрестность),
+    # поэтому храним как object-массив.
+    sv_array = np.empty(len(directed.singular_values), dtype=object)
+    for idx, sv in enumerate(directed.singular_values):
+        sv_array[idx] = sv
+
+    artifacts[f"{prefix}/singular_values"] = sv_array
+    artifacts[f"{prefix}/residuals"] = np.array(directed.residuals, dtype=np.float32)
+    artifacts[f"{prefix}/ranks"] = np.array(directed.ranks, dtype=np.int32)
+
+    np.savez_compressed(path, **artifacts)
+
+
+# ============================================================
+# 6) Вспомогательные функции для инкрементального ввода-вывода (.npz)
 # ============================================================
 
 
@@ -593,7 +691,7 @@ def _extend_matrix_with_old_block(M_old: np.ndarray, n_total: int) -> np.ndarray
 
 
 # ============================================================
-# 6) Основной запуск
+# 7) Основной запуск
 # ============================================================
 
 
@@ -742,6 +840,8 @@ def main():
         )
 
         out_path = os.path.join(args.out_dir, f"{name}.npz")
+        artifacts_path = _artifacts_path(args.out_dir, name)
+
         # ------------------------------------------------------------
         # Создание кэшей для каждой модели (центры + соседи) один раз для каждой метрики.
         # Важно: кэш зависит от спецификации (k / eps / multiscale / rff).
@@ -801,6 +901,10 @@ def main():
             )
             _save_model_list(args.out_dir, manifest_model_names)
 
+        # Загружаем существующие артефакты (или пустой словарь если файла нет).
+        # Артефакты всегда синхронны с матрицей: если пара посчитана — артефакты есть.
+        saved_artifacts = _load_artifacts(artifacts_path)
+
         # ============================================================
         # Вычисление значений
         # - directed: out_matrix — направленная M (может быть несимметричной)
@@ -835,21 +939,30 @@ def main():
 
                     # Вычисляем в обоих направлениях
                     Yj = embeddings[mj]
+
                     # m(i->j)
-                    mij = _metric_directed_for_pair(
+                    mij, artifacts_ij = _metric_directed_for_pair(
                         spec, Xi, Yj, cache_i, seed=args.seed
                     )
 
                     # m(j->i)
                     Xj = embeddings[mj]
                     cache_j = get_cache_for_model_i(mj)
-                    mji = _metric_directed_for_pair(
+                    mji, artifacts_ji = _metric_directed_for_pair(
                         spec, Xj, Xi, cache_j, seed=args.seed
                     )
 
                     aij = np.float32(mij - mji)
                     out_matrix[i, j] = aij
                     out_matrix[j, i] = np.float32(-aij)
+
+                    # Сохраняем артефакты для обоих направлений.
+                    _save_artifacts(
+                        artifacts_path, saved_artifacts, mi, mj, artifacts_ij
+                    )
+                    _save_artifacts(
+                        artifacts_path, saved_artifacts, mj, mi, artifacts_ji
+                    )
 
             # Обеспечивает точную антисимметрию и нулевую диагональ
             np.fill_diagonal(out_matrix, 0.0)
@@ -880,19 +993,30 @@ def main():
                         continue
 
                     Yj = embeddings[mj]
-                    mij = _metric_directed_for_pair(
+
+                    # m(i->j)
+                    mij, artifacts_ij = _metric_directed_for_pair(
                         spec, Xi, Yj, cache_i, seed=args.seed
                     )
 
+                    # m(j->i)
                     Xj = embeddings[mj]
                     cache_j = get_cache_for_model_i(mj)
-                    mji = _metric_directed_for_pair(
+                    mji, artifacts_ji = _metric_directed_for_pair(
                         spec, Xj, Xi, cache_j, seed=args.seed
                     )
 
                     sij = np.float32(0.5 * (mij + mji))
                     out_matrix[i, j] = sij
                     out_matrix[j, i] = sij
+
+                    # Сохраняем артефакты для обоих направлений.
+                    _save_artifacts(
+                        artifacts_path, saved_artifacts, mi, mj, artifacts_ij
+                    )
+                    _save_artifacts(
+                        artifacts_path, saved_artifacts, mj, mi, artifacts_ji
+                    )
 
             # Обеспечиваем симметрию и нулевую диагональ
             np.fill_diagonal(out_matrix, 0.0)
@@ -911,10 +1035,15 @@ def main():
                     if not np.isnan(out_matrix[i, j]):
                         continue
                     Yj = embeddings[mj]
-                    val = _metric_directed_for_pair(
+                    val, artifacts_ij = _metric_directed_for_pair(
                         spec, Xi, Yj, cache_i, seed=args.seed
                     )
                     out_matrix[i, j] = np.float32(val)
+
+                    # Сохраняем артефакты для направления i->j.
+                    _save_artifacts(
+                        artifacts_path, saved_artifacts, mi, mj, artifacts_ij
+                    )
 
         # Флаги:
         # - pair_agg="directed": направленная величина m(X->Y)
@@ -937,6 +1066,7 @@ def main():
             meta_json=json.dumps(meta, ensure_ascii=False),
         )
         print(f"Сохранено: {out_path}")
+        print(f"Артефакты: {artifacts_path}")
 
     print("\nГотово.")
 

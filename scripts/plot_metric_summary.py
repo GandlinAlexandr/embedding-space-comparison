@@ -4,93 +4,12 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+# ВАЖНО: запускаем как модуль: python -m scripts.plot_metric_summary
+from configs.metric_configs import short_metric_name
+
 
 def _ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
-
-
-def short_metric_name(metric_file: str) -> str:
-    """
-    Удобочитаемые короткие названия для графиков.
-    Расширяйте это сопоставление по мере добавления новых вариантов.
-
-    ВАЖНО:
-
-    - Существующие названия антисимметрии сохраняются без изменений (не изменяйте выходные данные для уже вычисленных экспериментов).
-
-    - Добавлены симметричные (_sym) псевдонимы без влияния на антисимметрию.
-    """
-    name = os.path.basename(str(metric_file))
-    if name.lower().endswith(".npz"):
-        name = name[:-4]
-
-    # Убираем общий префикс
-    name = name.replace("local_map_rank_", "")
-
-    # -------------------------
-    # Варианты для EPS
-    # -------------------------
-    if "linear_eps_percentile_5_antisym" in name:
-        return "lin_eps_5"
-    if "linear_eps_percentile_10_antisym" in name:
-        return "lin_eps_10"
-    if "linear_eps_percentile_20_antisym" in name:
-        return "lin_eps_20"
-
-    if "linear_eps_percentile_5_sym" in name:
-        return "lin_eps_5_sym"
-    if "linear_eps_percentile_10_sym" in name:
-        return "lin_eps_10_sym"
-    if "linear_eps_percentile_20_sym" in name:
-        return "lin_eps_20_sym"
-
-    # -------------------------
-    # Линейный kNN, антисимметричный вариант
-    # -------------------------
-    if "linear_knn_k5_antisym" in name:
-        return "lin_k5"
-    if "linear_knn_k10_antisym" in name:
-        return "lin_k10"
-    if "linear_knn_k20_antisym" in name:
-        return "lin_k20"
-    if "linear_knn_k40_antisym" in name:
-        return "lin_k40"
-
-    # Линейный kNN, симметричный вариант
-    if "linear_knn_k5_sym" in name:
-        return "lin_k5_sym"
-    if "linear_knn_k10_sym" in name:
-        return "lin_k10_sym"
-    if "linear_knn_k20_sym" in name:
-        return "lin_k20_sym"
-    if "linear_knn_k40_sym" in name:
-        return "lin_k40_sym"
-
-    # -------------------------
-    # Мульти-масштабный вариант
-    # -------------------------
-    if "multiscale_knn_mean_antisym" in name:
-        return "multiscale_mean"
-    if "multiscale_knn_mean_sym" in name:
-        return "multiscale_mean_sym"
-
-    # -------------------------
-    # Вариант с RFF
-    # -------------------------
-    if "rff_knn_k10_antisym" in name:
-        return "rff_k10"
-    if "rff_knn_k10_sym" in name:
-        return "rff_k10_sym"
-
-    # -------------------------
-    # Неантисимметричный вариант
-    # -------------------------
-    if name == "local_map_rank_linear_knn_k10":
-        return "directed_k10"
-    if "linear_knn_k10" in name and ("antisym" not in name) and ("_sym" not in name):
-        return "directed_k10"
-
-    return name
 
 
 def _choose_cr_column(df: pd.DataFrame) -> str | None:

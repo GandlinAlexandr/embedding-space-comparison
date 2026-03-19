@@ -225,3 +225,75 @@ def get_embedding_metric_configs() -> Dict[str, Dict[str, Any]]:
     }
 
     return configs
+
+
+# ============================================================
+# Короткие названия метрик для графиков
+# ============================================================
+# Единственное место в проекте, где задаются сокращения.
+# Все скрипты визуализации импортируют отсюда.
+#
+# Функция принимает полное имя метрики или путь к файлу метрики
+# (включая .npz) и возвращает короткое читаемое название.
+#
+# При добавлении новой метрики — добавить строку сюда.
+
+
+import os as _os
+
+
+def short_metric_name(name: str) -> str:
+    """
+    Возвращает короткое читаемое название метрики для использования в графиках.
+
+    Принимает:
+      - полное имя метрики:  "local_map_rank_linear_knn_k10_antisym"
+      - имя файла:           "local_map_rank_linear_knn_k10_antisym.npz"
+      - путь к файлу:        "/data/metrics/local_map_rank_linear_knn_k10_antisym.npz"
+
+    Возвращает короткое название, например "lin_k10".
+    Если имя не распознано — возвращает его как есть (без префикса и расширения).
+    """
+    # Берём только имя файла без пути и расширения.
+    name = _os.path.basename(str(name))
+    if name.lower().endswith(".npz"):
+        name = name[:-4]
+
+    # Словарь: полное имя метрики -> короткое название.
+    # Порядок не важен — используется точное совпадение.
+    _MAPPING = {
+        # ---- Линейный kNN, антисимметричный ----
+        "local_map_rank_linear_knn_k5_antisym": "lin_k5",
+        "local_map_rank_linear_knn_k10_antisym": "lin_k10",
+        "local_map_rank_linear_knn_k20_antisym": "lin_k20",
+        "local_map_rank_linear_knn_k40_antisym": "lin_k40",
+        # ---- Линейный kNN, симметричный ----
+        "local_map_rank_linear_knn_k5_sym": "lin_k5_sym",
+        "local_map_rank_linear_knn_k10_sym": "lin_k10_sym",
+        "local_map_rank_linear_knn_k20_sym": "lin_k20_sym",
+        "local_map_rank_linear_knn_k40_sym": "lin_k40_sym",
+        # ---- Линейный kNN, направленный ----
+        "local_map_rank_linear_knn_k10": "directed_k10",
+        # ---- Epsilon, антисимметричный ----
+        "local_map_rank_linear_eps_percentile_5_antisym": "lin_eps_5",
+        "local_map_rank_linear_eps_percentile_10_antisym": "lin_eps_10",
+        "local_map_rank_linear_eps_percentile_20_antisym": "lin_eps_20",
+        # ---- Epsilon, симметричный ----
+        "local_map_rank_linear_eps_percentile_5_sym": "lin_eps_5_sym",
+        "local_map_rank_linear_eps_percentile_10_sym": "lin_eps_10_sym",
+        "local_map_rank_linear_eps_percentile_20_sym": "lin_eps_20_sym",
+        # ---- Multiscale, антисимметричный ----
+        "local_map_rank_multiscale_knn_mean_antisym": "multiscale_mean",
+        # ---- Multiscale, симметричный ----
+        "local_map_rank_multiscale_knn_mean_sym": "multiscale_mean_sym",
+        # ---- RFF, антисимметричный ----
+        "local_map_rank_rff_knn_k10_antisym": "rff_k10",
+        # ---- RFF, симметричный ----
+        "local_map_rank_rff_knn_k10_sym": "rff_k10_sym",
+    }
+
+    if name in _MAPPING:
+        return _MAPPING[name]
+
+    # Если точного совпадения нет — убираем общий префикс как запасной вариант.
+    return name.replace("local_map_rank_", "")

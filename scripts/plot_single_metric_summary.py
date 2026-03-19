@@ -9,6 +9,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# ВАЖНО: запускаем как модуль: python -m scripts.plot_single_metric_summary
+from configs.metric_configs import short_metric_name as short_pairwise_name
+
 
 # ============================================================
 # Utils
@@ -78,35 +81,6 @@ def build_title_prefix(base_title: str, protocol: str) -> str:
 # ============================================================
 # Short names
 # ============================================================
-
-
-def short_pairwise_name(metric_file: str) -> str:
-    name = os.path.basename(str(metric_file))
-    if name.lower().endswith(".npz"):
-        name = name[:-4]
-
-    mapping = {
-        "local_map_rank_linear_knn_k5_antisym": "lin_k5",
-        "local_map_rank_linear_knn_k10_antisym": "lin_k10",
-        "local_map_rank_linear_knn_k20_antisym": "lin_k20",
-        "local_map_rank_linear_knn_k40_antisym": "lin_k40",
-        "local_map_rank_linear_eps_percentile_5_antisym": "lin_eps_5",
-        "local_map_rank_linear_eps_percentile_10_antisym": "lin_eps_10",
-        "local_map_rank_linear_eps_percentile_20_antisym": "lin_eps_20",
-        "local_map_rank_multiscale_knn_mean_antisym": "multiscale_mean",
-        "local_map_rank_rff_knn_k10_antisym": "rff_k10",
-        "local_map_rank_linear_knn_k10": "directed_k10",
-        "local_map_rank_linear_knn_k5_sym": "lin_k5_sym",
-        "local_map_rank_linear_knn_k10_sym": "lin_k10_sym",
-        "local_map_rank_linear_knn_k20_sym": "lin_k20_sym",
-        "local_map_rank_linear_knn_k40_sym": "lin_k40_sym",
-        "local_map_rank_linear_eps_percentile_5_sym": "lin_eps_5_sym",
-        "local_map_rank_linear_eps_percentile_10_sym": "lin_eps_10_sym",
-        "local_map_rank_linear_eps_percentile_20_sym": "lin_eps_20_sym",
-        "local_map_rank_multiscale_knn_mean_sym": "multiscale_mean_sym",
-        "local_map_rank_rff_knn_k10_sym": "rff_k10_sym",
-    }
-    return mapping.get(name, name)
 
 
 def short_single_name(metric_name: str) -> str:
