@@ -175,7 +175,8 @@ B) Ниже представлены примеры команд запуска 
 
 <details>
   <summary><b>▶ Пример запуска</b></summary>
-1. Общая агрегация по всем метрикам
+
+  1. Общая агрегация по всем метрикам
    ```powershell
    python -m scripts.run_diagnose_local_map `
       --artifacts_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test `
