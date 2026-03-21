@@ -50,7 +50,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # ВАЖНО: запускаем как модуль: python -m scripts.run_diagnose_local_map
-from configs.metric_configs import short_metric_name
+from configs.metric_configs import short_metric_name, get_embedding_metric_configs
 
 # ============================================================
 # 0) Вспомогательные функции вывода
@@ -208,6 +208,9 @@ def _compute_both_degenerate_fraction(
         pair = tuple(sorted([mi, mj]))
         if pair in pairs_seen:
             continue
+        if mi == mj:
+            # Диагональные пары (i→i) не имеют смысла — пропускаем.
+            continue
         if (mj, mi) not in sv_map:
             # Обратного направления нет — пропускаем.
             continue
@@ -277,19 +280,18 @@ def _plot_single_pair(
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
     fig.suptitle(
         f"Диагностика локального отображения\n"
-        f"Метрика: {metric_name} | Пара: {model_i} / {model_j} | Центров: {n_centers} | Порог вырожденности: {threshold:.2e}",
+        f"Метрика: {short_metric_name(metric_name)} | Пара: {model_i} / {model_j} | Центров на пару: {n_centers} | Порог вырожденности: {threshold:.2e}",
         fontsize=12,
     )
 
     # --- 1. Гистограмма рангов ---
     ax = axes[0, 0]
     all_ranks = np.concatenate([ranks_ij, ranks_ji])
-    bins = np.arange(all_ranks.min(), all_ranks.max() + 2) - 0.5
-    ax.hist(ranks_ij, bins=bins, alpha=0.6, label=label_ij, color="steelblue")
-    ax.hist(ranks_ji, bins=bins, alpha=0.6, label=label_ji, color="coral")
+    ax.hist(ranks_ij, bins="auto", alpha=0.6, label=label_ij, color="steelblue")
+    ax.hist(ranks_ji, bins="auto", alpha=0.6, label=label_ji, color="coral")
     ax.set_xlabel("Ранг отображения M")
     ax.set_ylabel("Количество центров")
-    ax.set_title("Гистограмма рангов")
+    ax.set_title("Гистограмма рангов по направлениям")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
@@ -297,9 +299,9 @@ def _plot_single_pair(
     ax = axes[0, 1]
     ax.hist(res_ij, bins=30, alpha=0.6, label=label_ij, color="steelblue")
     ax.hist(res_ji, bins=30, alpha=0.6, label=label_ji, color="coral")
-    ax.set_xlabel("Residual ||Xc @ M - Yc||_F")
+    ax.set_xlabel(r"Residual $\|X_c M - Y_c\|_F$")
     ax.set_ylabel("Количество центров")
-    ax.set_title("Распределение ошибок решения")
+    ax.set_title("Распределение ошибок решения по направлениям")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
@@ -312,7 +314,7 @@ def _plot_single_pair(
         boxprops=dict(facecolor="lightblue"),
     )
     ax.set_ylabel("Residual")
-    ax.set_title("Ошибки решения: boxplot")
+    ax.set_title("Ошибки решения по направлениям")
     ax.grid(True, alpha=0.3)
     ax.tick_params(axis="x", labelsize=8)
 
@@ -351,13 +353,13 @@ def _plot_single_pair(
         ],
         [
             "Residual (mean)",
-            f"{stats_ij['residual_mean']:.4f}",
-            f"{stats_ji['residual_mean']:.4f}",
+            f"{stats_ij['residual_mean']:.2e}",
+            f"{stats_ji['residual_mean']:.2e}",
         ],
         [
             "Residual (std)",
-            f"{stats_ij['residual_std']:.4f}",
-            f"{stats_ji['residual_std']:.4f}",
+            f"{stats_ij['residual_std']:.2e}",
+            f"{stats_ji['residual_std']:.2e}",
         ],
         [
             "Выр-х центров",
@@ -427,7 +429,8 @@ def _plot_singular_values_summary(
         label=f"порог={sv_threshold:.0e}",
     )
     ax.set_xlabel("Номер сингулярного значения")
-    ax.set_ylabel("Значение")
+    ax.set_ylabel("Значение (лог. шкала)")
+    ax.set_yscale("log")
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
 
@@ -444,6 +447,7 @@ def _plot_aggregated(
     plots_dir: str,
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
+    metric_spec_str: str = "",
 ) -> None:
     """
     Строит агрегированные графики по всем парам:
@@ -477,14 +481,15 @@ def _plot_aggregated(
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(
         f"Агрегированная диагностика локального отображения\n"
-        f"Метрика: {metric_name} | Центров на направление: {n_centers_per_direction} | Направлений: {len(directions)} | Порог вырожденности: {threshold:.2e}",
+        f"Метрика: {short_metric_name(metric_name)}"
+        + (f" | {metric_spec_str}" if metric_spec_str else "")
+        + f" | Центров на пару: {n_centers_per_direction} | Пар моделей: {len(directions)} | Порог вырожденности: {threshold:.2e}",
         fontsize=12,
     )
 
     # --- 1. Гистограмма рангов по всем парам и центрам ---
     ax = axes[0, 0]
-    bins = np.arange(all_ranks.min(), all_ranks.max() + 2) - 0.5
-    ax.hist(all_ranks, bins=bins, color="steelblue", edgecolor="white", linewidth=0.5)
+    ax.hist(all_ranks, bins="auto", color="steelblue", edgecolor="white", linewidth=0.5)
     ax.axvline(
         np.mean(all_ranks),
         color="red",
@@ -492,9 +497,18 @@ def _plot_aggregated(
         linewidth=1.5,
         label=f"среднее={np.mean(all_ranks):.2f}",
     )
+    ax.axvline(
+        np.median(all_ranks),
+        color="orange",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"медиана={np.median(all_ranks):.2f}",
+    )
     ax.set_xlabel("Ранг отображения M")
     ax.set_ylabel("Количество центров (все пары)")
-    ax.set_title(f"Гистограмма рангов\nstd={np.std(all_ranks):.3f}")
+    ax.set_title(
+        f"Гистограмма рангов (X→Y и Y→X)\nstd={np.std(all_ranks):.3f}, медиана={np.median(all_ranks):.2f}"
+    )
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
@@ -506,18 +520,18 @@ def _plot_aggregated(
         color="darkred",
         linestyle="--",
         linewidth=1.5,
-        label=f"среднее={np.mean(all_residuals):.4f}",
+        label=f"среднее={np.mean(all_residuals):.2e}",
     )
     ax.axvline(
         np.median(all_residuals),
         color="orange",
         linestyle="--",
         linewidth=1.5,
-        label=f"медиана={np.median(all_residuals):.4f}",
+        label=f"медиана={np.median(all_residuals):.2e}",
     )
-    ax.set_xlabel("Residual ||Xc @ M - Yc||_F")
+    ax.set_xlabel(r"Residual $\|X_c M - Y_c\|_F$")
     ax.set_ylabel("Количество центров (все пары)")
-    ax.set_title("Распределение ошибок решения")
+    ax.set_title("Распределение ошибок решения (X→Y и Y→X)")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
@@ -528,7 +542,7 @@ def _plot_aggregated(
     ax.set_xticks(x)
     ax.set_xticklabels(direction_labels, rotation=45, ha="right", fontsize=7)
     ax.set_ylabel("Доля вырожденных центров")
-    ax.set_title("Вырожденность по направлениям")
+    ax.set_title("Вырожденность по парам моделей (X→Y и Y→X)")
     ax.set_ylim(0, max(max(frac_deg_per_direction) * 1.2, 0.05))
     ax.grid(True, alpha=0.3, axis="y")
     # Подписываем значения на барах
@@ -556,7 +570,7 @@ def _plot_aggregated(
         ax.set_ylabel("Доля центров, где оба вырождены")
         overall = both_deg_stats["frac_both_degenerate_overall"]
         ax.set_title(
-            f"Одновременная вырожденность (X→Y и Y→X)\n"
+            f"Одновременная вырожденность X→Y и Y→X в одном центре\n"
             f"Итого: {both_deg_stats['total_both_degenerate']} / {both_deg_stats['total_centers']} "
             f"({overall:.1%})"
         )
@@ -582,7 +596,7 @@ def _plot_aggregated(
             transform=ax.transAxes,
             fontsize=11,
         )
-        ax.set_title("Одновременная вырожденность")
+        ax.set_title("Одновременная вырожденность X→Y и Y→X в одном центре")
 
     plt.tight_layout()
     fname = f"{metric_name}_aggregated_diagnostics.png"
@@ -634,7 +648,7 @@ def _save_report(
     )
     lines.append("")
 
-    lines.append("--- Одновременная вырожденность (X→Y и Y→X) ---")
+    lines.append("--- Одновременная вырожденность X→Y и Y→X в одном центре ---")
     overall = both_deg_stats["frac_both_degenerate_overall"]
     lines.append(f"Всего центров (по всем парам): {both_deg_stats['total_centers']}")
     lines.append(
@@ -709,7 +723,7 @@ def _plot_summary(
     n_centers = metrics_data[0]["n_centers"]
     fig.suptitle(
         f"Сводная диагностика локальных отображений\n"
-        f"Центров на направление: {n_centers} | Метрик: {len(labels)} | "
+        f"Центров на пару: {n_centers} | Метрик: {len(labels)} | "
         f"Порог вырожденности: {threshold:.0e}",
         fontsize=13,
     )
@@ -761,7 +775,7 @@ def _plot_summary(
     )
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Среднее residual ||Xc @ M - Yc||_F")
+    ax.set_ylabel(r"Среднее residual $\|X_c M - Y_c\|_F$")
     ax.set_title(
         "Ошибка решения линейного уравнения\n(чем меньше — тем лучше линейное приближение)"
     )
@@ -782,22 +796,23 @@ def _plot_summary(
     bars = ax.bar(x, frac_both_deg, color="mediumpurple", alpha=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Доля центров, где оба направления вырождены")
+    ax.set_ylabel("Доля центров")
     ax.set_title(
-        "Одновременная вырожденность X->Y и Y->X\n"
+        "Одновременная вырожденность X→Y и Y→X в одном центре\n"
         "(по гипотезе должно быть близко к 0)"
     )
     ax.set_ylim(0, max(max(frac_both_deg) * 1.3, 0.05))
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, frac_both_deg):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + max(frac_both_deg) * 0.01 + 0.001,
-            f"{val:.2%}",
-            ha="center",
-            va="bottom",
-            fontsize=7,
-        )
+        if val > 0:
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max(frac_both_deg) * 0.01 + 0.001,
+                f"{val:.2%}",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
 
     # --- 4. Спектр сингулярных значений по всем метрикам на одном поле ---
     ax = axes[3]
@@ -819,7 +834,7 @@ def _plot_summary(
     ax.set_xlabel("Нормированный индекс сингулярного значения (0 = макс, 1 = мин)")
     ax.set_ylabel("Сингулярное значение (медиана по центрам и парам)")
     ax.set_title(
-        "Спектр сингулярных значений матрицы M\n(медиана ± std по всем центрам и направлениям)"
+        "Спектр сингулярных значений матрицы M\n(медиана ± std по всем центрам, X→Y и Y→X)"
     )
     ax.set_yscale("log")
     ax.legend(fontsize=7, ncol=2, loc="upper right")
@@ -890,6 +905,57 @@ def _collect_metric_data(
     }
 
 
+def _load_metric_spec(metric_name: str) -> str:
+    """
+    Читает параметры метрики из configs/metric_configs.py и возвращает
+    читаемую строку с ключевыми параметрами для отображения в заголовке.
+    Если метрика не найдена — возвращает пустую строку.
+    """
+    try:
+        cfgs = get_embedding_metric_configs()
+        if metric_name not in cfgs:
+            return ""
+        meta = cfgs[metric_name].get("meta", {})
+        parts = []
+
+        if "k_list" in meta:
+            parts.append(f"k_list={meta['k_list']}")
+        if "aggregator" in meta:
+            parts.append(f"agg={meta['aggregator']}")
+        if "k" in meta and "k_list" not in meta:
+            parts.append(f"k={meta['k']}")
+        if "eps_percentile" in meta:
+            parts.append(f"eps_percentile={meta['eps_percentile']}")
+
+        return ", ".join(parts)
+    except Exception:
+        return ""
+
+        parts = []
+        kind = spec.get("kind", "")
+        if kind == "multiscale_knn":
+            k_list = spec.get("k_list", None)
+            agg = spec.get("aggregator", "mean")
+            if k_list:
+                parts.append(f"k_list={list(k_list)}, agg={agg}")
+        elif kind in {"linear_knn", "rff_knn"}:
+            k = spec.get("k", None)
+            if k:
+                parts.append(f"k={k}")
+        elif kind == "linear_eps":
+            eps_p = spec.get("eps_percentile", None)
+            if eps_p:
+                parts.append(f"eps_percentile={eps_p}")
+
+        n_centers = spec.get("n_centers", None)
+        if n_centers:
+            parts.append(f"n_centers={n_centers}")
+
+        return ", ".join(parts)
+    except Exception:
+        return ""
+
+
 # ============================================================
 # 7) Основной запуск
 # ============================================================
@@ -910,6 +976,7 @@ def _run_single_metric(
     """
     plots_dir, reports_dir = _make_out_dirs(out_dir)
     metric_name = os.path.basename(artifacts_path).replace("_artifacts.npz", "")
+    metric_spec_str = _load_metric_spec(metric_name)
 
     print(f"\nМетрика: {metric_name}")
     print(f"Загрузка артефактов: {artifacts_path}")
@@ -922,7 +989,7 @@ def _run_single_metric(
         )
         return None
 
-    print(f"Направлений: {len(directions)}")
+    print(f"Пар моделей: {len(directions)}")
 
     both_deg_stats = _compute_both_degenerate_fraction(
         artifacts, directions, threshold=threshold
@@ -940,6 +1007,7 @@ def _run_single_metric(
         plots_dir,
         metric_name,
         threshold=threshold,
+        metric_spec_str=metric_spec_str,
     )
     _save_report(directions, artifacts, both_deg_stats, reports_dir, metric_name)
 
