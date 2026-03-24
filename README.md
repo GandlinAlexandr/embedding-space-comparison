@@ -100,7 +100,7 @@ A) Пример пошагового запуска и оценки основн
     python -m scripts.run_compute_embedding_metrics `
       --embeddings_dir .\data\embeddings\cifar10_test `
       --out_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\metric_matrices\cifar10_test `
-      --include local_map_rank_linear_knn_k10,local_map_rank_linear_knn_k10_antisym,local_map_rank_linear_knn_k5_antisym,local_map_rank_linear_knn_k20_antisym,local_map_rank_linear_knn_k40_antisym,local_map_rank_linear_eps_percentile_5_antisym,local_map_rank_linear_eps_percentile_10_antisym,local_map_rank_linear_eps_percentile_20_antisym,local_map_rank_multiscale_knn_mean_antisym,local_map_rank_rff_knn_k10_antisym `
+      --include directed_k10,lin_k10,lin_k5,lin_k20,lin_k40,lin_eps_5,lin_eps_10,lin_eps_20,multiscale_mean,rff_k10 `
       --seed 42 `
       --incremental
    ```
@@ -110,7 +110,7 @@ A) Пример пошагового запуска и оценки основн
     python -m scripts.run_compute_embedding_metrics `
       --embeddings_dir .\data\embeddings\cifar10_test `
       --out_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\metric_matrices\cifar10_test `
-      --include local_map_rank_linear_knn_k10,local_map_rank_linear_knn_k10_sym,local_map_rank_linear_knn_k5_sym,local_map_rank_linear_knn_k20_sym,local_map_rank_linear_knn_k40_sym,local_map_rank_linear_eps_percentile_5_sym,local_map_rank_linear_eps_percentile_10_sym,local_map_rank_linear_eps_percentile_20_sym,local_map_rank_multiscale_knn_mean_sym,local_map_rank_rff_knn_k10_sym `
+      --include directed_k10,lin_k10_sym,lin_k5_sym,lin_k20_sym,lin_k40_sym,lin_eps_5_sym,lin_eps_10_sym,lin_eps_20_sym,multiscale_mean_sym,rff_k10_sym `
       --seed 42 `
       --incremental
    ```
@@ -198,7 +198,7 @@ B) Ниже представлены примеры команд запуска 
 2. Даннsе по конкретной паре моделей
    ```powershell
    python -m scripts.run_diagnose_local_map `
-      --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\local_map_rank_linear_knn_k10_antisym_artifacts.npz `
+      --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\lin_k10_artifacts.npz `
       --model_a resnet50 `
       --model_b vit_b_16 `
       --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\paars\pair_resnet50_vit_b_16 `

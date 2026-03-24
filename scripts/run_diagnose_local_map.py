@@ -29,12 +29,12 @@ run_diagnose_local_map.py
 
   # Агрегированная диагностика по одной метрике:
   python -m scripts.run_diagnose_local_map \\
-      --artifacts_path metric_matrices/local_map_rank_linear_knn_k10_artifacts.npz \\
+      --artifacts_path metric_matrices/directed_k10_artifacts.npz \\
       --out_dir diagnostics/
 
   # Детально по одной паре:
   python -m scripts.run_diagnose_local_map \\
-      --artifacts_path metric_matrices/local_map_rank_linear_knn_k10_artifacts.npz \\
+      --artifacts_path metric_matrices/lin_k10_artifacts.npz \\
       --model_a resnet50 --model_b vit_b16 \\
       --out_dir diagnostics/
 """
@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -129,6 +130,55 @@ def _get_direction_data(
     return sv, res, ranks
 
 
+@dataclass
+class DirectionExtraData:
+    neighbor_sizes: Optional[np.ndarray] = None
+    neighbor_distances: Optional[np.ndarray] = None
+    sigma_values: Optional[np.ndarray] = None
+    eps_values: Optional[np.ndarray] = None
+    sample_weights: Optional[np.ndarray] = None
+    inlier_masks: Optional[np.ndarray] = None
+    inlier_counts: Optional[np.ndarray] = None
+    inlier_fracs: Optional[np.ndarray] = None
+
+
+def _get_optional_direction_array(
+    artifacts: Dict[str, np.ndarray], model_i: str, model_j: str, field: str
+) -> Optional[np.ndarray]:
+    prefix = f"{model_i}_to_{model_j}"
+    key = f"{prefix}/{field}"
+    return artifacts.get(key, None)
+
+
+def _get_direction_extra_data(
+    artifacts: Dict[str, np.ndarray], model_i: str, model_j: str
+) -> DirectionExtraData:
+    return DirectionExtraData(
+        neighbor_sizes=_get_optional_direction_array(
+            artifacts, model_i, model_j, "neighbor_sizes"
+        ),
+        neighbor_distances=_get_optional_direction_array(
+            artifacts, model_i, model_j, "neighbor_distances"
+        ),
+        sigma_values=_get_optional_direction_array(
+            artifacts, model_i, model_j, "sigma_values"
+        ),
+        eps_values=_get_optional_direction_array(artifacts, model_i, model_j, "eps_values"),
+        sample_weights=_get_optional_direction_array(
+            artifacts, model_i, model_j, "sample_weights"
+        ),
+        inlier_masks=_get_optional_direction_array(
+            artifacts, model_i, model_j, "inlier_masks"
+        ),
+        inlier_counts=_get_optional_direction_array(
+            artifacts, model_i, model_j, "inlier_counts"
+        ),
+        inlier_fracs=_get_optional_direction_array(
+            artifacts, model_i, model_j, "inlier_fracs"
+        ),
+    )
+
+
 # ============================================================
 # 2) Диагностические вычисления
 # ============================================================
@@ -179,6 +229,60 @@ def _compute_direction_stats(
         "residual_median": res_median,
         "n_degenerate": n_degenerate,
         "frac_degenerate": frac_degenerate,
+    }
+
+
+def _safe_mean(arr: Optional[np.ndarray]) -> float:
+    if arr is None:
+        return float("nan")
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return float("nan")
+    return float(np.mean(finite))
+
+
+def _safe_std(arr: Optional[np.ndarray]) -> float:
+    if arr is None:
+        return float("nan")
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return float("nan")
+    return float(np.std(finite))
+
+
+def _compute_extra_stats(extra: DirectionExtraData) -> Dict[str, float]:
+    """
+    Сводит дополнительные артефакты в компактные числа для отчётов и таблиц.
+    """
+    neighbor_distance_mean = float("nan")
+    neighbor_distance_std = float("nan")
+    if extra.neighbor_distances is not None and len(extra.neighbor_distances) > 0:
+        per_center_means = []
+        for d in extra.neighbor_distances:
+            arr = np.asarray(d, dtype=np.float64).reshape(-1)
+            finite = arr[np.isfinite(arr)]
+            if finite.size > 0:
+                per_center_means.append(float(np.mean(finite)))
+        if per_center_means:
+            neighbor_distance_mean = float(np.mean(per_center_means))
+            neighbor_distance_std = float(np.std(per_center_means))
+
+    return {
+        "neighbor_size_mean": _safe_mean(extra.neighbor_sizes),
+        "neighbor_size_std": _safe_std(extra.neighbor_sizes),
+        "neighbor_distance_mean": neighbor_distance_mean,
+        "neighbor_distance_std": neighbor_distance_std,
+        "sigma_mean": _safe_mean(extra.sigma_values),
+        "eps_mean": _safe_mean(extra.eps_values),
+        "inlier_count_mean": _safe_mean(extra.inlier_counts),
+        "inlier_frac_mean": _safe_mean(extra.inlier_fracs),
+        "inlier_frac_std": _safe_std(extra.inlier_fracs),
     }
 
 
@@ -271,6 +375,8 @@ def _plot_single_pair(
     """
     sv_ij, res_ij, ranks_ij = _get_direction_data(artifacts, model_i, model_j)
     sv_ji, res_ji, ranks_ji = _get_direction_data(artifacts, model_j, model_i)
+    extra_ij = _get_direction_extra_data(artifacts, model_i, model_j)
+    extra_ji = _get_direction_extra_data(artifacts, model_j, model_i)
 
     label_ij = f"{model_i} → {model_j}"
     label_ji = f"{model_j} → {model_i}"
@@ -337,6 +443,8 @@ def _plot_single_pair(
     ax.axis("off")
     stats_ij = _compute_direction_stats(sv_ij, res_ij, ranks_ij, threshold=threshold)
     stats_ji = _compute_direction_stats(sv_ji, res_ji, ranks_ji, threshold=threshold)
+    extra_stats_ij = _compute_extra_stats(extra_ij)
+    extra_stats_ji = _compute_extra_stats(extra_ji)
     table_data = [
         ["", label_ij[:20], label_ji[:20]],
         ["Центров", stats_ij["n_centers"], stats_ji["n_centers"]],
@@ -367,6 +475,52 @@ def _plot_single_pair(
             f"{stats_ji['n_degenerate']} ({stats_ji['frac_degenerate']:.1%})",
         ],
     ]
+    if np.isfinite(extra_stats_ij["neighbor_size_mean"]) or np.isfinite(
+        extra_stats_ji["neighbor_size_mean"]
+    ):
+        table_data.append(
+            [
+                "Размер окр. (mean)",
+                f"{extra_stats_ij['neighbor_size_mean']:.2f}",
+                f"{extra_stats_ji['neighbor_size_mean']:.2f}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["neighbor_distance_mean"]) or np.isfinite(
+        extra_stats_ji["neighbor_distance_mean"]
+    ):
+        table_data.append(
+            [
+                "Dist (mean)",
+                f"{extra_stats_ij['neighbor_distance_mean']:.2e}",
+                f"{extra_stats_ji['neighbor_distance_mean']:.2e}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["sigma_mean"]) or np.isfinite(extra_stats_ji["sigma_mean"]):
+        table_data.append(
+            [
+                "Sigma (mean)",
+                f"{extra_stats_ij['sigma_mean']:.2e}",
+                f"{extra_stats_ji['sigma_mean']:.2e}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["eps_mean"]) or np.isfinite(extra_stats_ji["eps_mean"]):
+        table_data.append(
+            [
+                "Eps (mean)",
+                f"{extra_stats_ij['eps_mean']:.2e}",
+                f"{extra_stats_ji['eps_mean']:.2e}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["inlier_frac_mean"]) or np.isfinite(
+        extra_stats_ji["inlier_frac_mean"]
+    ):
+        table_data.append(
+            [
+                "Inlier frac (mean)",
+                f"{extra_stats_ij['inlier_frac_mean']:.2%}",
+                f"{extra_stats_ji['inlier_frac_mean']:.2%}",
+            ]
+        )
     tbl = ax.table(
         cellText=table_data,
         loc="center",
@@ -631,9 +785,11 @@ def _save_report(
     lines.append("-" * len(header))
 
     all_rank_stds = []
+    extra_rows = []
     for mi, mj in sorted(directions):
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
         s = _compute_direction_stats(sv, res, ranks)
+        extra = _compute_extra_stats(_get_direction_extra_data(artifacts, mi, mj))
         all_rank_stds.append(s["rank_std"])
         direction_str = f"{mi}→{mj}"
         lines.append(
@@ -641,12 +797,53 @@ def _save_report(
             f"{s['residual_mean']:<12.4f} {s['residual_std']:<12.4f} "
             f"{s['frac_degenerate']:<10.1%}"
         )
+        extra_rows.append(
+            {
+                "direction": direction_str,
+                "neighbor_size_mean": extra["neighbor_size_mean"],
+                "neighbor_distance_mean": extra["neighbor_distance_mean"],
+                "sigma_mean": extra["sigma_mean"],
+                "eps_mean": extra["eps_mean"],
+                "inlier_frac_mean": extra["inlier_frac_mean"],
+                "inlier_frac_std": extra["inlier_frac_std"],
+            }
+        )
 
     lines.append("")
     lines.append(
         f"Средняя std ранга по всем направлениям: {np.mean(all_rank_stds):.4f}"
     )
     lines.append("")
+
+    have_extra = any(
+        np.isfinite(row["neighbor_size_mean"])
+        or np.isfinite(row["neighbor_distance_mean"])
+        or np.isfinite(row["sigma_mean"])
+        or np.isfinite(row["eps_mean"])
+        or np.isfinite(row["inlier_frac_mean"])
+        for row in extra_rows
+    )
+    if have_extra:
+        lines.append("--- Дополнительные артефакты новых методов ---")
+        extra_header = (
+            f"{'Направление':<35} {'Nhood(mean)':<12} {'Dist(mean)':<12} "
+            f"{'Sigma(mean)':<12} {'Eps(mean)':<12} {'Inlier(mean)':<12}"
+        )
+        lines.append(extra_header)
+        lines.append("-" * len(extra_header))
+        for row in extra_rows:
+            def _fmt(val: float, fmt: str) -> str:
+                return fmt.format(val) if np.isfinite(val) else "n/a"
+
+            lines.append(
+                f"{row['direction']:<35} "
+                f"{_fmt(row['neighbor_size_mean'], '{:.2f}'):<12} "
+                f"{_fmt(row['neighbor_distance_mean'], '{:.3e}'):<12} "
+                f"{_fmt(row['sigma_mean'], '{:.3e}'):<12} "
+                f"{_fmt(row['eps_mean'], '{:.3e}'):<12} "
+                f"{_fmt(row['inlier_frac_mean'], '{:.2%}'):<12}"
+            )
+        lines.append("")
 
     lines.append("--- Одновременная вырожденность X→Y и Y→X в одном центре ---")
     overall = both_deg_stats["frac_both_degenerate_overall"]
@@ -675,6 +872,7 @@ def _save_report(
         "n_directions": len(directions),
         "both_degenerate": both_deg_stats,
         "mean_rank_std": float(np.mean(all_rank_stds)),
+        "direction_extras": extra_rows,
     }
     json_path = os.path.join(reports_dir, f"{metric_name}_diagnostics_report.json")
     with open(json_path, "w", encoding="utf-8") as f:
@@ -926,30 +1124,16 @@ def _load_metric_spec(metric_name: str) -> str:
             parts.append(f"k={meta['k']}")
         if "eps_percentile" in meta:
             parts.append(f"eps_percentile={meta['eps_percentile']}")
-
-        return ", ".join(parts)
-    except Exception:
-        return ""
-
-        parts = []
-        kind = spec.get("kind", "")
-        if kind == "multiscale_knn":
-            k_list = spec.get("k_list", None)
-            agg = spec.get("aggregator", "mean")
-            if k_list:
-                parts.append(f"k_list={list(k_list)}, agg={agg}")
-        elif kind in {"linear_knn", "rff_knn"}:
-            k = spec.get("k", None)
-            if k:
-                parts.append(f"k={k}")
-        elif kind == "linear_eps":
-            eps_p = spec.get("eps_percentile", None)
-            if eps_p:
-                parts.append(f"eps_percentile={eps_p}")
-
-        n_centers = spec.get("n_centers", None)
-        if n_centers:
-            parts.append(f"n_centers={n_centers}")
+        if "sigma_percentile" in meta:
+            parts.append(f"sigma_percentile={meta['sigma_percentile']}")
+        if "eps_scale" in meta:
+            parts.append(f"eps={meta['eps_scale']}*sigma")
+        if "weighting" in meta:
+            parts.append(f"weighting={meta['weighting']}")
+        if "solver" in meta:
+            parts.append(f"solver={meta['solver']}")
+        if "n_centers" in meta:
+            parts.append(f"n_centers={meta['n_centers']}")
 
         return ", ".join(parts)
     except Exception:
