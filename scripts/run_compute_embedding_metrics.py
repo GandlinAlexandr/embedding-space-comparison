@@ -536,6 +536,15 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     # Новый канонический путь: строим спецификацию из meta, а имя используем как label.
     variant = str(meta.get("variant", "")) if isinstance(meta, dict) else ""
     if variant:
+        # pair_agg берём из самого variant, а не из имени метрики:
+        # короткие имена (lin_k10, w_eps_5 и т.п.) не содержат суффикса _antisym/_sym,
+        # поэтому имя-based pair_agg выше неверен для antisym-конфигов.
+        if "antisym" in variant:
+            pair_agg = "antisym"
+        elif variant.endswith("_sym"):
+            pair_agg = "sym"
+        # иначе pair_agg остаётся "directed" — как вычислен из имени выше.
+
         if variant in {"linear_knn", "linear_knn_antisym", "linear_knn_sym"}:
             k = int(meta.get("k", 10))
             return MetricSpec(
@@ -593,7 +602,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 ransac_threshold_scale=ransac_threshold_scale,
             )
 
-        if variant in {"multiscale_knn", "multiscale_knn_sym"}:
+        if variant in {"multiscale_knn", "multiscale_knn_antisym", "multiscale_knn_sym"}:
             k_list = tuple(int(x) for x in meta.get("k_list", (5, 10, 20, 40)))
             agg = str(meta.get("aggregator", "mean"))
             return MetricSpec(
@@ -605,7 +614,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 n_centers=n_centers,
             )
 
-        if variant in {"rff_knn", "rff_knn_sym"}:
+        if variant in {"rff_knn", "rff_knn_antisym", "rff_knn_sym"}:
             k = int(meta.get("k", 10))
             rff_n_features = int(meta.get("n_features", 256))
             rff_gamma = float(meta.get("gamma", 1.0))
