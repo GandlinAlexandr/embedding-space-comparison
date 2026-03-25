@@ -222,7 +222,7 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     specs.append(_lin_knn(k=_K_DEFAULT, pair_agg="directed"))
 
     # --- linear kNN, antisym ---
-    for k in [5, 10, 20, 40, 80]:
+    for k in [5, 10, 20, 40, 80, 200]:
         specs.append(_lin_knn(k=k, pair_agg="antisym"))
 
     # --- linear eps, antisym ---
@@ -244,7 +244,7 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     specs.append(_rff(k=_K_DEFAULT, pair_agg="antisym"))
 
     # --- linear kNN, sym ---
-    for k in [5, 10, 20, 40, 80]:
+    for k in [5, 10, 20, 40, 80, 200]:
         specs.append(_lin_knn(k=k, pair_agg="sym"))
 
     # --- linear eps, sym ---
