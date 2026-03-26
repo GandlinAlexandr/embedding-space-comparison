@@ -52,8 +52,8 @@ from typing import Dict, Any, List, Optional, Tuple
 # Базовые параметры (менять здесь, а не в каждом конфиге)
 # ============================================================
 
-_N_CENTERS = 200
-_SAMPLE_SIZE = 50000
+_N_CENTERS = 100
+_SAMPLE_SIZE = None
 
 # k для kNN-метрик: менять здесь, список определяет абляцию.
 _K_DEFAULT = 10
@@ -64,7 +64,7 @@ _AGG_DEFAULT = "mean"
 _SIGMA_PERCENTILES = [5, 10, 20]
 _EPS_SCALE = 3.0
 
-_RANSAC_N_ITER = 48
+_RANSAC_N_ITER = 20
 _RANSAC_SAMPLE_FRAC = 0.5
 _RANSAC_MIN_INLIERS = 4
 _RANSAC_THRESHOLD_SCALE = 2.5
