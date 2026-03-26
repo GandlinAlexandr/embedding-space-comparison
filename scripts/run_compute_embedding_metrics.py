@@ -536,15 +536,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     # Новый канонический путь: строим спецификацию из meta, а имя используем как label.
     variant = str(meta.get("variant", "")) if isinstance(meta, dict) else ""
     if variant:
-        # pair_agg берём из самого variant, а не из имени метрики:
-        # короткие имена (lin_k10, w_eps_5 и т.п.) не содержат суффикса _antisym/_sym,
-        # поэтому имя-based pair_agg выше неверен для antisym-конфигов.
-        if "antisym" in variant:
-            pair_agg = "antisym"
-        elif variant.endswith("_sym"):
-            pair_agg = "sym"
-        # иначе pair_agg остаётся "directed" — как вычислен из имени выше.
-
         if variant in {"linear_knn", "linear_knn_antisym", "linear_knn_sym"}:
             k = int(meta.get("k", 10))
             return MetricSpec(
@@ -602,7 +593,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 ransac_threshold_scale=ransac_threshold_scale,
             )
 
-        if variant in {"multiscale_knn", "multiscale_knn_antisym", "multiscale_knn_sym"}:
+        if variant in {"multiscale_knn", "multiscale_knn_sym"}:
             k_list = tuple(int(x) for x in meta.get("k_list", (5, 10, 20, 40)))
             agg = str(meta.get("aggregator", "mean"))
             return MetricSpec(
@@ -614,7 +605,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 n_centers=n_centers,
             )
 
-        if variant in {"rff_knn", "rff_knn_antisym", "rff_knn_sym"}:
+        if variant in {"rff_knn", "rff_knn_sym"}:
             k = int(meta.get("k", 10))
             rff_n_features = int(meta.get("n_features", 256))
             rff_gamma = float(meta.get("gamma", 1.0))
@@ -643,9 +634,9 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             n_centers=n_centers,
         )
 
-    m = re.fullmatch(r"lin_k(\d+)(_sym)?", lower)
+    m = re.fullmatch(r"lin_k(\d+)(_antisym|_sym)?", lower)
     if m:
-        pair_agg_short = "sym" if m.group(2) else "antisym"
+        pair_agg_short = "sym" if m.group(2) == "_sym" else "antisym"
         return MetricSpec(
             name=name,
             kind="linear_knn",
@@ -654,9 +645,9 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             n_centers=n_centers,
         )
 
-    m = re.fullmatch(r"lin_eps_(\d+)(_sym)?", lower)
+    m = re.fullmatch(r"lin_eps_(\d+)(_antisym|_sym)?", lower)
     if m:
-        pair_agg_short = "sym" if m.group(2) else "antisym"
+        pair_agg_short = "sym" if m.group(2) == "_sym" else "antisym"
         return MetricSpec(
             name=name,
             kind="linear_eps",
@@ -671,9 +662,9 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             ransac_threshold_scale=ransac_threshold_scale,
         )
 
-    m = re.fullmatch(r"w_eps_(\d+)(_rsc)?(_sym)?", lower)
+    m = re.fullmatch(r"w_eps_(\d+)(_rsc)?(_antisym|_sym)?", lower)
     if m:
-        pair_agg_short = "sym" if m.group(3) else "antisym"
+        pair_agg_short = "sym" if m.group(3) == "_sym" else "antisym"
         solver_short = "ransac" if m.group(2) else solver
         return MetricSpec(
             name=name,
@@ -690,7 +681,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             ransac_threshold_scale=ransac_threshold_scale,
         )
 
-    if lower in {"multiscale_mean", "multiscale_mean_sym"}:
+    if lower in {"multiscale_mean", "multiscale_mean_antisym", "multiscale_mean_sym"}:
         return MetricSpec(
             name=name,
             kind="multiscale_knn",
@@ -700,12 +691,12 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             n_centers=n_centers,
         )
 
-    m = re.fullmatch(r"rff_k(\d+)(_sym)?", lower)
+    m = re.fullmatch(r"rff_k(\d+)(_antisym|_sym)?", lower)
     if m:
         return MetricSpec(
             name=name,
             kind="rff_knn",
-            pair_agg="sym" if m.group(2) else "antisym",
+            pair_agg="sym" if m.group(2) == "_sym" else "antisym",
             k=int(m.group(1)),
             n_centers=n_centers,
         )
@@ -926,8 +917,19 @@ def _build_neighbor_cache(
                 idx_r = np.where(mask[r])[0].astype(np.int32)
                 neigh.append(idx_r)
                 neigh_distances.append(D[r, idx_r].astype(np.float32))
-            eps[p] = np.array(neigh, dtype=object)
-            eps_distances[p] = np.array(neigh_distances, dtype=object)
+            # ВАЖНО: np.array(neigh, dtype=object) при одинаковых размерах
+            # элементов создаёт 2D-массив dtype=object вместо 1D object-массива
+            # из int-массивов, что ломает индексацию Xn[idxs].
+            # Единственный надёжный способ — заполнять поэлементно.
+            eps_arr = np.empty(len(neigh), dtype=object)
+            for _i, _x in enumerate(neigh):
+                eps_arr[_i] = _x
+            eps[p] = eps_arr
+
+            eps_dist_arr = np.empty(len(neigh_distances), dtype=object)
+            for _i, _x in enumerate(neigh_distances):
+                eps_dist_arr[_i] = _x
+            eps_distances[p] = eps_dist_arr
 
     return NeighborCache(
         centers=centers,
@@ -1342,6 +1344,16 @@ def main():
         action="store_true",
         help="Если флаг задан и файл метрики существует, расширить его и вычислить только отсутствующие пары (старый блок не трогать).",
     )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default="",
+        help=(
+            "Имена моделей через запятую для ограничения расчёта. "
+            "Если задано, из embeddings_dir берутся только указанные модели. "
+            "Например: --models resnet50,vit_b_16"
+        ),
+    )
     args = parser.parse_args()
 
     if not args.out_dir:
@@ -1352,6 +1364,18 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     model_names_current, model_to_path = _list_models(args.embeddings_dir)
+
+    # Опциональный фильтр по --models: оставляем только запрошенные модели.
+    if args.models:
+        requested = [m.strip() for m in args.models.split(",") if m.strip()]
+        missing = [m for m in requested if m not in model_to_path]
+        if missing:
+            raise ValueError(
+                f"--models: модели не найдены в embeddings_dir: {missing}. "
+                f"Доступные: {sorted(model_to_path.keys())}"
+            )
+        model_names_current = [m for m in model_names_current if m in set(requested)]
+        model_to_path = {m: model_to_path[m] for m in model_names_current}
 
     # Общий manifest списка моделей в out_dir:
     # - создаётся автоматически;

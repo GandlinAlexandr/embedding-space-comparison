@@ -11,26 +11,27 @@
 
 Имена метрик генерируются автоматически из параметров по шаблону:
 
-    {kind}_{key_param}[_rsc][_sym]
+    {kind}_{key_param}[_rsc][_antisym|_sym]
 
   где:
     kind       — тип окрестности: lin_k | lin_eps | w_eps | multiscale | rff_k
     key_param  — главный числовой параметр: k, eps_percentile, sigma_percentile,
                  aggregator (для multiscale)
     _rsc       — суффикс, если solver="ransac"
-    _sym       — суффикс, если pair_agg="sym"
-    (без суффикса pair_agg) — antisym по умолчанию для всех кроме directed
+    _antisym   — суффикс для антисимметричных метрик
+    _sym       — суффикс для симметричных метрик
+    (без суффикса) — только directed
 
 Примеры:
-    lin_k10          — linear kNN, k=10, antisym
-    lin_k10_sym      — linear kNN, k=10, sym
-    lin_eps_10       — linear eps, eps_percentile=10, antisym
-    w_eps_10         — weighted eps, sigma_percentile=10, lstsq, antisym
-    w_eps_10_rsc     — weighted eps, sigma_percentile=10, RANSAC, antisym
-    w_eps_10_rsc_sym — weighted eps, sigma_percentile=10, RANSAC, sym
-    multiscale_mean  — multiscale kNN, aggregator=mean, antisym
-    rff_k10          — RFF kNN, k=10, antisym
-    directed_k10     — directed (asymmetric), k=10
+    lin_k10_antisym      — linear kNN, k=10, antisym
+    lin_k10_sym          — linear kNN, k=10, sym
+    lin_eps_10_antisym   — linear eps, eps_percentile=10, antisym
+    w_eps_10_antisym     — weighted eps, sigma_percentile=10, lstsq, antisym
+    w_eps_10_rsc_antisym — weighted eps, sigma_percentile=10, RANSAC, antisym
+    w_eps_10_rsc_sym     — weighted eps, sigma_percentile=10, RANSAC, sym
+    multiscale_mean_antisym — multiscale kNN, aggregator=mean, antisym
+    rff_k10_antisym      — RFF kNN, k=10, antisym
+    directed_k10         — directed (asymmetric), k=10
 
 Чтобы добавить новый конфиг, достаточно вызвать одну из фабричных функций:
     _lin_knn(k, pair_agg)
@@ -54,8 +55,10 @@ from typing import Dict, Any, List, Optional, Tuple
 _N_CENTERS = 200
 _SAMPLE_SIZE = 50000
 
+# k для kNN-метрик: менять здесь, список определяет абляцию.
 _K_DEFAULT = 10
-_K_LIST_DEFAULT = [5, 10, 20, 40]
+_K_KNN_ABLATION = [5, 10, 20, 40, 80, 200]   # antisym и sym
+_K_LIST_DEFAULT = [5, 10, 20, 40]        # для multiscale
 _AGG_DEFAULT = "mean"
 
 _SIGMA_PERCENTILES = [5, 10, 20]
@@ -79,9 +82,9 @@ def _agg_suffix(pair_agg: str) -> str:
     """Возвращает суффикс имени для pair_agg."""
     if pair_agg == "sym":
         return "_sym"
-    if pair_agg == "directed":
-        return ""
-    return ""  # antisym — суффикс не нужен, antisym по умолчанию
+    if pair_agg == "antisym":
+        return "_antisym"
+    return ""  # directed — без суффикса
 
 
 def _variant_suffix(pair_agg: str) -> str:
@@ -222,7 +225,7 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     specs.append(_lin_knn(k=_K_DEFAULT, pair_agg="directed"))
 
     # --- linear kNN, antisym ---
-    for k in [5, 10, 20, 40, 80, 200]:
+    for k in _K_KNN_ABLATION:
         specs.append(_lin_knn(k=k, pair_agg="antisym"))
 
     # --- linear eps, antisym ---
@@ -244,7 +247,7 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     specs.append(_rff(k=_K_DEFAULT, pair_agg="antisym"))
 
     # --- linear kNN, sym ---
-    for k in [5, 10, 20, 40, 80, 200]:
+    for k in _K_KNN_ABLATION:
         specs.append(_lin_knn(k=k, pair_agg="sym"))
 
     # --- linear eps, sym ---
@@ -301,26 +304,27 @@ def get_embedding_metric_configs() -> Dict[str, Dict[str, Any]]:
 # на короткие имена. В новых запусках не используется.
 
 LEGACY_TO_SHORT_METRIC_NAMES: Dict[str, str] = {
-    "local_map_rank_linear_knn_k5_antisym": "lin_k5",
-    "local_map_rank_linear_knn_k10_antisym": "lin_k10",
-    "local_map_rank_linear_knn_k20_antisym": "lin_k20",
-    "local_map_rank_linear_knn_k40_antisym": "lin_k40",
-    "local_map_rank_linear_knn_k80_antisym": "lin_k80",
+    # Старые длинные имена -> новые короткие с _antisym/_sym
+    "local_map_rank_linear_knn_k5_antisym": "lin_k5_antisym",
+    "local_map_rank_linear_knn_k10_antisym": "lin_k10_antisym",
+    "local_map_rank_linear_knn_k20_antisym": "lin_k20_antisym",
+    "local_map_rank_linear_knn_k40_antisym": "lin_k40_antisym",
+    "local_map_rank_linear_knn_k80_antisym": "lin_k80_antisym",
     "local_map_rank_linear_knn_k5_sym": "lin_k5_sym",
     "local_map_rank_linear_knn_k10_sym": "lin_k10_sym",
     "local_map_rank_linear_knn_k20_sym": "lin_k20_sym",
     "local_map_rank_linear_knn_k40_sym": "lin_k40_sym",
     "local_map_rank_linear_knn_k80_sym": "lin_k80_sym",
     "local_map_rank_linear_knn_k10": "directed_k10",
-    "local_map_rank_linear_eps_percentile_5_antisym": "lin_eps_5",
-    "local_map_rank_linear_eps_percentile_10_antisym": "lin_eps_10",
-    "local_map_rank_linear_eps_percentile_20_antisym": "lin_eps_20",
-    "local_map_rank_weighted_eps_sigma_percentile_5_antisym": "w_eps_5",
-    "local_map_rank_weighted_eps_sigma_percentile_10_antisym": "w_eps_10",
-    "local_map_rank_weighted_eps_sigma_percentile_20_antisym": "w_eps_20",
-    "local_map_rank_weighted_eps_sigma_percentile_5_ransac_antisym": "w_eps_5_rsc",
-    "local_map_rank_weighted_eps_sigma_percentile_10_ransac_antisym": "w_eps_10_rsc",
-    "local_map_rank_weighted_eps_sigma_percentile_20_ransac_antisym": "w_eps_20_rsc",
+    "local_map_rank_linear_eps_percentile_5_antisym": "lin_eps_5_antisym",
+    "local_map_rank_linear_eps_percentile_10_antisym": "lin_eps_10_antisym",
+    "local_map_rank_linear_eps_percentile_20_antisym": "lin_eps_20_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_5_antisym": "w_eps_5_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_10_antisym": "w_eps_10_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_20_antisym": "w_eps_20_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_5_ransac_antisym": "w_eps_5_rsc_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_10_ransac_antisym": "w_eps_10_rsc_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_20_ransac_antisym": "w_eps_20_rsc_antisym",
     "local_map_rank_linear_eps_percentile_5_sym": "lin_eps_5_sym",
     "local_map_rank_linear_eps_percentile_10_sym": "lin_eps_10_sym",
     "local_map_rank_linear_eps_percentile_20_sym": "lin_eps_20_sym",
@@ -330,10 +334,28 @@ LEGACY_TO_SHORT_METRIC_NAMES: Dict[str, str] = {
     "local_map_rank_weighted_eps_sigma_percentile_5_ransac_sym": "w_eps_5_rsc_sym",
     "local_map_rank_weighted_eps_sigma_percentile_10_ransac_sym": "w_eps_10_rsc_sym",
     "local_map_rank_weighted_eps_sigma_percentile_20_ransac_sym": "w_eps_20_rsc_sym",
-    "local_map_rank_multiscale_knn_mean_antisym": "multiscale_mean",
+    "local_map_rank_multiscale_knn_mean_antisym": "multiscale_mean_antisym",
     "local_map_rank_multiscale_knn_mean_sym": "multiscale_mean_sym",
-    "local_map_rank_rff_knn_k10_antisym": "rff_k10",
+    "local_map_rank_rff_knn_k10_antisym": "rff_k10_antisym",
     "local_map_rank_rff_knn_k10_sym": "rff_k10_sym",
+    # Прежние короткие имена без суффикса -> новые с _antisym
+    # (для совместимости с уже посчитанными артефактами)
+    "lin_k5": "lin_k5_antisym",
+    "lin_k10": "lin_k10_antisym",
+    "lin_k20": "lin_k20_antisym",
+    "lin_k40": "lin_k40_antisym",
+    "lin_k80": "lin_k80_antisym",
+    "lin_eps_5": "lin_eps_5_antisym",
+    "lin_eps_10": "lin_eps_10_antisym",
+    "lin_eps_20": "lin_eps_20_antisym",
+    "w_eps_5": "w_eps_5_antisym",
+    "w_eps_10": "w_eps_10_antisym",
+    "w_eps_20": "w_eps_20_antisym",
+    "w_eps_5_rsc": "w_eps_5_rsc_antisym",
+    "w_eps_10_rsc": "w_eps_10_rsc_antisym",
+    "w_eps_20_rsc": "w_eps_20_rsc_antisym",
+    "multiscale_mean": "multiscale_mean_antisym",
+    "rff_k10": "rff_k10_antisym",
 }
 
 
