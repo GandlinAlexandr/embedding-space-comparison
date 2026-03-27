@@ -232,6 +232,81 @@ def _compute_direction_stats(
     }
 
 
+def _normalized_residual_label(normalized: bool) -> str:
+    if normalized:
+        return r"Normalized residual $\|X_c M - Y_c\|_F / \sqrt{N_{\mathrm{eff}}}$"
+    return r"Residual $\|X_c M - Y_c\|_F$"
+
+
+def _normalized_residual_short_label(normalized: bool) -> str:
+    return "Normalized residual" if normalized else "Residual"
+
+
+def _summary_residual_axis_label(all_normalized: bool) -> str:
+    if all_normalized:
+        return r"Средний normalized residual $\|X_c M - Y_c\|_F / \sqrt{N_{\mathrm{eff}}}$"
+    return r"Средний residual / normalized residual"
+
+
+def _compute_effective_counts(extra: DirectionExtraData) -> Optional[np.ndarray]:
+    """
+    Возвращает эффективное число точек N_eff для нормировки residual.
+
+    Логика:
+      - если есть sample_weights, нормируем на sqrt(sum(weights)) или
+        sqrt(sum(weights[inliers])) для robust-solver;
+      - иначе, если есть inlier_counts, используем sqrt(inlier_counts);
+      - иначе, если есть neighbor_sizes, используем sqrt(neighbor_sizes).
+    """
+    if extra.sample_weights is not None and len(extra.sample_weights) > 0:
+        eff = []
+        has_masks = extra.inlier_masks is not None and len(extra.inlier_masks) == len(
+            extra.sample_weights
+        )
+        for idx, weights in enumerate(extra.sample_weights):
+            w = np.asarray(weights, dtype=np.float64).reshape(-1)
+            w = np.clip(w, 0.0, None)
+            if has_masks:
+                mask = np.asarray(extra.inlier_masks[idx], dtype=bool).reshape(-1)
+                if len(mask) == len(w):
+                    w = w[mask]
+            total_w = float(np.sum(w))
+            eff.append(total_w if total_w > 0.0 else float("nan"))
+        return np.asarray(eff, dtype=np.float64)
+
+    if extra.inlier_counts is not None:
+        return np.asarray(extra.inlier_counts, dtype=np.float64)
+
+    if extra.neighbor_sizes is not None:
+        return np.asarray(extra.neighbor_sizes, dtype=np.float64)
+
+    return None
+
+
+def _normalize_residuals(
+    residuals: np.ndarray,
+    extra: DirectionExtraData,
+) -> Tuple[np.ndarray, bool]:
+    """
+    Нормирует residual до RMS-подобной ошибки на эффективную точку.
+
+    Для старых артефактов без нужных полей возвращает residual как есть.
+    """
+    res = np.asarray(residuals, dtype=np.float64)
+    eff_counts = _compute_effective_counts(extra)
+    if eff_counts is None or len(eff_counts) != len(res):
+        return res, False
+
+    denom = np.sqrt(np.clip(eff_counts, 0.0, None))
+    out = np.full_like(res, np.nan, dtype=np.float64)
+    good = np.isfinite(denom) & (denom > 0.0)
+    out[good] = res[good] / denom[good]
+
+    if not np.any(good):
+        return res, False
+    return out, True
+
+
 def _safe_mean(arr: Optional[np.ndarray]) -> float:
     if arr is None:
         return float("nan")
@@ -371,13 +446,18 @@ def _plot_single_pair(
     """
     Строит детальные графики для пары (model_i, model_j):
       - гистограммы рангов для обоих направлений
-      - распределение residuals для обоих направлений
+      - распределение нормированных residuals для обоих направлений
       - сингулярные значения (медиана ± std по центрам)
     """
     sv_ij, res_ij, ranks_ij = _get_direction_data(artifacts, model_i, model_j)
     sv_ji, res_ji, ranks_ji = _get_direction_data(artifacts, model_j, model_i)
     extra_ij = _get_direction_extra_data(artifacts, model_i, model_j)
     extra_ji = _get_direction_extra_data(artifacts, model_j, model_i)
+    norm_res_ij, normed_ij = _normalize_residuals(res_ij, extra_ij)
+    norm_res_ji, normed_ji = _normalize_residuals(res_ji, extra_ji)
+    residuals_normalized = bool(normed_ij and normed_ji)
+    residual_xlabel = _normalized_residual_label(residuals_normalized)
+    residual_short_label = _normalized_residual_short_label(residuals_normalized)
 
     label_ij = f"{model_i} → {model_j}"
     label_ji = f"{model_j} → {model_i}"
@@ -404,24 +484,24 @@ def _plot_single_pair(
 
     # --- 2. Распределение residuals ---
     ax = axes[0, 1]
-    ax.hist(res_ij, bins=30, alpha=0.6, label=label_ij, color="steelblue")
-    ax.hist(res_ji, bins=30, alpha=0.6, label=label_ji, color="coral")
-    ax.set_xlabel(r"Residual $\|X_c M - Y_c\|_F$")
+    ax.hist(norm_res_ij, bins=30, alpha=0.6, label=label_ij, color="steelblue")
+    ax.hist(norm_res_ji, bins=30, alpha=0.6, label=label_ji, color="coral")
+    ax.set_xlabel(residual_xlabel)
     ax.set_ylabel("Количество центров")
-    ax.set_title("Распределение ошибок решения по направлениям")
+    ax.set_title("Распределение нормированной ошибки по направлениям")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
     # --- 3. Residuals: boxplot ---
     ax = axes[0, 2]
     ax.boxplot(
-        [res_ij, res_ji],
+        [norm_res_ij, norm_res_ji],
         labels=[label_ij, label_ji],
         patch_artist=True,
         boxprops=dict(facecolor="lightblue"),
     )
-    ax.set_ylabel("Residual")
-    ax.set_title("Ошибки решения по направлениям")
+    ax.set_ylabel(residual_short_label)
+    ax.set_title("Нормированная ошибка по направлениям")
     ax.grid(True, alpha=0.3)
     ax.tick_params(axis="x", labelsize=8)
 
@@ -442,8 +522,12 @@ def _plot_single_pair(
     # --- 6. Таблица сводной статистики ---
     ax = axes[1, 2]
     ax.axis("off")
-    stats_ij = _compute_direction_stats(sv_ij, res_ij, ranks_ij, threshold=threshold)
-    stats_ji = _compute_direction_stats(sv_ji, res_ji, ranks_ji, threshold=threshold)
+    stats_ij = _compute_direction_stats(
+        sv_ij, norm_res_ij, ranks_ij, threshold=threshold
+    )
+    stats_ji = _compute_direction_stats(
+        sv_ji, norm_res_ji, ranks_ji, threshold=threshold
+    )
     extra_stats_ij = _compute_extra_stats(extra_ij)
     extra_stats_ji = _compute_extra_stats(extra_ji)
     table_data = [
@@ -461,12 +545,12 @@ def _plot_single_pair(
             f"{stats_ji['rank_min']}/{stats_ji['rank_max']}",
         ],
         [
-            "Residual (mean)",
+            f"{residual_short_label} (mean)",
             f"{stats_ij['residual_mean']:.2e}",
             f"{stats_ji['residual_mean']:.2e}",
         ],
         [
-            "Residual (std)",
+            f"{residual_short_label} (std)",
             f"{stats_ij['residual_std']:.2e}",
             f"{stats_ji['residual_std']:.2e}",
         ],
@@ -608,7 +692,7 @@ def _plot_aggregated(
     """
     Строит агрегированные графики по всем парам:
       - общая гистограмма рангов
-      - общее распределение residuals
+      - общее распределение нормированных residuals
       - доля вырожденных отображений по парам
       - доля одновременно вырожденных центров (оба направления) по парам
     """
@@ -616,17 +700,23 @@ def _plot_aggregated(
     all_residuals = []
     frac_deg_per_direction = []
     direction_labels = []
+    normalized_flags = []
 
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
-        stats = _compute_direction_stats(sv, res, ranks, threshold=threshold)
+        extra = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, is_normalized = _normalize_residuals(res, extra)
+        stats = _compute_direction_stats(sv, norm_res, ranks, threshold=threshold)
         all_ranks.extend(ranks.tolist())
-        all_residuals.extend(res.tolist())
+        all_residuals.extend(norm_res.tolist())
         frac_deg_per_direction.append(stats["frac_degenerate"])
         direction_labels.append(f"{mi[:10]}→{mj[:10]}")
+        normalized_flags.append(is_normalized)
 
     all_ranks = np.array(all_ranks)
     all_residuals = np.array(all_residuals)
+    residuals_normalized = bool(all(normalized_flags)) if normalized_flags else False
+    residual_xlabel = _normalized_residual_label(residuals_normalized)
 
     # n_centers — реальное количество центров первого направления, читается из артефактов.
     _, _, _ranks_first = _get_direction_data(
@@ -685,9 +775,9 @@ def _plot_aggregated(
         linewidth=1.5,
         label=f"медиана={np.median(all_residuals):.2e}",
     )
-    ax.set_xlabel(r"Residual $\|X_c M - Y_c\|_F$")
+    ax.set_xlabel(residual_xlabel)
     ax.set_ylabel("Количество центров (все пары)")
-    ax.set_title("Распределение ошибок решения (X→Y и Y→X)")
+    ax.set_title("Распределение нормированной ошибки (X→Y и Y→X)")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
@@ -781,24 +871,18 @@ def _save_report(
     lines.append(f"Всего направлений: {len(directions)}")
     lines.append("")
 
-    lines.append("--- Статистика по направлениям ---")
-    header = f"{'Направление':<35} {'Ранг(mean)':<12} {'Ранг(std)':<12} {'Res(mean)':<12} {'Res(std)':<12} {'Выр-х,%':<10}"
-    lines.append(header)
-    lines.append("-" * len(header))
-
     all_rank_stds = []
     extra_rows = []
+    normalized_flags = []
     for mi, mj in sorted(directions):
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
-        s = _compute_direction_stats(sv, res, ranks)
+        extra_data = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, is_normalized = _normalize_residuals(res, extra_data)
+        s = _compute_direction_stats(sv, norm_res, ranks)
         extra = _compute_extra_stats(_get_direction_extra_data(artifacts, mi, mj))
         all_rank_stds.append(s["rank_std"])
+        normalized_flags.append(is_normalized)
         direction_str = f"{mi}→{mj}"
-        lines.append(
-            f"{direction_str:<35} {s['rank_mean']:<12.3f} {s['rank_std']:<12.3f} "
-            f"{s['residual_mean']:<12.4f} {s['residual_std']:<12.4f} "
-            f"{s['frac_degenerate']:<10.1%}"
-        )
         extra_rows.append(
             {
                 "direction": direction_str,
@@ -811,6 +895,33 @@ def _save_report(
             }
         )
 
+    residual_label = "ResN" if all(normalized_flags) else "Res"
+    lines.append("--- Статистика по направлениям ---")
+    header = f"{'Направление':<35} {'Ранг(mean)':<12} {'Ранг(std)':<12} {f'{residual_label}(mean)':<12} {f'{residual_label}(std)':<12} {'Выр-х,%':<10}"
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    for mi, mj in sorted(directions):
+        sv, res, ranks = _get_direction_data(artifacts, mi, mj)
+        extra_data = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, _ = _normalize_residuals(res, extra_data)
+        s = _compute_direction_stats(sv, norm_res, ranks)
+        direction_str = f"{mi}→{mj}"
+        lines.append(
+            f"{direction_str:<35} {s['rank_mean']:<12.3f} {s['rank_std']:<12.3f} "
+            f"{s['residual_mean']:<12.4f} {s['residual_std']:<12.4f} "
+            f"{s['frac_degenerate']:<10.1%}"
+        )
+
+    lines.append("")
+    if all(normalized_flags):
+        lines.append(
+            "ResN = нормированная RMS-подобная ошибка ||X_c M - Y_c||_F / sqrt(N_eff)."
+        )
+    else:
+        lines.append(
+            "Res = raw residual для старых артефактов без данных, необходимых для нормировки."
+        )
     lines.append("")
     lines.append(
         f"Средняя std ранга по всем направлениям: {np.mean(all_rank_stds):.4f}"
@@ -895,7 +1006,7 @@ def _plot_summary(
 ) -> None:
     """
     Строит сводный график сравнения всех метрик по трём вопросам руководителя:
-      1. Ошибка решения (residual mean ± std по всем центрам и парам)
+      1. Ошибка решения (normalized residual mean ± std по всем центрам и парам)
       2. Стабильность ранга (std ранга по всем центрам и парам)
       3. Доля одновременно вырожденных центров (оба направления)
 
@@ -904,8 +1015,8 @@ def _plot_summary(
         "metric_name": str,
         "rank_means":  np.ndarray,   # среднее ранга по каждому направлению
         "rank_stds":   np.ndarray,   # std ранга по каждому направлению
-        "res_means":   np.ndarray,   # среднее residual по каждому направлению
-        "res_stds":    np.ndarray,   # std residual по каждому направлению
+        "res_means":   np.ndarray,   # среднее нормированного residual по каждому направлению
+        "res_stds":    np.ndarray,   # std нормированного residual по каждому направлению
         "frac_both_degenerate": float,  # итоговая доля по всем парам
         "n_centers":   int,
         "n_directions": int,
@@ -961,10 +1072,13 @@ def _plot_summary(
     lines2, lbls2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
 
-    # --- 2. Ошибка решения: среднее residual по направлениям ---
+    # --- 2. Ошибка решения: средний нормированный residual по направлениям ---
     ax = axes[1]
     mean_res = [float(np.mean(d["res_means"])) for d in metrics_data]
     std_res = [float(np.mean(d["res_stds"])) for d in metrics_data]
+    all_residuals_normalized = all(
+        bool(d.get("residuals_normalized", False)) for d in metrics_data
+    )
     bars = ax.bar(
         x,
         mean_res,
@@ -976,9 +1090,15 @@ def _plot_summary(
     )
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(r"Среднее residual $\|X_c M - Y_c\|_F$")
+    ax.set_ylabel(_summary_residual_axis_label(all_residuals_normalized))
     ax.set_title(
-        "Ошибка решения линейного уравнения\n(чем меньше — тем лучше линейное приближение)"
+        (
+            "Нормированная ошибка решения линейного уравнения\n"
+            "(чем меньше — тем лучше линейное приближение)"
+            if all_residuals_normalized
+            else "Ошибка решения линейного уравнения\n"
+            "(часть старых артефактов не содержит данных для нормировки)"
+        )
     )
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, mean_res):
@@ -1060,17 +1180,21 @@ def _collect_metric_data(
     """
     rank_means, rank_stds = [], []
     res_means, res_stds = [], []
+    residuals_normalized_flags = []
 
     # Для спектра: собираем все сингулярные значения по всем центрам и всем направлениям.
     all_sv_lists: List[np.ndarray] = []
 
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
-        s = _compute_direction_stats(sv, res, ranks, threshold=threshold)
+        extra = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, is_normalized = _normalize_residuals(res, extra)
+        s = _compute_direction_stats(sv, norm_res, ranks, threshold=threshold)
         rank_means.append(s["rank_mean"])
         rank_stds.append(s["rank_std"])
         res_means.append(s["residual_mean"])
         res_stds.append(s["residual_std"])
+        residuals_normalized_flags.append(is_normalized)
         # Накапливаем сингулярные значения каждого центра.
         for sv_center in sv:
             if sv_center is not None and len(sv_center) > 0:
@@ -1098,6 +1222,9 @@ def _collect_metric_data(
         "rank_stds": np.array(rank_stds),
         "res_means": np.array(res_means),
         "res_stds": np.array(res_stds),
+        "residuals_normalized": bool(all(residuals_normalized_flags))
+        if residuals_normalized_flags
+        else False,
         "frac_both_degenerate": both_deg_stats["frac_both_degenerate_overall"],
         "n_centers": n_centers,
         "n_directions": len(directions),
