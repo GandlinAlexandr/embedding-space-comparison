@@ -13,6 +13,8 @@ import numpy as np
 # ВАЖНО: запускаем как модуль: python -m scripts.plot_pairwise_error_heatmaps
 from configs.metric_configs import short_metric_name as _short_metric_name
 
+VALID_PLOT_EXTS = ("png", "pdf", "svg")
+
 
 # ============================================================
 # Utility
@@ -23,8 +25,40 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def with_plots_ext(path: Path, plots_ext: str) -> Path:
-    return path.with_suffix(f".{plots_ext}")
+def parse_plots_exts(raw: str) -> List[str]:
+    items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not items:
+        raise ValueError("`--plots_ext` должен содержать хотя бы одно расширение.")
+
+    invalid = [ext for ext in items if ext not in VALID_PLOT_EXTS]
+    if invalid:
+        raise ValueError(
+            f"Неподдерживаемые расширения графиков: {invalid}. "
+            f"Допустимые: {list(VALID_PLOT_EXTS)}"
+        )
+
+    unique: List[str] = []
+    seen = set()
+    for ext in items:
+        if ext not in seen:
+            unique.append(ext)
+            seen.add(ext)
+    return unique
+
+
+def iter_plot_paths(path: Path, plots_exts: Iterable[str]) -> List[Path]:
+    return [path.with_suffix(f".{ext}") for ext in plots_exts]
+
+
+def save_figure_variants(
+    fig: plt.Figure,
+    out_path: Path,
+    plots_exts: Iterable[str],
+) -> List[Path]:
+    out_paths = iter_plot_paths(out_path, plots_exts)
+    for save_path in out_paths:
+        fig.savefig(save_path, bbox_inches="tight")
+    return out_paths
 
 
 def pretty_metric_name(name: str) -> str:
@@ -781,6 +815,7 @@ def save_family_target_heatmap(
     title_prefix: str,
     protocol: str,
     annotate: bool,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     fig, ax = plt.subplots(figsize=(6.5, 5.6))
 
@@ -829,7 +864,7 @@ def save_family_target_heatmap(
     cbar.set_label(target_label)
 
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight")
+    save_figure_variants(fig, out_path, plots_exts)
     plt.close(fig)
 
 
@@ -839,6 +874,7 @@ def save_family_count_heatmap(
     out_path: Path,
     title_prefix: str,
     annotate: bool,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     fig, ax = plt.subplots(figsize=(6.5, 5.6))
 
@@ -867,7 +903,7 @@ def save_family_count_heatmap(
     cbar.set_label("n_pairs")
 
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight")
+    save_figure_variants(fig, out_path, plots_exts)
     plt.close(fig)
 
 
@@ -929,6 +965,7 @@ def save_family_correlation_grid(
     annotate: bool,
     metric_sources: Optional[Dict[str, str]] = None,
     protocol: str = "abs",
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     sources = metric_sources or {}
 
@@ -954,6 +991,7 @@ def save_family_correlation_grid(
             corr_type=corr_type,
             annotate=annotate,
             protocol=protocol,
+            plots_exts=plots_exts,
         )
         return
 
@@ -1105,7 +1143,7 @@ def save_family_correlation_grid(
         cbar = fig.colorbar(final_im, cax=cbar_ax)
         cbar.set_label(f"{corr_label} corr", rotation=90, labelpad=10)
 
-    fig.savefig(out_path, bbox_inches="tight")
+    save_figure_variants(fig, out_path, plots_exts)
     plt.close(fig)
 
 
@@ -1121,6 +1159,7 @@ def _save_flat_corr_grid(
     corr_type: str,
     annotate: bool,
     protocol: str = "abs",
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     """Fallback: один flat grid без разделения на секции."""
     n_metrics = len(metric_names)
@@ -1173,7 +1212,7 @@ def _save_flat_corr_grid(
         cbar_ax = fig.add_axes([0.90, 0.18, 0.018, 0.62])
         cbar = fig.colorbar(last_im, cax=cbar_ax)
         cbar.set_label(f"{corr_label} corr", rotation=90, labelpad=10)
-    fig.savefig(out_path, bbox_inches="tight")
+    save_figure_variants(fig, out_path, plots_exts)
     plt.close(fig)
 
 
@@ -1183,6 +1222,7 @@ def save_leave_one_family_out_barplot(
     title_prefix: str,
     corr_type: str,
     metric_sources: Optional[Dict[str, str]] = None,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     sources = metric_sources or {}
     corr_label = "Пирсон" if corr_type == "pearson" else "Спирмен"
@@ -1214,7 +1254,7 @@ def save_leave_one_family_out_barplot(
             fontsize=13,
         )
         fig.subplots_adjust(top=0.93, hspace=0.55, wspace=0.35)
-        fig.savefig(out_path, bbox_inches="tight")
+        save_figure_variants(fig, out_path, plots_exts)
         plt.close(fig)
         return
 
@@ -1300,7 +1340,7 @@ def save_leave_one_family_out_barplot(
         f"{title_prefix} | leave-one-family-out ({corr_label})",
         fontsize=13,
     )
-    fig.savefig(out_path, bbox_inches="tight")
+    save_figure_variants(fig, out_path, plots_exts)
     plt.close(fig)
 
 
@@ -1473,8 +1513,7 @@ def parse_args() -> argparse.Namespace:
         "--plots_ext",
         type=str,
         default="png",
-        choices=["png", "pdf", "svg"],
-        help="Расширение файлов графиков.",
+        help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
     )
 
     args = parser.parse_args()
@@ -1494,6 +1533,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.plots_ext = parse_plots_exts(args.plots_ext)
     setup_matplotlib()
     ensure_dir(args.out_dir)
 
@@ -1771,10 +1811,11 @@ def main() -> None:
         families=families_ref,
         target_mean_mat=target_mean_ref,
         count_mat=count_ref,
-        out_path=with_plots_ext(target_plot, args.plots_ext),
+        out_path=target_plot,
         title_prefix=title_prefix,
         protocol=args.protocol,
         annotate=args.annotate,
+        plots_exts=args.plots_ext,
     )
 
     count_plot = args.out_dir / (
@@ -1785,9 +1826,10 @@ def main() -> None:
     save_family_count_heatmap(
         families=families_ref,
         count_mat=count_ref,
-        out_path=with_plots_ext(count_plot, args.plots_ext),
+        out_path=count_plot,
         title_prefix=title_prefix,
         annotate=args.annotate,
+        plots_exts=args.plots_ext,
     )
 
     # --------------------------------------------------------
@@ -1803,12 +1845,13 @@ def main() -> None:
         global_corrs=global_corrs,
         global_counts=global_counts,
         families=families_ref,
-        out_path=with_plots_ext(corr_plot, args.plots_ext),
+        out_path=corr_plot,
         title_prefix=title_prefix,
         corr_type=args.corr_type,
         annotate=args.annotate,
         metric_sources=metric_sources,
         protocol=args.protocol,
+        plots_exts=args.plots_ext,
     )
 
     # --------------------------------------------------------
@@ -1842,22 +1885,27 @@ def main() -> None:
         )
         save_leave_one_family_out_barplot(
             metric_rows=leave_one_family_out_by_metric,
-            out_path=with_plots_ext(loo_plot, args.plots_ext),
+            out_path=loo_plot,
             title_prefix=title_prefix,
             corr_type=args.corr_type,
             metric_sources=metric_sources,
+            plots_exts=args.plots_ext,
         )
 
     print("Saved:")
-    print(f"  - {with_plots_ext(target_plot, args.plots_ext)}")
-    print(f"  - {with_plots_ext(count_plot, args.plots_ext)}")
-    print(f"  - {with_plots_ext(corr_plot, args.plots_ext)}")
+    for save_path in iter_plot_paths(target_plot, args.plots_ext):
+        print(f"  - {save_path}")
+    for save_path in iter_plot_paths(count_plot, args.plots_ext):
+        print(f"  - {save_path}")
+    for save_path in iter_plot_paths(corr_plot, args.plots_ext):
+        print(f"  - {save_path}")
     print(f"  - {global_csv}")
     print(f"  - {family_csv}")
     if loo_csv is not None:
         print(f"  - {loo_csv}")
     if loo_plot is not None:
-        print(f"  - {with_plots_ext(loo_plot, args.plots_ext)}")
+        for save_path in iter_plot_paths(loo_plot, args.plots_ext):
+            print(f"  - {save_path}")
 
 
 if __name__ == "__main__":

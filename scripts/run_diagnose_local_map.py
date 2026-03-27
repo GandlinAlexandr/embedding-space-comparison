@@ -45,13 +45,15 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 # ВАЖНО: запускаем как модуль: python -m scripts.run_diagnose_local_map
 from configs.metric_configs import short_metric_name, get_embedding_metric_configs
+
+VALID_PLOT_EXTS = ("png", "pdf", "svg")
 
 # ============================================================
 # 0) Вспомогательные функции вывода
@@ -70,6 +72,42 @@ def _make_out_dirs(out_dir: str):
     os.makedirs(plots_dir, exist_ok=True)
     os.makedirs(reports_dir, exist_ok=True)
     return plots_dir, reports_dir
+
+
+def parse_plots_exts(raw: str) -> List[str]:
+    items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not items:
+        raise ValueError("`--plots_ext` должен содержать хотя бы одно расширение.")
+
+    invalid = [ext for ext in items if ext not in VALID_PLOT_EXTS]
+    if invalid:
+        raise ValueError(
+            f"Неподдерживаемые расширения графиков: {invalid}. "
+            f"Допустимые: {list(VALID_PLOT_EXTS)}"
+        )
+
+    unique: List[str] = []
+    seen = set()
+    for ext in items:
+        if ext not in seen:
+            unique.append(ext)
+            seen.add(ext)
+    return unique
+
+
+def _save_figure_variants(
+    fig: plt.Figure,
+    out_path: str,
+    plots_exts: Iterable[str],
+    dpi: int = 150,
+) -> List[str]:
+    base, _ = os.path.splitext(out_path)
+    saved_paths: List[str] = []
+    for ext in plots_exts:
+        save_path = f"{base}.{ext}"
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        saved_paths.append(save_path)
+    return saved_paths
 
 
 # ============================================================
@@ -441,7 +479,7 @@ def _plot_single_pair(
     plots_dir: str,
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
-    plots_ext: str = "png",
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     """
     Строит детальные графики для пары (model_i, model_j):
@@ -617,11 +655,12 @@ def _plot_single_pair(
     ax.set_title("Сводная статистика", fontsize=10)
 
     plt.tight_layout()
-    fname = f"{metric_name}_pair_{model_i}_vs_{model_j}.{plots_ext}"
+    fname = f"{metric_name}_pair_{model_i}_vs_{model_j}.png"
     fpath = os.path.join(plots_dir, fname)
-    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
-    print(f"  Сохранён график: {fpath}")
+    for save_path in saved_paths:
+        print(f"  Сохранён график: {save_path}")
 
 
 def _plot_singular_values_summary(
@@ -687,7 +726,7 @@ def _plot_aggregated(
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
     metric_spec_str: str = "",
-    plots_ext: str = "png",
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     """
     Строит агрегированные графики по всем парам:
@@ -845,11 +884,12 @@ def _plot_aggregated(
         ax.set_title("Одновременная вырожденность X→Y и Y→X в одном центре")
 
     plt.tight_layout()
-    fname = f"{metric_name}_aggregated_diagnostics.{plots_ext}"
+    fname = f"{metric_name}_aggregated_diagnostics.png"
     fpath = os.path.join(plots_dir, fname)
-    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
-    print(f"  Сохранён агрегированный график: {fpath}")
+    for save_path in saved_paths:
+        print(f"  Сохранён агрегированный график: {save_path}")
 
 
 # ============================================================
@@ -1002,7 +1042,7 @@ def _plot_summary(
     metrics_data: List[Dict],
     plots_dir: str,
     threshold: float,
-    plots_ext: str = "png",
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     """
     Строит сводный график сравнения всех метрик по трём вопросам руководителя:
@@ -1162,10 +1202,11 @@ def _plot_summary(
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    fpath = os.path.join(plots_dir, f"summary_diagnostics.{plots_ext}")
-    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    fpath = os.path.join(plots_dir, "summary_diagnostics.png")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
-    print(f"  Сохранён сводный график: {fpath}")
+    for save_path in saved_paths:
+        print(f"  Сохранён сводный график: {save_path}")
 
 
 def _collect_metric_data(
@@ -1282,7 +1323,7 @@ def _run_single_metric(
     model_a: str = "",
     model_b: str = "",
     collect_for_summary: bool = False,
-    plots_ext: str = "png",
+    plots_exts: Iterable[str] = ("png",),
 ) -> Optional[Dict]:
     """
     Запускает полную диагностику для одного файла артефактов.
@@ -1323,7 +1364,7 @@ def _run_single_metric(
         metric_name,
         threshold=threshold,
         metric_spec_str=metric_spec_str,
-        plots_ext=plots_ext,
+        plots_exts=plots_exts,
     )
     _save_report(directions, artifacts, both_deg_stats, reports_dir, metric_name)
 
@@ -1344,7 +1385,7 @@ def _run_single_metric(
                 plots_dir,
                 metric_name,
                 threshold=threshold,
-                plots_ext=plots_ext,
+                plots_exts=plots_exts,
             )
 
     if collect_for_summary:
@@ -1386,8 +1427,7 @@ def main():
         "--plots_ext",
         type=str,
         default="png",
-        choices=["png", "pdf", "svg"],
-        help="Расширение файлов графиков.",
+        help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
     )
     parser.add_argument(
         "--model_a",
@@ -1412,6 +1452,7 @@ def main():
         ),
     )
     args = parser.parse_args()
+    args.plots_ext = parse_plots_exts(args.plots_ext)
 
     if not args.artifacts_dir and not args.artifacts_path:
         parser.error("Нужно указать либо --artifacts_dir, либо --artifacts_path.")
@@ -1449,7 +1490,7 @@ def main():
                 out_dir=args.out_dir,
                 threshold=args.degenerate_threshold,
                 collect_for_summary=True,
-                plots_ext=args.plots_ext,
+                plots_exts=args.plots_ext,
             )
             if data is not None:
                 metrics_data.append(data)
@@ -1461,7 +1502,7 @@ def main():
             metrics_data,
             plots_dir,
             threshold=args.degenerate_threshold,
-            plots_ext=args.plots_ext,
+            plots_exts=args.plots_ext,
         )
 
     # ============================================================
@@ -1475,7 +1516,7 @@ def main():
             model_a=args.model_a,
             model_b=args.model_b,
             collect_for_summary=False,
-            plots_ext=args.plots_ext,
+            plots_exts=args.plots_ext,
         )
 
     print("\nГотово.")

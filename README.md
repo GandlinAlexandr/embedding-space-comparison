@@ -129,7 +129,7 @@ A) Пример пошагового запуска и оценки основн
       --eval_protocol delta_signed `
       --plots_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\plots\cifar10_test_signed `
       --plots_mode alltasks `
-      --plots_ext png
+      --plots_ext svg,png
    ```
    
    b. для симметричных версий метрик
@@ -141,7 +141,7 @@ A) Пример пошагового запуска и оценки основн
       --eval_protocol abs `
       --plots_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\plots\cifar10_test_signed `
       --plots_mode alltasks `
-      --plots_ext png
+      --plots_ext svg,png
    ```
    Итог: Для каждой парной метрики вычисляется, насколько хорошо её значения согласуются с реальными различиями в downstream-качестве моделей.
 На выходе формируется итоговая таблица оценки метрик, в которой для каждой метрики собраны корреляции и вспомогательные показатели качества.
@@ -181,7 +181,8 @@ B) Ниже представлены примеры команд запуска 
    python -m scripts.run_diagnose_local_map `
       --artifacts_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\artifacts `
       --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\summary `
-      --degenerate_threshold 0.01
+      --degenerate_threshold 0.01 `
+      --plots_ext svg,png
    ```
    Итог: Строятся графики, тражающие качество отображения. Четыре главных графика:
    * Стабильность ранга
@@ -202,7 +203,8 @@ B) Ниже представлены примеры команд запуска 
       --model_a resnet50 `
       --model_b vit_b_16 `
       --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\paars\pair_resnet50_vit_b_16 `
-      --degenerate_threshold 0.01
+      --degenerate_threshold 0.01 `
+      --plots_ext svg,png
    ```
    Итог: графики качества отображения для конкретной пары моделей. Графики следующие:
    * Гистограмма рангов
@@ -263,6 +265,7 @@ C) Далее прадставлен пример расчёта "одиночн
       --pairwise_eval_csv .\data\experiments\exp01_antisym_cifar10_09-03-2026\reports\cifar10_eval_signed.csv `
       --single_protocol signed `
       --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\antisym-pairwise-single_final_comparison `
+      --plots_ext svg,png `
       --title "CIFAR10 | Δacc" `
       --save_pairwise_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\antisym-pairwise-single_final_comparison\pairwise_only.csv `
       --save_single_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\antisym-pairwise-single_final_comparison\single_diff_only.csv `
@@ -276,6 +279,7 @@ C) Далее прадставлен пример расчёта "одиночн
       --pairwise_eval_csv .\data\experiments\exp02_sym_cifar10_10-03-2026\reports\cifar10_eval.csv `
       --single_protocol abs `
       --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\sym-pairwise-single_final_comparison `
+      --plots_ext svg,png `
       --title "CIFAR10 | |Δacc|" `
       --save_pairwise_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\sym-pairwise-single_final_comparison\pairwise_only.csv `
       --save_single_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\sym-pairwise-single_final_comparison\single_diff_only.csv `
@@ -302,6 +306,7 @@ D) Ниже указаны команды для графиков, сравни�
       --protocol signed `
       --corr_type spearman `
       --title "CIFAR10 signed" `
+      --plots_ext svg,png `
       --annotate
    ```
    
@@ -316,6 +321,7 @@ D) Ниже указаны команды для графиков, сравни�
       --protocol abs `
       --corr_type spearman `
       --title "CIFAR10 abs" `
+      --plots_ext svg,png `
       --annotate
    ```
    
