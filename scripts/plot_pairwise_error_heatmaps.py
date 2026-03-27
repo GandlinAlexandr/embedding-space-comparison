@@ -23,6 +23,10 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def with_plots_ext(path: Path, plots_ext: str) -> Path:
+    return path.with_suffix(f".{plots_ext}")
+
+
 def pretty_metric_name(name: str) -> str:
     # Single-метрики: полные читаемые названия
     single_mapping = {
@@ -1465,6 +1469,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Не считать leave-one-family-out summary",
     )
+    parser.add_argument(
+        "--plots_ext",
+        type=str,
+        default="png",
+        choices=["png", "pdf", "svg"],
+        help="Расширение файлов графиков.",
+    )
 
     args = parser.parse_args()
 
@@ -1751,7 +1762,7 @@ def main() -> None:
     # --------------------------------------------------------
     # Save target / count heatmaps
     # --------------------------------------------------------
-    target_png = args.out_dir / (
+    target_plot = args.out_dir / (
         "family_target_mean_signed.png"
         if args.protocol == "signed"
         else "family_target_mean_abs.png"
@@ -1760,13 +1771,13 @@ def main() -> None:
         families=families_ref,
         target_mean_mat=target_mean_ref,
         count_mat=count_ref,
-        out_path=target_png,
+        out_path=with_plots_ext(target_plot, args.plots_ext),
         title_prefix=title_prefix,
         protocol=args.protocol,
         annotate=args.annotate,
     )
 
-    count_png = args.out_dir / (
+    count_plot = args.out_dir / (
         "family_pair_counts_signed.png"
         if args.protocol == "signed"
         else "family_pair_counts_abs.png"
@@ -1774,7 +1785,7 @@ def main() -> None:
     save_family_count_heatmap(
         families=families_ref,
         count_mat=count_ref,
-        out_path=count_png,
+        out_path=with_plots_ext(count_plot, args.plots_ext),
         title_prefix=title_prefix,
         annotate=args.annotate,
     )
@@ -1782,7 +1793,7 @@ def main() -> None:
     # --------------------------------------------------------
     # Save main correlation grid
     # --------------------------------------------------------
-    corr_png = (
+    corr_plot = (
         args.out_dir
         / f"family_subset_correlations_{args.corr_type}_{args.protocol}.png"
     )
@@ -1792,7 +1803,7 @@ def main() -> None:
         global_corrs=global_corrs,
         global_counts=global_counts,
         families=families_ref,
-        out_path=corr_png,
+        out_path=with_plots_ext(corr_plot, args.plots_ext),
         title_prefix=title_prefix,
         corr_type=args.corr_type,
         annotate=args.annotate,
@@ -1818,7 +1829,7 @@ def main() -> None:
     # Leave-one-family-out
     # --------------------------------------------------------
     loo_csv = None
-    loo_png = None
+    loo_plot = None
 
     if not args.skip_leave_one_family_out and leave_one_family_out_by_metric:
         loo_csv = (
@@ -1826,27 +1837,27 @@ def main() -> None:
         )
         save_leave_one_family_out_csv(loo_csv, loo_rows_all)
 
-        loo_png = (
+        loo_plot = (
             args.out_dir / f"leave_one_family_out_{args.corr_type}_{args.protocol}.png"
         )
         save_leave_one_family_out_barplot(
             metric_rows=leave_one_family_out_by_metric,
-            out_path=loo_png,
+            out_path=with_plots_ext(loo_plot, args.plots_ext),
             title_prefix=title_prefix,
             corr_type=args.corr_type,
             metric_sources=metric_sources,
         )
 
     print("Saved:")
-    print(f"  - {target_png}")
-    print(f"  - {count_png}")
-    print(f"  - {corr_png}")
+    print(f"  - {with_plots_ext(target_plot, args.plots_ext)}")
+    print(f"  - {with_plots_ext(count_plot, args.plots_ext)}")
+    print(f"  - {with_plots_ext(corr_plot, args.plots_ext)}")
     print(f"  - {global_csv}")
     print(f"  - {family_csv}")
     if loo_csv is not None:
         print(f"  - {loo_csv}")
-    if loo_png is not None:
-        print(f"  - {loo_png}")
+    if loo_plot is not None:
+        print(f"  - {with_plots_ext(loo_plot, args.plots_ext)}")
 
 
 if __name__ == "__main__":

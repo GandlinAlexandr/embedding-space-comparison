@@ -31,7 +31,8 @@ run_compute_embedding_metrics.py
   заполняя sim[i,j] = 0.5*(m(i->j)+m(j->i)) и симметризуя.
 
 АРТЕФАКТЫ:
-- Вместе с матрицей метрики всегда сохраняется файл {metric_name}_artifacts.npz.
+- Вместе с матрицей метрики всегда сохраняется файл
+  artifacts/{metric_name}_artifacts.npz внутри out_dir.
 - Артефакты содержат сырые данные по каждому центру для каждого направления (i->j):
     singular_values: (n_centers, d) — сингулярные значения матрицы M
     residuals:       (n_centers,)   — норма невязки ||Xc @ M - Yc||_F
@@ -1151,7 +1152,7 @@ def _metric_directed_for_pair(
 
 
 def _artifacts_path(out_dir: str, metric_name: str) -> str:
-    return os.path.join(out_dir, f"{metric_name}_artifacts.npz")
+    return os.path.join(out_dir, "artifacts", f"{metric_name}_artifacts.npz")
 
 
 def _load_artifacts(path: str) -> Dict[str, Any]:
@@ -1470,6 +1471,7 @@ def main():
 
         out_path = os.path.join(args.out_dir, f"{name}.npz")
         artifacts_path = _artifacts_path(args.out_dir, name)
+        os.makedirs(os.path.dirname(artifacts_path), exist_ok=True)
 
         # ------------------------------------------------------------
         # Создание кэшей для каждой модели (центры + соседи) один раз для каждой метрики.

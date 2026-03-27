@@ -61,7 +61,7 @@ from configs.metric_configs import short_metric_name, get_embedding_metric_confi
 def _make_out_dirs(out_dir: str):
     """
     Создаёт две поддиректории внутри out_dir:
-      plots/   — все графики (.png)
+      plots/   — все графики
       reports/ — текстовые и JSON-отчёты (.txt, .json)
     Возвращает (plots_dir, reports_dir).
     """
@@ -366,6 +366,7 @@ def _plot_single_pair(
     plots_dir: str,
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
+    plots_ext: str = "png",
 ) -> None:
     """
     Строит детальные графики для пары (model_i, model_j):
@@ -532,7 +533,7 @@ def _plot_single_pair(
     ax.set_title("Сводная статистика", fontsize=10)
 
     plt.tight_layout()
-    fname = f"{metric_name}_pair_{model_i}_vs_{model_j}.png"
+    fname = f"{metric_name}_pair_{model_i}_vs_{model_j}.{plots_ext}"
     fpath = os.path.join(plots_dir, fname)
     plt.savefig(fpath, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -602,6 +603,7 @@ def _plot_aggregated(
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
     metric_spec_str: str = "",
+    plots_ext: str = "png",
 ) -> None:
     """
     Строит агрегированные графики по всем парам:
@@ -753,7 +755,7 @@ def _plot_aggregated(
         ax.set_title("Одновременная вырожденность X→Y и Y→X в одном центре")
 
     plt.tight_layout()
-    fname = f"{metric_name}_aggregated_diagnostics.png"
+    fname = f"{metric_name}_aggregated_diagnostics.{plots_ext}"
     fpath = os.path.join(plots_dir, fname)
     plt.savefig(fpath, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -889,6 +891,7 @@ def _plot_summary(
     metrics_data: List[Dict],
     plots_dir: str,
     threshold: float,
+    plots_ext: str = "png",
 ) -> None:
     """
     Строит сводный график сравнения всех метрик по трём вопросам руководителя:
@@ -1039,7 +1042,7 @@ def _plot_summary(
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    fpath = os.path.join(plots_dir, "summary_diagnostics.png")
+    fpath = os.path.join(plots_dir, f"summary_diagnostics.{plots_ext}")
     plt.savefig(fpath, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Сохранён сводный график: {fpath}")
@@ -1152,6 +1155,7 @@ def _run_single_metric(
     model_a: str = "",
     model_b: str = "",
     collect_for_summary: bool = False,
+    plots_ext: str = "png",
 ) -> Optional[Dict]:
     """
     Запускает полную диагностику для одного файла артефактов.
@@ -1192,6 +1196,7 @@ def _run_single_metric(
         metric_name,
         threshold=threshold,
         metric_spec_str=metric_spec_str,
+        plots_ext=plots_ext,
     )
     _save_report(directions, artifacts, both_deg_stats, reports_dir, metric_name)
 
@@ -1206,7 +1211,13 @@ def _run_single_metric(
             )
         else:
             _plot_single_pair(
-                artifacts, model_a, model_b, plots_dir, metric_name, threshold=threshold
+                artifacts,
+                model_a,
+                model_b,
+                plots_dir,
+                metric_name,
+                threshold=threshold,
+                plots_ext=plots_ext,
             )
 
     if collect_for_summary:
@@ -1243,6 +1254,13 @@ def main():
         type=str,
         default="diagnostics",
         help="Куда сохранять графики и отчёты.",
+    )
+    parser.add_argument(
+        "--plots_ext",
+        type=str,
+        default="png",
+        choices=["png", "pdf", "svg"],
+        help="Расширение файлов графиков.",
     )
     parser.add_argument(
         "--model_a",
@@ -1304,6 +1322,7 @@ def main():
                 out_dir=args.out_dir,
                 threshold=args.degenerate_threshold,
                 collect_for_summary=True,
+                plots_ext=args.plots_ext,
             )
             if data is not None:
                 metrics_data.append(data)
@@ -1311,7 +1330,12 @@ def main():
         # Сводный график по всем метрикам.
         print("\nПостроение сводного графика...")
         plots_dir, _ = _make_out_dirs(args.out_dir)
-        _plot_summary(metrics_data, plots_dir, threshold=args.degenerate_threshold)
+        _plot_summary(
+            metrics_data,
+            plots_dir,
+            threshold=args.degenerate_threshold,
+            plots_ext=args.plots_ext,
+        )
 
     # ============================================================
     # Режим 2/3: один файл — агрегированный или детальный
@@ -1324,6 +1348,7 @@ def main():
             model_a=args.model_a,
             model_b=args.model_b,
             collect_for_summary=False,
+            plots_ext=args.plots_ext,
         )
 
     print("\nГотово.")

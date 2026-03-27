@@ -179,7 +179,7 @@ B) Ниже представлены примеры команд запуска 
   1. Общая агрегация по всем метрикам
    ```powershell
    python -m scripts.run_diagnose_local_map `
-      --artifacts_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test `
+      --artifacts_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\artifacts `
       --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\summary `
       --degenerate_threshold 0.01
    ```
@@ -198,7 +198,7 @@ B) Ниже представлены примеры команд запуска 
 2. Даннsе по конкретной паре моделей
    ```powershell
    python -m scripts.run_diagnose_local_map `
-      --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\lin_k10_artifacts.npz `
+      --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\artifacts\lin_k10_artifacts.npz `
       --model_a resnet50 `
       --model_b vit_b_16 `
       --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\paars\pair_resnet50_vit_b_16 `

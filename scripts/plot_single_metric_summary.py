@@ -29,6 +29,10 @@ def save_fig(fig: plt.Figure, path: Path) -> None:
     plt.close(fig)
 
 
+def with_plots_ext(path: Path, plots_ext: str) -> Path:
+    return path.with_suffix(f".{plots_ext}")
+
+
 def require_cols(df: pd.DataFrame, cols: Iterable[str], name: str) -> None:
     missing = set(cols) - set(df.columns)
     if missing:
@@ -295,6 +299,7 @@ def plot_pairwise_only(
     out_dir: Path,
     title_prefix: str,
     protocol: str,
+    plots_ext: str = "png",
 ) -> None:
     labels = pairwise_df["pairwise_metric"].astype(str).tolist()
 
@@ -308,7 +313,7 @@ def plot_pairwise_only(
         l3="Kendall",
         title=f"{title_prefix} | pairwise only",
         ylabel=pairwise_corr_label(protocol),
-        out_path=out_dir / "pairwise_only_all.png",
+        out_path=with_plots_ext(out_dir / "pairwise_only_all.png", plots_ext),
     )
 
 
@@ -317,6 +322,7 @@ def plot_single_only(
     out_dir: Path,
     title_prefix: str,
     protocol: str,
+    plots_ext: str = "png",
 ) -> None:
     labels = single_df["baseline_metric"].astype(str).tolist()
 
@@ -330,7 +336,7 @@ def plot_single_only(
         l3="Kendall",
         title=f"{title_prefix} | single-diff only",
         ylabel=single_corr_label(protocol),
-        out_path=out_dir / "single_diff_only_all.png",
+        out_path=with_plots_ext(out_dir / "single_diff_only_all.png", plots_ext),
     )
 
 
@@ -339,6 +345,7 @@ def plot_best_pairwise_vs_single(
     out_dir: Path,
     title_prefix: str,
     protocol: str,
+    plots_ext: str = "png",
 ) -> None:
     labels = best_vs_single_df["baseline_metric"].astype(str).tolist()
 
@@ -357,7 +364,9 @@ def plot_best_pairwise_vs_single(
         single_label=single_label,
         title=f"{title_prefix} | Spearman | best pairwise = {best_sp_name}",
         ylabel="корреляция",
-        out_path=out_dir / "best_pairwise_vs_single_spearman.png",
+        out_path=with_plots_ext(
+            out_dir / "best_pairwise_vs_single_spearman.png", plots_ext
+        ),
     )
 
     plot_two_series(
@@ -368,7 +377,9 @@ def plot_best_pairwise_vs_single(
         single_label=single_label,
         title=f"{title_prefix} | Pearson | best pairwise = {best_pe_name}",
         ylabel="корреляция",
-        out_path=out_dir / "best_pairwise_vs_single_pearson.png",
+        out_path=with_plots_ext(
+            out_dir / "best_pairwise_vs_single_pearson.png", plots_ext
+        ),
     )
 
     plot_two_series(
@@ -379,7 +390,9 @@ def plot_best_pairwise_vs_single(
         single_label=single_label,
         title=f"{title_prefix} | Kendall | best pairwise = {best_ke_name}",
         ylabel="корреляция",
-        out_path=out_dir / "best_pairwise_vs_single_kendall.png",
+        out_path=with_plots_ext(
+            out_dir / "best_pairwise_vs_single_kendall.png", plots_ext
+        ),
     )
 
 
@@ -420,6 +433,13 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Папка для графиков.",
+    )
+    parser.add_argument(
+        "--plots_ext",
+        type=str,
+        default="png",
+        choices=["png", "pdf", "svg"],
+        help="Расширение файлов графиков.",
     )
 
     parser.add_argument(
@@ -496,10 +516,26 @@ def main() -> None:
     print(f"Папка вывода       : {args.out_dir}")
     print("============================================================")
 
-    plot_pairwise_only(pairwise_df, args.out_dir, title_prefix, args.single_protocol)
-    plot_single_only(single_df, args.out_dir, title_prefix, args.single_protocol)
+    plot_pairwise_only(
+        pairwise_df,
+        args.out_dir,
+        title_prefix,
+        args.single_protocol,
+        plots_ext=args.plots_ext,
+    )
+    plot_single_only(
+        single_df,
+        args.out_dir,
+        title_prefix,
+        args.single_protocol,
+        plots_ext=args.plots_ext,
+    )
     plot_best_pairwise_vs_single(
-        best_vs_single_df, args.out_dir, title_prefix, args.single_protocol
+        best_vs_single_df,
+        args.out_dir,
+        title_prefix,
+        args.single_protocol,
+        plots_ext=args.plots_ext,
     )
 
     print("============================================================")
