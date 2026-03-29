@@ -100,7 +100,7 @@ A) Пример пошагового запуска и оценки основн
     python -m scripts.run_compute_embedding_metrics `
       --embeddings_dir .\data\embeddings\cifar10_test `
       --out_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\metric_matrices\cifar10_test `
-      --include local_map_rank_linear_knn_k10,local_map_rank_linear_knn_k10_antisym,local_map_rank_linear_knn_k5_antisym,local_map_rank_linear_knn_k20_antisym,local_map_rank_linear_knn_k40_antisym,local_map_rank_linear_eps_percentile_5_antisym,local_map_rank_linear_eps_percentile_10_antisym,local_map_rank_linear_eps_percentile_20_antisym,local_map_rank_multiscale_knn_mean_antisym,local_map_rank_rff_knn_k10_antisym `
+      --include directed_k10,lin_k10,lin_k5,lin_k20,lin_k40,lin_eps_5,lin_eps_10,lin_eps_20,multiscale_mean,rff_k10 `
       --seed 42 `
       --incremental
    ```
@@ -110,7 +110,7 @@ A) Пример пошагового запуска и оценки основн
     python -m scripts.run_compute_embedding_metrics `
       --embeddings_dir .\data\embeddings\cifar10_test `
       --out_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\metric_matrices\cifar10_test `
-      --include local_map_rank_linear_knn_k10,local_map_rank_linear_knn_k10_sym,local_map_rank_linear_knn_k5_sym,local_map_rank_linear_knn_k20_sym,local_map_rank_linear_knn_k40_sym,local_map_rank_linear_eps_percentile_5_sym,local_map_rank_linear_eps_percentile_10_sym,local_map_rank_linear_eps_percentile_20_sym,local_map_rank_multiscale_knn_mean_sym,local_map_rank_rff_knn_k10_sym `
+      --include directed_k10,lin_k10_sym,lin_k5_sym,lin_k20_sym,lin_k40_sym,lin_eps_5_sym,lin_eps_10_sym,lin_eps_20_sym,multiscale_mean_sym,rff_k10_sym `
       --seed 42 `
       --incremental
    ```
@@ -129,7 +129,7 @@ A) Пример пошагового запуска и оценки основн
       --eval_protocol delta_signed `
       --plots_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\plots\cifar10_test_signed `
       --plots_mode alltasks `
-      --plots_ext png
+      --plots_ext svg,png
    ```
    
    b. для симметричных версий метрик
@@ -141,7 +141,7 @@ A) Пример пошагового запуска и оценки основн
       --eval_protocol abs `
       --plots_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\plots\cifar10_test_signed `
       --plots_mode alltasks `
-      --plots_ext png
+      --plots_ext svg,png
    ```
    Итог: Для каждой парной метрики вычисляется, насколько хорошо её значения согласуются с реальными различиями в downstream-качестве моделей.
 На выходе формируется итоговая таблица оценки метрик, в которой для каждой метрики собраны корреляции и вспомогательные показатели качества.
@@ -179,9 +179,10 @@ B) Ниже представлены примеры команд запуска 
   1. Общая агрегация по всем метрикам
    ```powershell
    python -m scripts.run_diagnose_local_map `
-      --artifacts_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test `
+      --artifacts_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\artifacts `
       --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\summary `
-      --degenerate_threshold 0.01
+      --degenerate_threshold 0.01 `
+      --plots_ext svg,png
    ```
    Итог: Строятся графики, тражающие качество отображения. Четыре главных графика:
    * Стабильность ранга
@@ -198,11 +199,12 @@ B) Ниже представлены примеры команд запуска 
 2. Даннsе по конкретной паре моделей
    ```powershell
    python -m scripts.run_diagnose_local_map `
-      --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\local_map_rank_linear_knn_k10_antisym_artifacts.npz `
+      --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\artifacts\lin_k10_artifacts.npz `
       --model_a resnet50 `
       --model_b vit_b_16 `
       --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\paars\pair_resnet50_vit_b_16 `
-      --degenerate_threshold 0.01
+      --degenerate_threshold 0.01 `
+      --plots_ext svg,png
    ```
    Итог: графики качества отображения для конкретной пары моделей. Графики следующие:
    * Гистограмма рангов
@@ -263,6 +265,7 @@ C) Далее прадставлен пример расчёта "одиночн
       --pairwise_eval_csv .\data\experiments\exp01_antisym_cifar10_09-03-2026\reports\cifar10_eval_signed.csv `
       --single_protocol signed `
       --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\antisym-pairwise-single_final_comparison `
+      --plots_ext svg,png `
       --title "CIFAR10 | Δacc" `
       --save_pairwise_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\antisym-pairwise-single_final_comparison\pairwise_only.csv `
       --save_single_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\antisym-pairwise-single_final_comparison\single_diff_only.csv `
@@ -276,6 +279,7 @@ C) Далее прадставлен пример расчёта "одиночн
       --pairwise_eval_csv .\data\experiments\exp02_sym_cifar10_10-03-2026\reports\cifar10_eval.csv `
       --single_protocol abs `
       --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\sym-pairwise-single_final_comparison `
+      --plots_ext svg,png `
       --title "CIFAR10 | |Δacc|" `
       --save_pairwise_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\sym-pairwise-single_final_comparison\pairwise_only.csv `
       --save_single_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\sym-pairwise-single_final_comparison\single_diff_only.csv `
@@ -302,6 +306,7 @@ D) Ниже указаны команды для графиков, сравни�
       --protocol signed `
       --corr_type spearman `
       --title "CIFAR10 signed" `
+      --plots_ext svg,png `
       --annotate
    ```
    
@@ -316,6 +321,7 @@ D) Ниже указаны команды для графиков, сравни�
       --protocol abs `
       --corr_type spearman `
       --title "CIFAR10 abs" `
+      --plots_ext svg,png `
       --annotate
    ```
    

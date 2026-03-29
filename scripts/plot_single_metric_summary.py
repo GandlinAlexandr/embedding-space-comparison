@@ -22,11 +22,42 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def save_fig(fig: plt.Figure, path: Path) -> None:
+VALID_PLOT_EXTS = ("png", "pdf", "svg")
+
+
+def parse_plots_exts(raw: str) -> list[str]:
+    items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not items:
+        raise ValueError("`--plots_ext` должен содержать хотя бы одно расширение.")
+
+    invalid = [ext for ext in items if ext not in VALID_PLOT_EXTS]
+    if invalid:
+        raise ValueError(
+            f"Неподдерживаемые расширения графиков: {invalid}. "
+            f"Допустимые: {list(VALID_PLOT_EXTS)}"
+        )
+
+    unique: list[str] = []
+    seen = set()
+    for ext in items:
+        if ext not in seen:
+            unique.append(ext)
+            seen.add(ext)
+    return unique
+
+
+def iter_plot_paths(path: Path, plots_exts: Iterable[str]) -> list[Path]:
+    return [path.with_suffix(f".{ext}") for ext in plots_exts]
+
+
+def save_fig(fig: plt.Figure, path: Path, plots_exts: Iterable[str]) -> list[Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    fig.savefig(path, dpi=200, bbox_inches="tight")
+    out_paths = iter_plot_paths(path, plots_exts)
+    for out_path in out_paths:
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
+    return out_paths
 
 
 def require_cols(df: pd.DataFrame, cols: Iterable[str], name: str) -> None:
@@ -198,6 +229,7 @@ def plot_grouped_three(
     title: str,
     ylabel: str,
     out_path: Path,
+    plots_exts: Iterable[str],
 ) -> None:
     x = np.arange(len(labels))
     width = 0.24
@@ -217,7 +249,7 @@ def plot_grouped_three(
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend()
 
-    save_fig(fig, out_path)
+    save_fig(fig, out_path, plots_exts)
 
 
 def plot_two_series(
@@ -229,6 +261,7 @@ def plot_two_series(
     title: str,
     ylabel: str,
     out_path: Path,
+    plots_exts: Iterable[str],
 ) -> None:
     x = np.arange(len(labels))
     width = 0.36
@@ -247,7 +280,7 @@ def plot_two_series(
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend()
 
-    save_fig(fig, out_path)
+    save_fig(fig, out_path, plots_exts)
 
 
 # ============================================================
@@ -295,6 +328,7 @@ def plot_pairwise_only(
     out_dir: Path,
     title_prefix: str,
     protocol: str,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     labels = pairwise_df["pairwise_metric"].astype(str).tolist()
 
@@ -309,6 +343,7 @@ def plot_pairwise_only(
         title=f"{title_prefix} | pairwise only",
         ylabel=pairwise_corr_label(protocol),
         out_path=out_dir / "pairwise_only_all.png",
+        plots_exts=plots_exts,
     )
 
 
@@ -317,6 +352,7 @@ def plot_single_only(
     out_dir: Path,
     title_prefix: str,
     protocol: str,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     labels = single_df["baseline_metric"].astype(str).tolist()
 
@@ -331,6 +367,7 @@ def plot_single_only(
         title=f"{title_prefix} | single-diff only",
         ylabel=single_corr_label(protocol),
         out_path=out_dir / "single_diff_only_all.png",
+        plots_exts=plots_exts,
     )
 
 
@@ -339,6 +376,7 @@ def plot_best_pairwise_vs_single(
     out_dir: Path,
     title_prefix: str,
     protocol: str,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     labels = best_vs_single_df["baseline_metric"].astype(str).tolist()
 
@@ -358,6 +396,7 @@ def plot_best_pairwise_vs_single(
         title=f"{title_prefix} | Spearman | best pairwise = {best_sp_name}",
         ylabel="корреляция",
         out_path=out_dir / "best_pairwise_vs_single_spearman.png",
+        plots_exts=plots_exts,
     )
 
     plot_two_series(
@@ -369,6 +408,7 @@ def plot_best_pairwise_vs_single(
         title=f"{title_prefix} | Pearson | best pairwise = {best_pe_name}",
         ylabel="корреляция",
         out_path=out_dir / "best_pairwise_vs_single_pearson.png",
+        plots_exts=plots_exts,
     )
 
     plot_two_series(
@@ -380,6 +420,7 @@ def plot_best_pairwise_vs_single(
         title=f"{title_prefix} | Kendall | best pairwise = {best_ke_name}",
         ylabel="корреляция",
         out_path=out_dir / "best_pairwise_vs_single_kendall.png",
+        plots_exts=plots_exts,
     )
 
 
@@ -421,6 +462,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Папка для графиков.",
     )
+    parser.add_argument(
+        "--plots_ext",
+        type=str,
+        default="png",
+        help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
+    )
 
     parser.add_argument(
         "--title",
@@ -460,6 +507,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.plots_ext = parse_plots_exts(args.plots_ext)
 
     ensure_dir(args.out_dir)
 
@@ -496,10 +544,26 @@ def main() -> None:
     print(f"Папка вывода       : {args.out_dir}")
     print("============================================================")
 
-    plot_pairwise_only(pairwise_df, args.out_dir, title_prefix, args.single_protocol)
-    plot_single_only(single_df, args.out_dir, title_prefix, args.single_protocol)
+    plot_pairwise_only(
+        pairwise_df,
+        args.out_dir,
+        title_prefix,
+        args.single_protocol,
+        plots_exts=args.plots_ext,
+    )
+    plot_single_only(
+        single_df,
+        args.out_dir,
+        title_prefix,
+        args.single_protocol,
+        plots_exts=args.plots_ext,
+    )
     plot_best_pairwise_vs_single(
-        best_vs_single_df, args.out_dir, title_prefix, args.single_protocol
+        best_vs_single_df,
+        args.out_dir,
+        title_prefix,
+        args.single_protocol,
+        plots_exts=args.plots_ext,
     )
 
     print("============================================================")

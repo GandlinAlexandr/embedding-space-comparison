@@ -38,6 +38,30 @@ except Exception:  # pragma: no cover
     plt = None
 
 
+VALID_PLOT_EXTS = ("png", "pdf", "svg")
+
+
+def parse_plots_exts(raw: str) -> List[str]:
+    items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not items:
+        raise ValueError("`--plots_ext` должен содержать хотя бы одно расширение.")
+
+    invalid = [ext for ext in items if ext not in VALID_PLOT_EXTS]
+    if invalid:
+        raise ValueError(
+            f"Неподдерживаемые расширения графиков: {invalid}. "
+            f"Допустимые: {list(VALID_PLOT_EXTS)}"
+        )
+
+    unique: List[str] = []
+    seen = set()
+    for ext in items:
+        if ext not in seen:
+            unique.append(ext)
+            seen.add(ext)
+    return unique
+
+
 # ================================================================
 # Загрузка матрицы метрики (.npz)
 # ================================================================
@@ -416,6 +440,7 @@ def _plot_scatter(
     title: str,
     out_path: str,
     subtitle: str,
+    plots_exts: List[str],
 ) -> None:
     if plt is None:
         raise RuntimeError("matplotlib недоступен; сохранить графики нельзя")
@@ -432,7 +457,9 @@ def _plot_scatter(
     ax.set_ylabel("target")
     fig.text(0.01, 0.01, subtitle, fontsize=9)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
-    fig.savefig(out_path)
+    base, _ = os.path.splitext(out_path)
+    for ext in plots_exts:
+        fig.savefig(f"{base}.{ext}")
     plt.close(fig)
 
 
@@ -440,7 +467,7 @@ def _maybe_make_plots(
     metric_path: str,
     downstream: Dict[str, Dict[str, float]],
     plots_dir: str,
-    plots_ext: str,
+    plots_exts: List[str],
     plots_mode: str,
     use_tasks: Optional[List[str]],
     eval_protocol: str,
@@ -476,13 +503,14 @@ def _maybe_make_plots(
         x, y, info = _compute_pair_cloud(
             metric_path, downstream, task=None, eval_protocol=eval_protocol
         )
-        out = os.path.join(plots_dir, f"{_safe_filename(stem)}__ALLTASKS.{plots_ext}")
+        out = os.path.join(plots_dir, f"{_safe_filename(stem)}__ALLTASKS.png")
         _plot_scatter(
             x,
             y,
             title=f"{stem} | ALL TASKS | {eval_protocol}",
             out_path=out,
             subtitle=_subtitle(info),
+            plots_exts=plots_exts,
         )
 
     if plots_mode in {"all", "tasks"}:
@@ -494,7 +522,7 @@ def _maybe_make_plots(
             )
             out = os.path.join(
                 plots_dir,
-                f"{_safe_filename(stem)}__task_{_safe_filename(str(t))}.{plots_ext}",
+                f"{_safe_filename(stem)}__task_{_safe_filename(str(t))}.png",
             )
             _plot_scatter(
                 x,
@@ -502,6 +530,7 @@ def _maybe_make_plots(
                 title=f"{stem} | task={t} | {eval_protocol}",
                 out_path=out,
                 subtitle=_subtitle(info),
+                plots_exts=plots_exts,
             )
 
 
@@ -621,8 +650,7 @@ def main():
         "--plots_ext",
         type=str,
         default="png",
-        choices=["png", "pdf", "svg"],
-        help="Расширение файлов графиков.",
+        help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
     )
     parser.add_argument(
         "--plots_mode",
@@ -636,6 +664,7 @@ def main():
     )
 
     args = parser.parse_args()
+    args.plots_ext = parse_plots_exts(args.plots_ext)
 
     if args.experiment_dir:
         if not args.metrics_dir:
@@ -710,7 +739,7 @@ def main():
                 path,
                 downstream,
                 plots_dir=args.plots_dir,
-                plots_ext=args.plots_ext,
+                plots_exts=args.plots_ext,
                 plots_mode=args.plots_mode,
                 use_tasks=use_tasks,
                 eval_protocol=args.eval_protocol,

@@ -8,292 +8,381 @@
     1) не плодить "ручные" конфиги в ноутбуках,
     2) воспроизводимо запускать одни и те же эксперименты,
     3) легко добавлять/выключать конфиги через CLI (--include/--exclude).
+
+Имена метрик генерируются автоматически из параметров по шаблону:
+
+    {kind}_{key_param}[_rsc][_antisym|_sym]
+
+  где:
+    kind       — тип окрестности: lin_k | lin_eps | w_eps | multiscale | rff_k
+    key_param  — главный числовой параметр: k, eps_percentile, sigma_percentile,
+                 aggregator (для multiscale)
+    _rsc       — суффикс, если solver="ransac"
+    _antisym   — суффикс для антисимметричных метрик
+    _sym       — суффикс для симметричных метрик
+    (без суффикса) — только directed
+
+Примеры:
+    lin_k10_antisym      — linear kNN, k=10, antisym
+    lin_k10_sym          — linear kNN, k=10, sym
+    lin_eps_10_antisym   — linear eps, eps_percentile=10, antisym
+    w_eps_10_antisym     — weighted eps, sigma_percentile=10, lstsq, antisym
+    w_eps_10_rsc_antisym — weighted eps, sigma_percentile=10, RANSAC, antisym
+    w_eps_10_rsc_sym     — weighted eps, sigma_percentile=10, RANSAC, sym
+    multiscale_mean_antisym — multiscale kNN, aggregator=mean, antisym
+    rff_k10_antisym      — RFF kNN, k=10, antisym
+    directed_k10         — directed (asymmetric), k=10
+
+Чтобы добавить новый конфиг, достаточно вызвать одну из фабричных функций:
+    _lin_knn(k, pair_agg)
+    _lin_eps(eps_percentile, pair_agg)
+    _w_eps(sigma_percentile, pair_agg, solver)
+    _multiscale(k_list, aggregator, pair_agg)
+    _rff(k, pair_agg)
+и добавить её в список METRIC_SPECS ниже.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Any
+import os as _os
+from typing import Dict, Any, List, Optional, Tuple
+
+
+# ============================================================
+# Базовые параметры (менять здесь, а не в каждом конфиге)
+# ============================================================
+
+_N_CENTERS = 100
+_SAMPLE_SIZE = None
+
+# k для kNN-метрик: менять здесь, список определяет абляцию.
+_K_DEFAULT = 10
+_K_KNN_ABLATION = [5, 10, 20, 40, 80, 200]   # antisym и sym
+_K_LIST_DEFAULT = [5, 10, 20, 40]        # для multiscale
+_AGG_DEFAULT = "mean"
+
+_SIGMA_PERCENTILES = [5, 10, 20]
+_EPS_SCALE = 1.5
+
+_RANSAC_N_ITER = 15
+_RANSAC_SAMPLE_FRAC = 0.5
+_RANSAC_MIN_INLIERS = 4
+_RANSAC_THRESHOLD_SCALE = 2.5
+
+_RFF_N_FEATURES = 256
+_RFF_GAMMA = 1.0
+_RFF_SEED = 42
+
+
+# ============================================================
+# Суффикс pair_agg в имени и variant
+# ============================================================
+
+def _agg_suffix(pair_agg: str) -> str:
+    """Возвращает суффикс имени для pair_agg."""
+    if pair_agg == "sym":
+        return "_sym"
+    if pair_agg == "antisym":
+        return "_antisym"
+    return ""  # directed — без суффикса
+
+
+def _variant_suffix(pair_agg: str) -> str:
+    """Возвращает суффикс variant для pair_agg."""
+    if pair_agg == "sym":
+        return "_sym"
+    if pair_agg == "antisym":
+        return "_antisym"
+    return ""  # directed
+
+
+# ============================================================
+# Фабричные функции: каждая возвращает (name, config_dict)
+# ============================================================
+
+def _lin_knn(k: int, pair_agg: str = "antisym") -> Tuple[str, Dict[str, Any]]:
+    """linear kNN, окрестность из k соседей."""
+    if pair_agg == "directed":
+        name = f"directed_k{k}"
+        variant = "linear_knn"
+    else:
+        name = f"lin_k{k}{_agg_suffix(pair_agg)}"
+        variant = f"linear_knn{_variant_suffix(pair_agg)}"
+
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "k": k,
+            "n_centers": _N_CENTERS,
+        },
+    }
+
+
+def _lin_eps(eps_percentile: int, pair_agg: str = "antisym") -> Tuple[str, Dict[str, Any]]:
+    """linear eps, порог окрестности = percentile попарных расстояний."""
+    name = f"lin_eps_{eps_percentile}{_agg_suffix(pair_agg)}"
+    variant = f"linear_epsilon{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "eps_percentile": eps_percentile,
+            "n_centers": _N_CENTERS,
+        },
+    }
+
+
+def _w_eps(
+    sigma_percentile: int,
+    pair_agg: str = "antisym",
+    solver: str = "lstsq",
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Weighted eps: gaussian-веса exp(-d²/σ²), σ = percentile попарных расстояний,
+    eps = eps_scale * σ. Опционально — RANSAC для робастного решения.
+    """
+    rsc_suffix = "_rsc" if solver == "ransac" else ""
+    name = f"w_eps_{sigma_percentile}{rsc_suffix}{_agg_suffix(pair_agg)}"
+
+    if solver == "ransac":
+        variant = f"weighted_epsilon_ransac{_variant_suffix(pair_agg)}"
+    else:
+        variant = f"weighted_epsilon{_variant_suffix(pair_agg)}"
+
+    meta: Dict[str, Any] = {
+        "family": "local_map_rank",
+        "variant": variant,
+        "sigma_percentile": sigma_percentile,
+        "eps_scale": _EPS_SCALE,
+        "weighting": "gaussian",
+        "solver": solver,
+        "n_centers": _N_CENTERS,
+    }
+    if solver == "ransac":
+        meta.update({
+            "ransac_n_iter": _RANSAC_N_ITER,
+            "ransac_sample_frac": _RANSAC_SAMPLE_FRAC,
+            "ransac_min_inliers": _RANSAC_MIN_INLIERS,
+            "ransac_threshold_scale": _RANSAC_THRESHOLD_SCALE,
+        })
+
+    return name, {"sample_size": _SAMPLE_SIZE, "meta": meta}
+
+
+def _multiscale(
+    k_list: List[int] = None,
+    aggregator: str = _AGG_DEFAULT,
+    pair_agg: str = "antisym",
+) -> Tuple[str, Dict[str, Any]]:
+    """Multiscale kNN: усредняет по нескольким k."""
+    if k_list is None:
+        k_list = list(_K_LIST_DEFAULT)
+    name = f"multiscale_{aggregator}{_agg_suffix(pair_agg)}"
+    variant = f"multiscale_knn{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "k_list": k_list,
+            "aggregator": aggregator,
+            "n_centers": _N_CENTERS,
+        },
+    }
+
+
+def _rff(k: int, pair_agg: str = "antisym") -> Tuple[str, Dict[str, Any]]:
+    """RFF (random Fourier features) + kNN."""
+    name = f"rff_k{k}{_agg_suffix(pair_agg)}"
+    variant = f"rff_knn{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "k": k,
+            "n_centers": _N_CENTERS,
+            "n_features": _RFF_N_FEATURES,
+            "gamma": _RFF_GAMMA,
+            "rff_seed": _RFF_SEED,
+        },
+    }
+
+
+# ============================================================
+# Реестр метрик
+# ============================================================
+# Добавить новую метрику = одна строка здесь.
+# Порядок определяет порядок в отчётах и графиках.
+
+def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
+    specs = []
+
+    # --- Directed (для диагностики асимметрии) ---
+    specs.append(_lin_knn(k=_K_DEFAULT, pair_agg="directed"))
+
+    # --- linear kNN, antisym ---
+    for k in _K_KNN_ABLATION:
+        specs.append(_lin_knn(k=k, pair_agg="antisym"))
+
+    # --- linear eps, antisym ---
+    for q in [5, 10, 20]:
+        specs.append(_lin_eps(eps_percentile=q, pair_agg="antisym"))
+
+    # --- weighted eps (lstsq), antisym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(_w_eps(sigma_percentile=q, pair_agg="antisym", solver="lstsq"))
+
+    # --- weighted eps + RANSAC, antisym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(_w_eps(sigma_percentile=q, pair_agg="antisym", solver="ransac"))
+
+    # --- multiscale, antisym ---
+    specs.append(_multiscale(pair_agg="antisym"))
+
+    # --- RFF, antisym ---
+    specs.append(_rff(k=_K_DEFAULT, pair_agg="antisym"))
+
+    # --- linear kNN, sym ---
+    for k in _K_KNN_ABLATION:
+        specs.append(_lin_knn(k=k, pair_agg="sym"))
+
+    # --- linear eps, sym ---
+    for q in [5, 10, 20]:
+        specs.append(_lin_eps(eps_percentile=q, pair_agg="sym"))
+
+    # --- weighted eps (lstsq), sym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(_w_eps(sigma_percentile=q, pair_agg="sym", solver="lstsq"))
+
+    # --- weighted eps + RANSAC, sym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(_w_eps(sigma_percentile=q, pair_agg="sym", solver="ransac"))
+
+    # --- multiscale, sym ---
+    specs.append(_multiscale(pair_agg="sym"))
+
+    # --- RFF, sym ---
+    specs.append(_rff(k=_K_DEFAULT, pair_agg="sym"))
+
+    return specs
 
 
 def get_embedding_metric_configs() -> Dict[str, Dict[str, Any]]:
-    """Возвращает словарь конфигов метрик.
+    """
+    Возвращает словарь конфигов метрик.
 
     Формат:
     {
         "metric_name": {
-            "sample_size": int | None,   # общая подвыборка N (как в прошлом году)
-            "meta": dict                 # произвольные метаданные
+            "sample_size": int | None,
+            "meta": dict
         },
         ...
     }
 
-    Примечание:
-    - scripts/run_compute_embedding_metrics.py парсит параметры из ИМЕНИ метрики.
-      (пример: local_map_rank_linear_knn_k10_antisym)
-    - meta используется как справочная информация и для передачи "нестандартных" параметров,
-      которые нельзя/неудобно кодировать в имени.
+    Имена генерируются автоматически фабричными функциями на основе параметров.
     """
-
-    # ---- Базовые параметры, которые можно менять централизованно ----
-
-    # Сколько центров/точек усреднять в глобальной оценке (у нас это n_centers)
-    N_CENTERS = 200
-
-    # Для kNN
-    K_DEFAULT = 10
-
-    # Для multiscale
-    K_LIST_DEFAULT = [5, 10, 20, 40]
-    AGG_DEFAULT = "mean"
-
-    # Для RFF
-    RFF_N_FEATURES = 256
-    RFF_GAMMA = 1.0
-    RFF_SEED = 42
-
-    # Подвыборка объектов (строк эмбеддингов) для ускорения.
-    # Важно: скрипт применяет ОДИН общий индекс для всех моделей, чтобы пары были сопоставимы.
-    SAMPLE_SIZE = 50000
-
-    # -------------------------------------------------------------------
-
     configs: Dict[str, Dict[str, Any]] = {}
-
-    # ================================================================
-    # 1) Направленная метрика: m(X -> Y)
-    # ================================================================
-    configs["local_map_rank_linear_knn_k10"] = {
-        "sample_size": SAMPLE_SIZE,
-        "meta": {
-            "family": "local_map_rank",
-            "variant": "linear_knn",
-            "k": K_DEFAULT,
-            "n_centers": N_CENTERS,
-            "notes": "Directed m(X->Y) using local linear map + RankMe(svd(M)).",
-        },
-    }
-
-    # ================================================================
-    # 2) Антисимметричный скор:
-    #    s(X, Y) = m(X->Y) - m(Y->X)
-    # ================================================================
-    configs["local_map_rank_linear_knn_k10_antisym"] = {
-        "sample_size": SAMPLE_SIZE,
-        "meta": {
-            "family": "local_map_rank",
-            "variant": "linear_knn_antisym",
-            "k": K_DEFAULT,
-            "n_centers": N_CENTERS,
-            "notes": "Anti-sym score for pairwise ranking; boundary=0.",
-        },
-    }
-
-    # ================================================================
-    # 3) Абляция по k — антисимметричный скор
-    # ================================================================
-    for k in [5, 20, 40]:
-        name = f"local_map_rank_linear_knn_k{k}_antisym"
-        configs[name] = {
-            "sample_size": SAMPLE_SIZE,
-            "meta": {
-                "family": "local_map_rank",
-                "variant": "linear_knn_antisym",
-                "k": k,
-                "n_centers": N_CENTERS,
-            },
-        }
-
-    # ================================================================
-    # 4) Epsilon-окрестность (адаптивный eps через percentile расстояний) — антисимметричный скор
-    # ================================================================
-    for q in [5, 10, 20]:
-        name = f"local_map_rank_linear_eps_percentile_{q}_antisym"
-        configs[name] = {
-            "sample_size": SAMPLE_SIZE,
-            "meta": {
-                "family": "local_map_rank",
-                "variant": "linear_epsilon_antisym",
-                "eps_percentile": q,
-                "n_centers": N_CENTERS,
-                "notes": "eps computed as percentile(pdist(zscore(X))) on a subsample.",
-            },
-        }
-
-    # ================================================================
-    # 5) Multiscale (по k_list) — антисимметричный скор
-    # ================================================================
-    configs["local_map_rank_multiscale_knn_mean_antisym"] = {
-        "sample_size": SAMPLE_SIZE,
-        "meta": {
-            "family": "local_map_rank",
-            "variant": "multiscale_knn",
-            "k_list": K_LIST_DEFAULT,
-            "aggregator": AGG_DEFAULT,
-            "n_centers": N_CENTERS,
-        },
-    }
-
-    # ================================================================
-    # 6) RFF (нелинейное перепредставление) — антисимметричный скор
-    # ================================================================
-    configs["local_map_rank_rff_knn_k10_antisym"] = {
-        "sample_size": SAMPLE_SIZE,
-        "meta": {
-            "family": "local_map_rank",
-            "variant": "rff_knn",
-            "k": K_DEFAULT,
-            "n_centers": N_CENTERS,
-            "n_features": RFF_N_FEATURES,
-            "gamma": RFF_GAMMA,
-            "rff_seed": RFF_SEED,
-        },
-    }
-
-    # ================================================================
-    # 2b) Симметризированная мера:
-    #     sim(X, Y) = 0.5 * (m(X->Y) + m(Y->X))
-    # ================================================================
-    configs["local_map_rank_linear_knn_k10_sym"] = {
-        "sample_size": SAMPLE_SIZE,
-        "meta": {
-            "family": "local_map_rank",
-            "variant": "linear_knn_sym",
-            "k": K_DEFAULT,
-            "n_centers": N_CENTERS,
-            "notes": "Symmetrized similarity: 0.5*(m(X->Y)+m(Y->X)).",
-        },
-    }
-
-    # ================================================================
-    # 3b) Абляция по k — симметризированная мера
-    # ================================================================
-    for k in [5, 20, 40]:
-        name = f"local_map_rank_linear_knn_k{k}_sym"
-        configs[name] = {
-            "sample_size": SAMPLE_SIZE,
-            "meta": {
-                "family": "local_map_rank",
-                "variant": "linear_knn_sym",
-                "k": k,
-                "n_centers": N_CENTERS,
-            },
-        }
-
-    # ================================================================
-    # 4b) Epsilon-окрестность — симметризированная мера
-    # ================================================================
-    for q in [5, 10, 20]:
-        name = f"local_map_rank_linear_eps_percentile_{q}_sym"
-        configs[name] = {
-            "sample_size": SAMPLE_SIZE,
-            "meta": {
-                "family": "local_map_rank",
-                "variant": "linear_epsilon_sym",
-                "eps_percentile": q,
-                "n_centers": N_CENTERS,
-            },
-        }
-
-    # ================================================================
-    # 5b) Multiscale (по k_list) — симметризированная мера
-    # ================================================================
-    configs["local_map_rank_multiscale_knn_mean_sym"] = {
-        "sample_size": SAMPLE_SIZE,
-        "meta": {
-            "family": "local_map_rank",
-            "variant": "multiscale_knn_sym",
-            "k_list": K_LIST_DEFAULT,
-            "aggregator": AGG_DEFAULT,
-            "n_centers": N_CENTERS,
-        },
-    }
-
-    # ================================================================
-    # 6b) RFF — симметризированная мера
-    # ================================================================
-    configs["local_map_rank_rff_knn_k10_sym"] = {
-        "sample_size": SAMPLE_SIZE,
-        "meta": {
-            "family": "local_map_rank",
-            "variant": "rff_knn_sym",
-            "k": K_DEFAULT,
-            "n_centers": N_CENTERS,
-            "n_features": RFF_N_FEATURES,
-            "gamma": RFF_GAMMA,
-            "rff_seed": RFF_SEED,
-        },
-    }
-
+    for name, cfg in _build_metric_specs():
+        if name in configs:
+            raise ValueError(
+                f"Дублирующееся имя метрики: '{name}'. "
+                "Проверь параметры в _build_metric_specs()."
+            )
+        configs[name] = cfg
     return configs
 
 
 # ============================================================
-# Короткие названия метрик для графиков
+# Legacy-таблица: старые длинные имена -> короткие
 # ============================================================
-# Единственное место в проекте, где задаются сокращения.
-# Все скрипты визуализации импортируют отсюда.
-#
-# Функция принимает полное имя метрики или путь к файлу метрики
-# (включая .npz) и возвращает короткое читаемое название.
-#
-# При добавлении новой метрики — добавить строку сюда.
+# Нужна только для чтения артефактов, посчитанных до перехода
+# на короткие имена. В новых запусках не используется.
+
+LEGACY_TO_SHORT_METRIC_NAMES: Dict[str, str] = {
+    # Старые длинные имена -> новые короткие с _antisym/_sym
+    "local_map_rank_linear_knn_k5_antisym": "lin_k5_antisym",
+    "local_map_rank_linear_knn_k10_antisym": "lin_k10_antisym",
+    "local_map_rank_linear_knn_k20_antisym": "lin_k20_antisym",
+    "local_map_rank_linear_knn_k40_antisym": "lin_k40_antisym",
+    "local_map_rank_linear_knn_k80_antisym": "lin_k80_antisym",
+    "local_map_rank_linear_knn_k5_sym": "lin_k5_sym",
+    "local_map_rank_linear_knn_k10_sym": "lin_k10_sym",
+    "local_map_rank_linear_knn_k20_sym": "lin_k20_sym",
+    "local_map_rank_linear_knn_k40_sym": "lin_k40_sym",
+    "local_map_rank_linear_knn_k80_sym": "lin_k80_sym",
+    "local_map_rank_linear_knn_k10": "directed_k10",
+    "local_map_rank_linear_eps_percentile_5_antisym": "lin_eps_5_antisym",
+    "local_map_rank_linear_eps_percentile_10_antisym": "lin_eps_10_antisym",
+    "local_map_rank_linear_eps_percentile_20_antisym": "lin_eps_20_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_5_antisym": "w_eps_5_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_10_antisym": "w_eps_10_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_20_antisym": "w_eps_20_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_5_ransac_antisym": "w_eps_5_rsc_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_10_ransac_antisym": "w_eps_10_rsc_antisym",
+    "local_map_rank_weighted_eps_sigma_percentile_20_ransac_antisym": "w_eps_20_rsc_antisym",
+    "local_map_rank_linear_eps_percentile_5_sym": "lin_eps_5_sym",
+    "local_map_rank_linear_eps_percentile_10_sym": "lin_eps_10_sym",
+    "local_map_rank_linear_eps_percentile_20_sym": "lin_eps_20_sym",
+    "local_map_rank_weighted_eps_sigma_percentile_5_sym": "w_eps_5_sym",
+    "local_map_rank_weighted_eps_sigma_percentile_10_sym": "w_eps_10_sym",
+    "local_map_rank_weighted_eps_sigma_percentile_20_sym": "w_eps_20_sym",
+    "local_map_rank_weighted_eps_sigma_percentile_5_ransac_sym": "w_eps_5_rsc_sym",
+    "local_map_rank_weighted_eps_sigma_percentile_10_ransac_sym": "w_eps_10_rsc_sym",
+    "local_map_rank_weighted_eps_sigma_percentile_20_ransac_sym": "w_eps_20_rsc_sym",
+    "local_map_rank_multiscale_knn_mean_antisym": "multiscale_mean_antisym",
+    "local_map_rank_multiscale_knn_mean_sym": "multiscale_mean_sym",
+    "local_map_rank_rff_knn_k10_antisym": "rff_k10_antisym",
+    "local_map_rank_rff_knn_k10_sym": "rff_k10_sym",
+    # Прежние короткие имена без суффикса -> новые с _antisym
+    # (для совместимости с уже посчитанными артефактами)
+    "lin_k5": "lin_k5_antisym",
+    "lin_k10": "lin_k10_antisym",
+    "lin_k20": "lin_k20_antisym",
+    "lin_k40": "lin_k40_antisym",
+    "lin_k80": "lin_k80_antisym",
+    "lin_eps_5": "lin_eps_5_antisym",
+    "lin_eps_10": "lin_eps_10_antisym",
+    "lin_eps_20": "lin_eps_20_antisym",
+    "w_eps_5": "w_eps_5_antisym",
+    "w_eps_10": "w_eps_10_antisym",
+    "w_eps_20": "w_eps_20_antisym",
+    "w_eps_5_rsc": "w_eps_5_rsc_antisym",
+    "w_eps_10_rsc": "w_eps_10_rsc_antisym",
+    "w_eps_20_rsc": "w_eps_20_rsc_antisym",
+    "multiscale_mean": "multiscale_mean_antisym",
+    "rff_k10": "rff_k10_antisym",
+}
 
 
-import os as _os
-
+# ============================================================
+# short_metric_name: имя для графиков
+# ============================================================
 
 def short_metric_name(name: str) -> str:
     """
-    Возвращает короткое читаемое название метрики для использования в графиках.
+    Возвращает каноническое короткое название метрики для использования в графиках.
 
     Принимает:
-      - полное имя метрики:  "local_map_rank_linear_knn_k10_antisym"
-      - имя файла:           "local_map_rank_linear_knn_k10_antisym.npz"
-      - путь к файлу:        "/data/metrics/local_map_rank_linear_knn_k10_antisym.npz"
+      - короткое имя метрики: "lin_k10"
+      - legacy-имя метрики:   "local_map_rank_linear_knn_k10_antisym"
+      - имя файла:            "lin_k10.npz"
+      - путь к файлу:         "/data/metrics/lin_k10.npz"
 
-    Возвращает короткое название, например "lin_k10".
-    Если имя не распознано — возвращает его как есть (без префикса и расширения).
+    Если имя не распознано — возвращает его как есть (короткие имена
+    уже являются каноническими и не нуждаются в дополнительном маппинге).
     """
-    # Берём только имя файла без пути и расширения.
     name = _os.path.basename(str(name))
     if name.lower().endswith(".npz"):
         name = name[:-4]
 
-    # Словарь: полное имя метрики -> короткое название.
-    # Порядок не важен — используется точное совпадение.
-    _MAPPING = {
-        # ---- Линейный kNN, антисимметричный ----
-        "local_map_rank_linear_knn_k5_antisym": "lin_k5",
-        "local_map_rank_linear_knn_k10_antisym": "lin_k10",
-        "local_map_rank_linear_knn_k20_antisym": "lin_k20",
-        "local_map_rank_linear_knn_k40_antisym": "lin_k40",
-        # ---- Линейный kNN, симметричный ----
-        "local_map_rank_linear_knn_k5_sym": "lin_k5_sym",
-        "local_map_rank_linear_knn_k10_sym": "lin_k10_sym",
-        "local_map_rank_linear_knn_k20_sym": "lin_k20_sym",
-        "local_map_rank_linear_knn_k40_sym": "lin_k40_sym",
-        # ---- Линейный kNN, направленный ----
-        "local_map_rank_linear_knn_k10": "directed_k10",
-        # ---- Epsilon, антисимметричный ----
-        "local_map_rank_linear_eps_percentile_5_antisym": "lin_eps_5",
-        "local_map_rank_linear_eps_percentile_10_antisym": "lin_eps_10",
-        "local_map_rank_linear_eps_percentile_20_antisym": "lin_eps_20",
-        # ---- Epsilon, симметричный ----
-        "local_map_rank_linear_eps_percentile_5_sym": "lin_eps_5_sym",
-        "local_map_rank_linear_eps_percentile_10_sym": "lin_eps_10_sym",
-        "local_map_rank_linear_eps_percentile_20_sym": "lin_eps_20_sym",
-        # ---- Multiscale, антисимметричный ----
-        "local_map_rank_multiscale_knn_mean_antisym": "multiscale_mean",
-        # ---- Multiscale, симметричный ----
-        "local_map_rank_multiscale_knn_mean_sym": "multiscale_mean_sym",
-        # ---- RFF, антисимметричный ----
-        "local_map_rank_rff_knn_k10_antisym": "rff_k10",
-        # ---- RFF, симметричный ----
-        "local_map_rank_rff_knn_k10_sym": "rff_k10_sym",
-    }
+    # Legacy-имена переводим в короткие.
+    if name in LEGACY_TO_SHORT_METRIC_NAMES:
+        return LEGACY_TO_SHORT_METRIC_NAMES[name]
 
-    if name in _MAPPING:
-        return _MAPPING[name]
-
-    # Если точного совпадения нет — убираем общий префикс как запасной вариант.
-    return name.replace("local_map_rank_", "")
+    # Короткие имена уже канонические.
+    return name

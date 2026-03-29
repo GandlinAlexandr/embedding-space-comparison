@@ -29,12 +29,12 @@ run_diagnose_local_map.py
 
   # Агрегированная диагностика по одной метрике:
   python -m scripts.run_diagnose_local_map \\
-      --artifacts_path metric_matrices/local_map_rank_linear_knn_k10_artifacts.npz \\
+      --artifacts_path metric_matrices/directed_k10_artifacts.npz \\
       --out_dir diagnostics/
 
   # Детально по одной паре:
   python -m scripts.run_diagnose_local_map \\
-      --artifacts_path metric_matrices/local_map_rank_linear_knn_k10_artifacts.npz \\
+      --artifacts_path metric_matrices/lin_k10_artifacts.npz \\
       --model_a resnet50 --model_b vit_b16 \\
       --out_dir diagnostics/
 """
@@ -44,13 +44,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 # ВАЖНО: запускаем как модуль: python -m scripts.run_diagnose_local_map
 from configs.metric_configs import short_metric_name, get_embedding_metric_configs
+
+VALID_PLOT_EXTS = ("png", "pdf", "svg")
 
 # ============================================================
 # 0) Вспомогательные функции вывода
@@ -60,7 +63,7 @@ from configs.metric_configs import short_metric_name, get_embedding_metric_confi
 def _make_out_dirs(out_dir: str):
     """
     Создаёт две поддиректории внутри out_dir:
-      plots/   — все графики (.png)
+      plots/   — все графики
       reports/ — текстовые и JSON-отчёты (.txt, .json)
     Возвращает (plots_dir, reports_dir).
     """
@@ -69,6 +72,42 @@ def _make_out_dirs(out_dir: str):
     os.makedirs(plots_dir, exist_ok=True)
     os.makedirs(reports_dir, exist_ok=True)
     return plots_dir, reports_dir
+
+
+def parse_plots_exts(raw: str) -> List[str]:
+    items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not items:
+        raise ValueError("`--plots_ext` должен содержать хотя бы одно расширение.")
+
+    invalid = [ext for ext in items if ext not in VALID_PLOT_EXTS]
+    if invalid:
+        raise ValueError(
+            f"Неподдерживаемые расширения графиков: {invalid}. "
+            f"Допустимые: {list(VALID_PLOT_EXTS)}"
+        )
+
+    unique: List[str] = []
+    seen = set()
+    for ext in items:
+        if ext not in seen:
+            unique.append(ext)
+            seen.add(ext)
+    return unique
+
+
+def _save_figure_variants(
+    fig: plt.Figure,
+    out_path: str,
+    plots_exts: Iterable[str],
+    dpi: int = 150,
+) -> List[str]:
+    base, _ = os.path.splitext(out_path)
+    saved_paths: List[str] = []
+    for ext in plots_exts:
+        save_path = f"{base}.{ext}"
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        saved_paths.append(save_path)
+    return saved_paths
 
 
 # ============================================================
@@ -129,6 +168,55 @@ def _get_direction_data(
     return sv, res, ranks
 
 
+@dataclass
+class DirectionExtraData:
+    neighbor_sizes: Optional[np.ndarray] = None
+    neighbor_distances: Optional[np.ndarray] = None
+    sigma_values: Optional[np.ndarray] = None
+    eps_values: Optional[np.ndarray] = None
+    sample_weights: Optional[np.ndarray] = None
+    inlier_masks: Optional[np.ndarray] = None
+    inlier_counts: Optional[np.ndarray] = None
+    inlier_fracs: Optional[np.ndarray] = None
+
+
+def _get_optional_direction_array(
+    artifacts: Dict[str, np.ndarray], model_i: str, model_j: str, field: str
+) -> Optional[np.ndarray]:
+    prefix = f"{model_i}_to_{model_j}"
+    key = f"{prefix}/{field}"
+    return artifacts.get(key, None)
+
+
+def _get_direction_extra_data(
+    artifacts: Dict[str, np.ndarray], model_i: str, model_j: str
+) -> DirectionExtraData:
+    return DirectionExtraData(
+        neighbor_sizes=_get_optional_direction_array(
+            artifacts, model_i, model_j, "neighbor_sizes"
+        ),
+        neighbor_distances=_get_optional_direction_array(
+            artifacts, model_i, model_j, "neighbor_distances"
+        ),
+        sigma_values=_get_optional_direction_array(
+            artifacts, model_i, model_j, "sigma_values"
+        ),
+        eps_values=_get_optional_direction_array(artifacts, model_i, model_j, "eps_values"),
+        sample_weights=_get_optional_direction_array(
+            artifacts, model_i, model_j, "sample_weights"
+        ),
+        inlier_masks=_get_optional_direction_array(
+            artifacts, model_i, model_j, "inlier_masks"
+        ),
+        inlier_counts=_get_optional_direction_array(
+            artifacts, model_i, model_j, "inlier_counts"
+        ),
+        inlier_fracs=_get_optional_direction_array(
+            artifacts, model_i, model_j, "inlier_fracs"
+        ),
+    )
+
+
 # ============================================================
 # 2) Диагностические вычисления
 # ============================================================
@@ -179,6 +267,135 @@ def _compute_direction_stats(
         "residual_median": res_median,
         "n_degenerate": n_degenerate,
         "frac_degenerate": frac_degenerate,
+    }
+
+
+def _normalized_residual_label(normalized: bool) -> str:
+    if normalized:
+        return r"Normalized residual $\|X_c M - Y_c\|_F / \sqrt{N_{\mathrm{eff}}}$"
+    return r"Residual $\|X_c M - Y_c\|_F$"
+
+
+def _normalized_residual_short_label(normalized: bool) -> str:
+    return "Normalized residual" if normalized else "Residual"
+
+
+def _summary_residual_axis_label(all_normalized: bool) -> str:
+    if all_normalized:
+        return r"Средний normalized residual $\|X_c M - Y_c\|_F / \sqrt{N_{\mathrm{eff}}}$"
+    return r"Средний residual / normalized residual"
+
+
+def _compute_effective_counts(extra: DirectionExtraData) -> Optional[np.ndarray]:
+    """
+    Возвращает эффективное число точек N_eff для нормировки residual.
+
+    Логика:
+      - если есть sample_weights, нормируем на sqrt(sum(weights)) или
+        sqrt(sum(weights[inliers])) для robust-solver;
+      - иначе, если есть inlier_counts, используем sqrt(inlier_counts);
+      - иначе, если есть neighbor_sizes, используем sqrt(neighbor_sizes).
+    """
+    if extra.sample_weights is not None and len(extra.sample_weights) > 0:
+        eff = []
+        has_masks = extra.inlier_masks is not None and len(extra.inlier_masks) == len(
+            extra.sample_weights
+        )
+        for idx, weights in enumerate(extra.sample_weights):
+            w = np.asarray(weights, dtype=np.float64).reshape(-1)
+            w = np.clip(w, 0.0, None)
+            if has_masks:
+                mask = np.asarray(extra.inlier_masks[idx], dtype=bool).reshape(-1)
+                if len(mask) == len(w):
+                    w = w[mask]
+            total_w = float(np.sum(w))
+            eff.append(total_w if total_w > 0.0 else float("nan"))
+        return np.asarray(eff, dtype=np.float64)
+
+    if extra.inlier_counts is not None:
+        return np.asarray(extra.inlier_counts, dtype=np.float64)
+
+    if extra.neighbor_sizes is not None:
+        return np.asarray(extra.neighbor_sizes, dtype=np.float64)
+
+    return None
+
+
+def _normalize_residuals(
+    residuals: np.ndarray,
+    extra: DirectionExtraData,
+) -> Tuple[np.ndarray, bool]:
+    """
+    Нормирует residual до RMS-подобной ошибки на эффективную точку.
+
+    Для старых артефактов без нужных полей возвращает residual как есть.
+    """
+    res = np.asarray(residuals, dtype=np.float64)
+    eff_counts = _compute_effective_counts(extra)
+    if eff_counts is None or len(eff_counts) != len(res):
+        return res, False
+
+    denom = np.sqrt(np.clip(eff_counts, 0.0, None))
+    out = np.full_like(res, np.nan, dtype=np.float64)
+    good = np.isfinite(denom) & (denom > 0.0)
+    out[good] = res[good] / denom[good]
+
+    if not np.any(good):
+        return res, False
+    return out, True
+
+
+def _safe_mean(arr: Optional[np.ndarray]) -> float:
+    if arr is None:
+        return float("nan")
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return float("nan")
+    return float(np.mean(finite))
+
+
+def _safe_std(arr: Optional[np.ndarray]) -> float:
+    if arr is None:
+        return float("nan")
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return float("nan")
+    return float(np.std(finite))
+
+
+def _compute_extra_stats(extra: DirectionExtraData) -> Dict[str, float]:
+    """
+    Сводит дополнительные артефакты в компактные числа для отчётов и таблиц.
+    """
+    neighbor_distance_mean = float("nan")
+    neighbor_distance_std = float("nan")
+    if extra.neighbor_distances is not None and len(extra.neighbor_distances) > 0:
+        per_center_means = []
+        for d in extra.neighbor_distances:
+            arr = np.asarray(d, dtype=np.float64).reshape(-1)
+            finite = arr[np.isfinite(arr)]
+            if finite.size > 0:
+                per_center_means.append(float(np.mean(finite)))
+        if per_center_means:
+            neighbor_distance_mean = float(np.mean(per_center_means))
+            neighbor_distance_std = float(np.std(per_center_means))
+
+    return {
+        "neighbor_size_mean": _safe_mean(extra.neighbor_sizes),
+        "neighbor_size_std": _safe_std(extra.neighbor_sizes),
+        "neighbor_distance_mean": neighbor_distance_mean,
+        "neighbor_distance_std": neighbor_distance_std,
+        "sigma_mean": _safe_mean(extra.sigma_values),
+        "eps_mean": _safe_mean(extra.eps_values),
+        "inlier_count_mean": _safe_mean(extra.inlier_counts),
+        "inlier_frac_mean": _safe_mean(extra.inlier_fracs),
+        "inlier_frac_std": _safe_std(extra.inlier_fracs),
     }
 
 
@@ -262,15 +479,23 @@ def _plot_single_pair(
     plots_dir: str,
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     """
     Строит детальные графики для пары (model_i, model_j):
       - гистограммы рангов для обоих направлений
-      - распределение residuals для обоих направлений
+      - распределение нормированных residuals для обоих направлений
       - сингулярные значения (медиана ± std по центрам)
     """
     sv_ij, res_ij, ranks_ij = _get_direction_data(artifacts, model_i, model_j)
     sv_ji, res_ji, ranks_ji = _get_direction_data(artifacts, model_j, model_i)
+    extra_ij = _get_direction_extra_data(artifacts, model_i, model_j)
+    extra_ji = _get_direction_extra_data(artifacts, model_j, model_i)
+    norm_res_ij, normed_ij = _normalize_residuals(res_ij, extra_ij)
+    norm_res_ji, normed_ji = _normalize_residuals(res_ji, extra_ji)
+    residuals_normalized = bool(normed_ij and normed_ji)
+    residual_xlabel = _normalized_residual_label(residuals_normalized)
+    residual_short_label = _normalized_residual_short_label(residuals_normalized)
 
     label_ij = f"{model_i} → {model_j}"
     label_ji = f"{model_j} → {model_i}"
@@ -297,24 +522,24 @@ def _plot_single_pair(
 
     # --- 2. Распределение residuals ---
     ax = axes[0, 1]
-    ax.hist(res_ij, bins=30, alpha=0.6, label=label_ij, color="steelblue")
-    ax.hist(res_ji, bins=30, alpha=0.6, label=label_ji, color="coral")
-    ax.set_xlabel(r"Residual $\|X_c M - Y_c\|_F$")
+    ax.hist(norm_res_ij, bins=30, alpha=0.6, label=label_ij, color="steelblue")
+    ax.hist(norm_res_ji, bins=30, alpha=0.6, label=label_ji, color="coral")
+    ax.set_xlabel(residual_xlabel)
     ax.set_ylabel("Количество центров")
-    ax.set_title("Распределение ошибок решения по направлениям")
+    ax.set_title("Распределение нормированной ошибки по направлениям")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
     # --- 3. Residuals: boxplot ---
     ax = axes[0, 2]
     ax.boxplot(
-        [res_ij, res_ji],
+        [norm_res_ij, norm_res_ji],
         labels=[label_ij, label_ji],
         patch_artist=True,
         boxprops=dict(facecolor="lightblue"),
     )
-    ax.set_ylabel("Residual")
-    ax.set_title("Ошибки решения по направлениям")
+    ax.set_ylabel(residual_short_label)
+    ax.set_title("Нормированная ошибка по направлениям")
     ax.grid(True, alpha=0.3)
     ax.tick_params(axis="x", labelsize=8)
 
@@ -335,8 +560,14 @@ def _plot_single_pair(
     # --- 6. Таблица сводной статистики ---
     ax = axes[1, 2]
     ax.axis("off")
-    stats_ij = _compute_direction_stats(sv_ij, res_ij, ranks_ij, threshold=threshold)
-    stats_ji = _compute_direction_stats(sv_ji, res_ji, ranks_ji, threshold=threshold)
+    stats_ij = _compute_direction_stats(
+        sv_ij, norm_res_ij, ranks_ij, threshold=threshold
+    )
+    stats_ji = _compute_direction_stats(
+        sv_ji, norm_res_ji, ranks_ji, threshold=threshold
+    )
+    extra_stats_ij = _compute_extra_stats(extra_ij)
+    extra_stats_ji = _compute_extra_stats(extra_ji)
     table_data = [
         ["", label_ij[:20], label_ji[:20]],
         ["Центров", stats_ij["n_centers"], stats_ji["n_centers"]],
@@ -352,12 +583,12 @@ def _plot_single_pair(
             f"{stats_ji['rank_min']}/{stats_ji['rank_max']}",
         ],
         [
-            "Residual (mean)",
+            f"{residual_short_label} (mean)",
             f"{stats_ij['residual_mean']:.2e}",
             f"{stats_ji['residual_mean']:.2e}",
         ],
         [
-            "Residual (std)",
+            f"{residual_short_label} (std)",
             f"{stats_ij['residual_std']:.2e}",
             f"{stats_ji['residual_std']:.2e}",
         ],
@@ -367,6 +598,52 @@ def _plot_single_pair(
             f"{stats_ji['n_degenerate']} ({stats_ji['frac_degenerate']:.1%})",
         ],
     ]
+    if np.isfinite(extra_stats_ij["neighbor_size_mean"]) or np.isfinite(
+        extra_stats_ji["neighbor_size_mean"]
+    ):
+        table_data.append(
+            [
+                "Размер окр. (mean)",
+                f"{extra_stats_ij['neighbor_size_mean']:.2f}",
+                f"{extra_stats_ji['neighbor_size_mean']:.2f}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["neighbor_distance_mean"]) or np.isfinite(
+        extra_stats_ji["neighbor_distance_mean"]
+    ):
+        table_data.append(
+            [
+                "Dist (mean)",
+                f"{extra_stats_ij['neighbor_distance_mean']:.2e}",
+                f"{extra_stats_ji['neighbor_distance_mean']:.2e}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["sigma_mean"]) or np.isfinite(extra_stats_ji["sigma_mean"]):
+        table_data.append(
+            [
+                "Sigma (mean)",
+                f"{extra_stats_ij['sigma_mean']:.2e}",
+                f"{extra_stats_ji['sigma_mean']:.2e}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["eps_mean"]) or np.isfinite(extra_stats_ji["eps_mean"]):
+        table_data.append(
+            [
+                "Eps (mean)",
+                f"{extra_stats_ij['eps_mean']:.2e}",
+                f"{extra_stats_ji['eps_mean']:.2e}",
+            ]
+        )
+    if np.isfinite(extra_stats_ij["inlier_frac_mean"]) or np.isfinite(
+        extra_stats_ji["inlier_frac_mean"]
+    ):
+        table_data.append(
+            [
+                "Inlier frac (mean)",
+                f"{extra_stats_ij['inlier_frac_mean']:.2%}",
+                f"{extra_stats_ji['inlier_frac_mean']:.2%}",
+            ]
+        )
     tbl = ax.table(
         cellText=table_data,
         loc="center",
@@ -380,9 +657,10 @@ def _plot_single_pair(
     plt.tight_layout()
     fname = f"{metric_name}_pair_{model_i}_vs_{model_j}.png"
     fpath = os.path.join(plots_dir, fname)
-    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
-    print(f"  Сохранён график: {fpath}")
+    for save_path in saved_paths:
+        print(f"  Сохранён график: {save_path}")
 
 
 def _plot_singular_values_summary(
@@ -448,11 +726,12 @@ def _plot_aggregated(
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
     metric_spec_str: str = "",
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     """
     Строит агрегированные графики по всем парам:
       - общая гистограмма рангов
-      - общее распределение residuals
+      - общее распределение нормированных residuals
       - доля вырожденных отображений по парам
       - доля одновременно вырожденных центров (оба направления) по парам
     """
@@ -460,17 +739,23 @@ def _plot_aggregated(
     all_residuals = []
     frac_deg_per_direction = []
     direction_labels = []
+    normalized_flags = []
 
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
-        stats = _compute_direction_stats(sv, res, ranks, threshold=threshold)
+        extra = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, is_normalized = _normalize_residuals(res, extra)
+        stats = _compute_direction_stats(sv, norm_res, ranks, threshold=threshold)
         all_ranks.extend(ranks.tolist())
-        all_residuals.extend(res.tolist())
+        all_residuals.extend(norm_res.tolist())
         frac_deg_per_direction.append(stats["frac_degenerate"])
         direction_labels.append(f"{mi[:10]}→{mj[:10]}")
+        normalized_flags.append(is_normalized)
 
     all_ranks = np.array(all_ranks)
     all_residuals = np.array(all_residuals)
+    residuals_normalized = bool(all(normalized_flags)) if normalized_flags else False
+    residual_xlabel = _normalized_residual_label(residuals_normalized)
 
     # n_centers — реальное количество центров первого направления, читается из артефактов.
     _, _, _ranks_first = _get_direction_data(
@@ -529,9 +814,9 @@ def _plot_aggregated(
         linewidth=1.5,
         label=f"медиана={np.median(all_residuals):.2e}",
     )
-    ax.set_xlabel(r"Residual $\|X_c M - Y_c\|_F$")
+    ax.set_xlabel(residual_xlabel)
     ax.set_ylabel("Количество центров (все пары)")
-    ax.set_title("Распределение ошибок решения (X→Y и Y→X)")
+    ax.set_title("Распределение нормированной ошибки (X→Y и Y→X)")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
@@ -601,9 +886,10 @@ def _plot_aggregated(
     plt.tight_layout()
     fname = f"{metric_name}_aggregated_diagnostics.png"
     fpath = os.path.join(plots_dir, fname)
-    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
-    print(f"  Сохранён агрегированный график: {fpath}")
+    for save_path in saved_paths:
+        print(f"  Сохранён агрегированный график: {save_path}")
 
 
 # ============================================================
@@ -625,16 +911,41 @@ def _save_report(
     lines.append(f"Всего направлений: {len(directions)}")
     lines.append("")
 
+    all_rank_stds = []
+    extra_rows = []
+    normalized_flags = []
+    for mi, mj in sorted(directions):
+        sv, res, ranks = _get_direction_data(artifacts, mi, mj)
+        extra_data = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, is_normalized = _normalize_residuals(res, extra_data)
+        s = _compute_direction_stats(sv, norm_res, ranks)
+        extra = _compute_extra_stats(_get_direction_extra_data(artifacts, mi, mj))
+        all_rank_stds.append(s["rank_std"])
+        normalized_flags.append(is_normalized)
+        direction_str = f"{mi}→{mj}"
+        extra_rows.append(
+            {
+                "direction": direction_str,
+                "neighbor_size_mean": extra["neighbor_size_mean"],
+                "neighbor_distance_mean": extra["neighbor_distance_mean"],
+                "sigma_mean": extra["sigma_mean"],
+                "eps_mean": extra["eps_mean"],
+                "inlier_frac_mean": extra["inlier_frac_mean"],
+                "inlier_frac_std": extra["inlier_frac_std"],
+            }
+        )
+
+    residual_label = "ResN" if all(normalized_flags) else "Res"
     lines.append("--- Статистика по направлениям ---")
-    header = f"{'Направление':<35} {'Ранг(mean)':<12} {'Ранг(std)':<12} {'Res(mean)':<12} {'Res(std)':<12} {'Выр-х,%':<10}"
+    header = f"{'Направление':<35} {'Ранг(mean)':<12} {'Ранг(std)':<12} {f'{residual_label}(mean)':<12} {f'{residual_label}(std)':<12} {'Выр-х,%':<10}"
     lines.append(header)
     lines.append("-" * len(header))
 
-    all_rank_stds = []
     for mi, mj in sorted(directions):
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
-        s = _compute_direction_stats(sv, res, ranks)
-        all_rank_stds.append(s["rank_std"])
+        extra_data = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, _ = _normalize_residuals(res, extra_data)
+        s = _compute_direction_stats(sv, norm_res, ranks)
         direction_str = f"{mi}→{mj}"
         lines.append(
             f"{direction_str:<35} {s['rank_mean']:<12.3f} {s['rank_std']:<12.3f} "
@@ -643,10 +954,49 @@ def _save_report(
         )
 
     lines.append("")
+    if all(normalized_flags):
+        lines.append(
+            "ResN = нормированная RMS-подобная ошибка ||X_c M - Y_c||_F / sqrt(N_eff)."
+        )
+    else:
+        lines.append(
+            "Res = raw residual для старых артефактов без данных, необходимых для нормировки."
+        )
+    lines.append("")
     lines.append(
         f"Средняя std ранга по всем направлениям: {np.mean(all_rank_stds):.4f}"
     )
     lines.append("")
+
+    have_extra = any(
+        np.isfinite(row["neighbor_size_mean"])
+        or np.isfinite(row["neighbor_distance_mean"])
+        or np.isfinite(row["sigma_mean"])
+        or np.isfinite(row["eps_mean"])
+        or np.isfinite(row["inlier_frac_mean"])
+        for row in extra_rows
+    )
+    if have_extra:
+        lines.append("--- Дополнительные артефакты новых методов ---")
+        extra_header = (
+            f"{'Направление':<35} {'Nhood(mean)':<12} {'Dist(mean)':<12} "
+            f"{'Sigma(mean)':<12} {'Eps(mean)':<12} {'Inlier(mean)':<12}"
+        )
+        lines.append(extra_header)
+        lines.append("-" * len(extra_header))
+        for row in extra_rows:
+            def _fmt(val: float, fmt: str) -> str:
+                return fmt.format(val) if np.isfinite(val) else "n/a"
+
+            lines.append(
+                f"{row['direction']:<35} "
+                f"{_fmt(row['neighbor_size_mean'], '{:.2f}'):<12} "
+                f"{_fmt(row['neighbor_distance_mean'], '{:.3e}'):<12} "
+                f"{_fmt(row['sigma_mean'], '{:.3e}'):<12} "
+                f"{_fmt(row['eps_mean'], '{:.3e}'):<12} "
+                f"{_fmt(row['inlier_frac_mean'], '{:.2%}'):<12}"
+            )
+        lines.append("")
 
     lines.append("--- Одновременная вырожденность X→Y и Y→X в одном центре ---")
     overall = both_deg_stats["frac_both_degenerate_overall"]
@@ -675,6 +1025,7 @@ def _save_report(
         "n_directions": len(directions),
         "both_degenerate": both_deg_stats,
         "mean_rank_std": float(np.mean(all_rank_stds)),
+        "direction_extras": extra_rows,
     }
     json_path = os.path.join(reports_dir, f"{metric_name}_diagnostics_report.json")
     with open(json_path, "w", encoding="utf-8") as f:
@@ -691,10 +1042,11 @@ def _plot_summary(
     metrics_data: List[Dict],
     plots_dir: str,
     threshold: float,
+    plots_exts: Iterable[str] = ("png",),
 ) -> None:
     """
     Строит сводный график сравнения всех метрик по трём вопросам руководителя:
-      1. Ошибка решения (residual mean ± std по всем центрам и парам)
+      1. Ошибка решения (normalized residual mean ± std по всем центрам и парам)
       2. Стабильность ранга (std ранга по всем центрам и парам)
       3. Доля одновременно вырожденных центров (оба направления)
 
@@ -703,8 +1055,8 @@ def _plot_summary(
         "metric_name": str,
         "rank_means":  np.ndarray,   # среднее ранга по каждому направлению
         "rank_stds":   np.ndarray,   # std ранга по каждому направлению
-        "res_means":   np.ndarray,   # среднее residual по каждому направлению
-        "res_stds":    np.ndarray,   # std residual по каждому направлению
+        "res_means":   np.ndarray,   # среднее нормированного residual по каждому направлению
+        "res_stds":    np.ndarray,   # std нормированного residual по каждому направлению
         "frac_both_degenerate": float,  # итоговая доля по всем парам
         "n_centers":   int,
         "n_directions": int,
@@ -760,10 +1112,13 @@ def _plot_summary(
     lines2, lbls2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
 
-    # --- 2. Ошибка решения: среднее residual по направлениям ---
+    # --- 2. Ошибка решения: средний нормированный residual по направлениям ---
     ax = axes[1]
     mean_res = [float(np.mean(d["res_means"])) for d in metrics_data]
     std_res = [float(np.mean(d["res_stds"])) for d in metrics_data]
+    all_residuals_normalized = all(
+        bool(d.get("residuals_normalized", False)) for d in metrics_data
+    )
     bars = ax.bar(
         x,
         mean_res,
@@ -775,9 +1130,15 @@ def _plot_summary(
     )
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(r"Среднее residual $\|X_c M - Y_c\|_F$")
+    ax.set_ylabel(_summary_residual_axis_label(all_residuals_normalized))
     ax.set_title(
-        "Ошибка решения линейного уравнения\n(чем меньше — тем лучше линейное приближение)"
+        (
+            "Нормированная ошибка решения линейного уравнения\n"
+            "(чем меньше — тем лучше линейное приближение)"
+            if all_residuals_normalized
+            else "Ошибка решения линейного уравнения\n"
+            "(часть старых артефактов не содержит данных для нормировки)"
+        )
     )
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, mean_res):
@@ -842,9 +1203,10 @@ def _plot_summary(
 
     plt.tight_layout()
     fpath = os.path.join(plots_dir, "summary_diagnostics.png")
-    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
-    print(f"  Сохранён сводный график: {fpath}")
+    for save_path in saved_paths:
+        print(f"  Сохранён сводный график: {save_path}")
 
 
 def _collect_metric_data(
@@ -859,17 +1221,21 @@ def _collect_metric_data(
     """
     rank_means, rank_stds = [], []
     res_means, res_stds = [], []
+    residuals_normalized_flags = []
 
     # Для спектра: собираем все сингулярные значения по всем центрам и всем направлениям.
     all_sv_lists: List[np.ndarray] = []
 
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
-        s = _compute_direction_stats(sv, res, ranks, threshold=threshold)
+        extra = _get_direction_extra_data(artifacts, mi, mj)
+        norm_res, is_normalized = _normalize_residuals(res, extra)
+        s = _compute_direction_stats(sv, norm_res, ranks, threshold=threshold)
         rank_means.append(s["rank_mean"])
         rank_stds.append(s["rank_std"])
         res_means.append(s["residual_mean"])
         res_stds.append(s["residual_std"])
+        residuals_normalized_flags.append(is_normalized)
         # Накапливаем сингулярные значения каждого центра.
         for sv_center in sv:
             if sv_center is not None and len(sv_center) > 0:
@@ -897,6 +1263,9 @@ def _collect_metric_data(
         "rank_stds": np.array(rank_stds),
         "res_means": np.array(res_means),
         "res_stds": np.array(res_stds),
+        "residuals_normalized": bool(all(residuals_normalized_flags))
+        if residuals_normalized_flags
+        else False,
         "frac_both_degenerate": both_deg_stats["frac_both_degenerate_overall"],
         "n_centers": n_centers,
         "n_directions": len(directions),
@@ -926,30 +1295,16 @@ def _load_metric_spec(metric_name: str) -> str:
             parts.append(f"k={meta['k']}")
         if "eps_percentile" in meta:
             parts.append(f"eps_percentile={meta['eps_percentile']}")
-
-        return ", ".join(parts)
-    except Exception:
-        return ""
-
-        parts = []
-        kind = spec.get("kind", "")
-        if kind == "multiscale_knn":
-            k_list = spec.get("k_list", None)
-            agg = spec.get("aggregator", "mean")
-            if k_list:
-                parts.append(f"k_list={list(k_list)}, agg={agg}")
-        elif kind in {"linear_knn", "rff_knn"}:
-            k = spec.get("k", None)
-            if k:
-                parts.append(f"k={k}")
-        elif kind == "linear_eps":
-            eps_p = spec.get("eps_percentile", None)
-            if eps_p:
-                parts.append(f"eps_percentile={eps_p}")
-
-        n_centers = spec.get("n_centers", None)
-        if n_centers:
-            parts.append(f"n_centers={n_centers}")
+        if "sigma_percentile" in meta:
+            parts.append(f"sigma_percentile={meta['sigma_percentile']}")
+        if "eps_scale" in meta:
+            parts.append(f"eps={meta['eps_scale']}*sigma")
+        if "weighting" in meta:
+            parts.append(f"weighting={meta['weighting']}")
+        if "solver" in meta:
+            parts.append(f"solver={meta['solver']}")
+        if "n_centers" in meta:
+            parts.append(f"n_centers={meta['n_centers']}")
 
         return ", ".join(parts)
     except Exception:
@@ -968,6 +1323,7 @@ def _run_single_metric(
     model_a: str = "",
     model_b: str = "",
     collect_for_summary: bool = False,
+    plots_exts: Iterable[str] = ("png",),
 ) -> Optional[Dict]:
     """
     Запускает полную диагностику для одного файла артефактов.
@@ -1008,6 +1364,7 @@ def _run_single_metric(
         metric_name,
         threshold=threshold,
         metric_spec_str=metric_spec_str,
+        plots_exts=plots_exts,
     )
     _save_report(directions, artifacts, both_deg_stats, reports_dir, metric_name)
 
@@ -1022,7 +1379,13 @@ def _run_single_metric(
             )
         else:
             _plot_single_pair(
-                artifacts, model_a, model_b, plots_dir, metric_name, threshold=threshold
+                artifacts,
+                model_a,
+                model_b,
+                plots_dir,
+                metric_name,
+                threshold=threshold,
+                plots_exts=plots_exts,
             )
 
     if collect_for_summary:
@@ -1061,6 +1424,12 @@ def main():
         help="Куда сохранять графики и отчёты.",
     )
     parser.add_argument(
+        "--plots_ext",
+        type=str,
+        default="png",
+        help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
+    )
+    parser.add_argument(
         "--model_a",
         type=str,
         default="",
@@ -1083,6 +1452,7 @@ def main():
         ),
     )
     args = parser.parse_args()
+    args.plots_ext = parse_plots_exts(args.plots_ext)
 
     if not args.artifacts_dir and not args.artifacts_path:
         parser.error("Нужно указать либо --artifacts_dir, либо --artifacts_path.")
@@ -1120,6 +1490,7 @@ def main():
                 out_dir=args.out_dir,
                 threshold=args.degenerate_threshold,
                 collect_for_summary=True,
+                plots_exts=args.plots_ext,
             )
             if data is not None:
                 metrics_data.append(data)
@@ -1127,7 +1498,12 @@ def main():
         # Сводный график по всем метрикам.
         print("\nПостроение сводного графика...")
         plots_dir, _ = _make_out_dirs(args.out_dir)
-        _plot_summary(metrics_data, plots_dir, threshold=args.degenerate_threshold)
+        _plot_summary(
+            metrics_data,
+            plots_dir,
+            threshold=args.degenerate_threshold,
+            plots_exts=args.plots_ext,
+        )
 
     # ============================================================
     # Режим 2/3: один файл — агрегированный или детальный
@@ -1140,6 +1516,7 @@ def main():
             model_a=args.model_a,
             model_b=args.model_b,
             collect_for_summary=False,
+            plots_exts=args.plots_ext,
         )
 
     print("\nГотово.")
