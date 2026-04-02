@@ -11,13 +11,14 @@
 
 Имена метрик генерируются автоматически из параметров по шаблону:
 
-    {kind}_{key_param}[_rsc][_antisym|_sym]
+    {kind}_{key_param}[_rsc][_hr][_antisym|_sym]
 
   где:
     kind       — тип окрестности: lin_k | lin_eps | w_eps | multiscale | rff_k
     key_param  — главный числовой параметр: k, eps_percentile, sigma_percentile,
                  aggregator (для multiscale)
     _rsc       — суффикс, если solver="ransac"
+    _hr        — суффикс для hard-rank-конфигов
     _antisym   — суффикс для антисимметричных метрик
     _sym       — суффикс для симметричных метрик
     (без суффикса) — только directed
@@ -28,6 +29,7 @@
     lin_eps_10_antisym   — linear eps, eps_percentile=10, antisym
     w_eps_10_antisym     — weighted eps, sigma_percentile=10, lstsq, antisym
     w_eps_10_rsc_antisym — weighted eps, sigma_percentile=10, RANSAC, antisym
+    w_eps_10_hr_antisym  — weighted eps, hard-rank, antisym
     w_eps_10_rsc_sym     — weighted eps, sigma_percentile=10, RANSAC, sym
     multiscale_mean_antisym — multiscale kNN, aggregator=mean, antisym
     rff_k10_antisym      — RFF kNN, k=10, antisym
@@ -61,8 +63,9 @@ _K_KNN_ABLATION = [5, 10, 20, 40, 80, 200]   # antisym и sym
 _K_LIST_DEFAULT = [5, 10, 20, 40]        # для multiscale
 _AGG_DEFAULT = "mean"
 
-_SIGMA_PERCENTILES = [5, 10, 20]
+_SIGMA_PERCENTILES = [1, 2, 3, 5, 10, 20]
 _EPS_SCALE = 1.5
+_HARD_RANK_THRESHOLD = 1e-2
 
 _RANSAC_N_ITER = 15
 _RANSAC_SAMPLE_FRAC = 0.5
@@ -94,6 +97,11 @@ def _variant_suffix(pair_agg: str) -> str:
     if pair_agg == "antisym":
         return "_antisym"
     return ""  # directed
+
+
+def _rank_suffix(rank_aggregation: str) -> str:
+    """Возвращает суффикс имени для способа агрегации ранга."""
+    return "_hr" if rank_aggregation == "hard_rank" else ""
 
 
 # ============================================================
@@ -139,13 +147,16 @@ def _w_eps(
     sigma_percentile: int,
     pair_agg: str = "antisym",
     solver: str = "lstsq",
+    rank_aggregation: str = "rankme",
+    hard_rank_threshold: float = _HARD_RANK_THRESHOLD,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Weighted eps: gaussian-веса exp(-d²/σ²), σ = percentile попарных расстояний,
     eps = eps_scale * σ. Опционально — RANSAC для робастного решения.
     """
     rsc_suffix = "_rsc" if solver == "ransac" else ""
-    name = f"w_eps_{sigma_percentile}{rsc_suffix}{_agg_suffix(pair_agg)}"
+    rank_suffix = _rank_suffix(rank_aggregation)
+    name = f"w_eps_{sigma_percentile}{rsc_suffix}{rank_suffix}{_agg_suffix(pair_agg)}"
 
     if solver == "ransac":
         variant = f"weighted_epsilon_ransac{_variant_suffix(pair_agg)}"
@@ -161,6 +172,9 @@ def _w_eps(
         "solver": solver,
         "n_centers": _N_CENTERS,
     }
+    if rank_aggregation != "rankme":
+        meta["rank_aggregation"] = rank_aggregation
+        meta["hard_rank_threshold"] = hard_rank_threshold
     if solver == "ransac":
         meta.update({
             "ransac_n_iter": _RANSAC_N_ITER,
@@ -240,6 +254,28 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     for q in _SIGMA_PERCENTILES:
         specs.append(_w_eps(sigma_percentile=q, pair_agg="antisym", solver="ransac"))
 
+    # --- weighted eps, hard-rank, antisym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(
+            _w_eps(
+                sigma_percentile=q,
+                pair_agg="antisym",
+                solver="lstsq",
+                rank_aggregation="hard_rank",
+            )
+        )
+
+    # --- weighted eps + RANSAC, hard-rank, antisym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(
+            _w_eps(
+                sigma_percentile=q,
+                pair_agg="antisym",
+                solver="ransac",
+                rank_aggregation="hard_rank",
+            )
+        )
+
     # --- multiscale, antisym ---
     specs.append(_multiscale(pair_agg="antisym"))
 
@@ -261,6 +297,28 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     # --- weighted eps + RANSAC, sym ---
     for q in _SIGMA_PERCENTILES:
         specs.append(_w_eps(sigma_percentile=q, pair_agg="sym", solver="ransac"))
+
+    # --- weighted eps, hard-rank, sym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(
+            _w_eps(
+                sigma_percentile=q,
+                pair_agg="sym",
+                solver="lstsq",
+                rank_aggregation="hard_rank",
+            )
+        )
+
+    # --- weighted eps + RANSAC, hard-rank, sym ---
+    for q in _SIGMA_PERCENTILES:
+        specs.append(
+            _w_eps(
+                sigma_percentile=q,
+                pair_agg="sym",
+                solver="ransac",
+                rank_aggregation="hard_rank",
+            )
+        )
 
     # --- multiscale, sym ---
     specs.append(_multiscale(pair_agg="sym"))
