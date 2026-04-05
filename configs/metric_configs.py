@@ -41,6 +41,7 @@
     _w_eps(sigma_percentile, pair_agg, solver)
     _multiscale(k_list, aggregator, pair_agg)
     _rff(k, pair_agg)
+    _id_diff(estimator, n_neighbors, pair_agg)
 и добавить её в список METRIC_SPECS ниже.
 """
 
@@ -226,6 +227,26 @@ def _rff(k: int, pair_agg: str = "antisym") -> Tuple[str, Dict[str, Any]]:
     }
 
 
+def _id_diff(
+    estimator: str = "MLE",
+    n_neighbors: int = 100,
+    pair_agg: str = "antisym",
+) -> Tuple[str, Dict[str, Any]]:
+    """Разность локальных intrinsic dimensions между моделями."""
+    name = f"id_diff_{estimator.lower()}_k{n_neighbors}{_agg_suffix(pair_agg)}"
+    variant = f"local_id_diff{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_id_diff",
+            "variant": variant,
+            "estimator": estimator,
+            "n_neighbors": n_neighbors,
+            "n_centers": _N_CENTERS,
+        },
+    }
+
+
 # ============================================================
 # Реестр метрик
 # ============================================================
@@ -237,6 +258,9 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
 
     # --- Directed (для диагностики асимметрии) ---
     specs.append(_lin_knn(k=_K_DEFAULT, pair_agg="directed"))
+
+    # --- local ID diff, antisym ---
+    specs.append(_id_diff(estimator="MLE", n_neighbors=100, pair_agg="antisym"))
 
     # --- linear kNN, antisym ---
     for k in _K_KNN_ABLATION:
