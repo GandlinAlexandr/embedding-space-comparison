@@ -23,12 +23,14 @@ class ModelSpec:
     - base_name: какая torchvision-модель создаётся
     - weights_enum: какие torchvision-веса используются
     - extractor_id: строка для логов и воспроизводимости
+    - input_size: какой квадратный spatial-size ожидает протокол извлечения
     - apply_extractor: функция, превращающая модель в экстрактор признаков
     """
 
     base_name: str
     weights_enum: Optional[str]
     extractor_id: str
+    input_size: int
     apply_extractor: Callable[[torch.nn.Module], torch.nn.Module]
 
 
@@ -48,12 +50,14 @@ def _make_registry() -> Dict[str, ModelSpec]:
         base_name: str,
         weights_enum: str,
         extractor_id: str,
+        input_size: int = 224,
         apply_extractor: Callable[[torch.nn.Module], torch.nn.Module],
     ) -> None:
         reg[name] = ModelSpec(
             base_name=base_name,
             weights_enum=weights_enum,
             extractor_id=extractor_id,
+            input_size=input_size,
             apply_extractor=apply_extractor,
         )
 
@@ -142,6 +146,7 @@ def _make_registry() -> Dict[str, ModelSpec]:
         base_name="vit_b_16",
         weights_enum="ViT_B_16_Weights.IMAGENET1K_SWAG_E2E_V1",
         extractor_id="vit_heads_identity",
+        input_size=384,
         apply_extractor=as_vit_feature_extractor,
     )
     add(

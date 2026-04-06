@@ -54,11 +54,11 @@ class IndexedDataset(Dataset):
         return self.base_dataset[int(self.indices[idx])]
 
 
-def default_transform_imagenet224() -> transforms.Compose:
+def default_transform_imagenet224(image_size: int = 224) -> transforms.Compose:
     return transforms.Compose(
         [
             transforms.Resize(
-                (224, 224)
+                (image_size, image_size)
             ),  # гарантируем одинаковый spatial-size для всех изображений
             transforms.ToTensor(),
             transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
