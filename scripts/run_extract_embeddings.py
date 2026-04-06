@@ -69,7 +69,7 @@ def main():
         description="Извлечь эмбеддинги из torchvision-моделей."
     )
     parser.add_argument("--dataset", type=str, default="cifar10")
-    parser.add_argument("--split", type=str, default="test", help="train|test")
+    parser.add_argument("--split", type=str, default="test", help="train|val|test|trainval")
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
 

@@ -1993,6 +1993,17 @@ def _load_metric_spec(metric_name: str) -> str:
         return ""
 
 
+def _is_local_id_diff_metric(metric_name: str) -> bool:
+    try:
+        cfgs = get_embedding_metric_configs()
+        if metric_name in cfgs:
+            meta = cfgs[metric_name].get("meta", {})
+            return str(meta.get("family", "")) == "local_id_diff"
+    except Exception:
+        pass
+    return short_metric_name(metric_name).startswith("id_diff_")
+
+
 # ============================================================
 # 7) Основной запуск
 # ============================================================
@@ -2018,6 +2029,21 @@ def _run_single_metric(
 
     print(f"\nМетрика: {metric_name}")
     print(f"Загрузка артефактов: {artifacts_path}")
+
+    if _is_local_id_diff_metric(metric_name):
+        warn = (
+            "Графики диагностики для local_id_diff временно отключены: "
+            "текущий diagnose-скрипт ориентирован на rank/residual-сравнения map-метрик "
+            "и не подходит для графиков сравнения размерностей новой метрики."
+        )
+        print(f"  [WARN] {warn}")
+        os.makedirs(reports_dir, exist_ok=True)
+        stub_path = os.path.join(reports_dir, f"{metric_name}_diagnostics_skipped.txt")
+        with open(stub_path, "w", encoding="utf-8") as f:
+            f.write(warn + "\n")
+        print(f"  [INFO] Сохранена заглушка: {stub_path}")
+        return None
+
     artifacts = _load_artifacts(artifacts_path)
     local_id_artifacts = _load_optional_local_id_artifacts(artifacts_path)
 

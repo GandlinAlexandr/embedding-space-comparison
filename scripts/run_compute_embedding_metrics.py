@@ -553,11 +553,51 @@ def _estimate_local_intrinsic_dim_pw(
     return np.asarray(dims, dtype=np.float32).reshape(-1)
 
 
+def _estimate_local_intrinsic_dim_at_center(
+    X_subset: np.ndarray,
+    center_local_idx: int,
+    estimator_name: str,
+) -> float:
+    X_subset = np.asarray(X_subset, dtype=np.float32)
+    if X_subset.ndim != 2 or X_subset.shape[0] < 3:
+        return float("nan")
+    if center_local_idx < 0 or center_local_idx >= X_subset.shape[0]:
+        return float("nan")
+
+    dims = _estimate_local_intrinsic_dim_pw(
+        X_subset,
+        estimator_name=estimator_name,
+        n_neighbors=max(2, X_subset.shape[0] - 1),
+        n_jobs=1,
+    )
+    if dims.size <= center_local_idx:
+        return float("nan")
+    return float(dims[int(center_local_idx)])
+
+
 def _iter_metric_center_indices(
     cache: "NeighborCache",
     spec: "MetricSpec",
 ) -> Iterable[int]:
-    if spec.kind in {"linear_knn", "rff_knn", "multiscale_knn", "local_id_diff"}:
+    if spec.kind in {"linear_knn", "rff_knn", "multiscale_knn"}:
+        for center_idx in cache.center_indices:
+            yield int(center_idx)
+        return
+
+    if spec.kind == "local_id_diff":
+        if spec.eps_percentile is not None or spec.sigma_percentile is not None:
+            percentile_key = (
+                spec.sigma_percentile
+                if spec.sigma_percentile is not None
+                else spec.eps_percentile
+            )
+            assert percentile_key is not None
+            for center_idx, idxs in zip(cache.center_indices, cache.eps[percentile_key]):
+                if np.asarray(idxs).size < 2:
+                    continue
+                yield int(center_idx)
+            return
+
         for center_idx in cache.center_indices:
             yield int(center_idx)
         return
@@ -735,11 +775,31 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     # Новый канонический путь: строим спецификацию из meta, а имя используем как label.
     variant = str(meta.get("variant", "")) if isinstance(meta, dict) else ""
     if variant:
-        if variant in {"local_id_diff", "local_id_diff_antisym", "local_id_diff_sym"}:
+        if variant in {
+            "local_id_diff_knn",
+            "local_id_diff_knn_antisym",
+            "local_id_diff_knn_sym",
+        }:
             return MetricSpec(
                 name=name,
                 kind="local_id_diff",
                 pair_agg=pair_agg,
+                k=int(meta.get("k", 10)),
+                n_centers=n_centers,
+                local_id_estimator=local_id_estimator,
+                local_id_n_neighbors=local_id_n_neighbors,
+            )
+
+        if variant in {
+            "local_id_diff_epsilon",
+            "local_id_diff_epsilon_antisym",
+            "local_id_diff_epsilon_sym",
+        }:
+            return MetricSpec(
+                name=name,
+                kind="local_id_diff",
+                pair_agg=pair_agg,
+                eps_percentile=int(meta.get("eps_percentile")),
                 n_centers=n_centers,
                 local_id_estimator=local_id_estimator,
                 local_id_n_neighbors=local_id_n_neighbors,
@@ -935,7 +995,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             hard_rank_threshold=hard_rank_threshold,
         )
 
-    m = re.fullmatch(r"id_diff_([a-z0-9]+)_k(\d+)(_antisym|_sym)?", lower)
+    m = re.fullmatch(r"id_diff_k(\d+)_([a-z0-9]+)(_antisym|_sym)?", lower)
     if m:
         if m.group(3) == "_sym":
             pair_agg_short = "sym"
@@ -947,9 +1007,26 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             name=name,
             kind="local_id_diff",
             pair_agg=pair_agg_short,
+            k=int(m.group(1)),
             n_centers=n_centers,
-            local_id_estimator=m.group(1).upper(),
-            local_id_n_neighbors=int(m.group(2)),
+            local_id_estimator=m.group(2).upper(),
+        )
+
+    m = re.fullmatch(r"id_diff_eps(\d+)_([a-z0-9]+)(_antisym|_sym)?", lower)
+    if m:
+        if m.group(3) == "_sym":
+            pair_agg_short = "sym"
+        elif m.group(3) == "_antisym":
+            pair_agg_short = "antisym"
+        else:
+            pair_agg_short = pair_agg
+        return MetricSpec(
+            name=name,
+            kind="local_id_diff",
+            pair_agg=pair_agg_short,
+            eps_percentile=int(m.group(1)),
+            n_centers=n_centers,
+            local_id_estimator=m.group(2).upper(),
         )
 
     # linear knn
@@ -1139,6 +1216,8 @@ def _build_neighbor_cache(
     ks: List[int] = []
     if spec.kind in {"linear_knn", "rff_knn"} and spec.k is not None:
         ks.append(spec.k)
+    if spec.kind == "local_id_diff" and spec.k is not None:
+        ks.append(spec.k)
     if spec.kind == "multiscale_knn" and spec.k_list is not None:
         ks.extend(list(spec.k_list))
 
@@ -1161,7 +1240,9 @@ def _build_neighbor_cache(
             knn_distances[k] = D[row, nn[:, :k]]
 
     # eps-окрестность:
-    if spec.kind == "linear_eps":
+    if spec.kind in {"linear_eps", "local_id_diff"} and (
+        spec.eps_percentile is not None or spec.sigma_percentile is not None
+    ):
         percentile = (
             spec.sigma_percentile
             if spec.sigma_percentile is not None
@@ -1170,7 +1251,7 @@ def _build_neighbor_cache(
     else:
         percentile = None
 
-    if spec.kind == "linear_eps" and percentile is not None:
+    if percentile is not None:
         # Оцениваем характерный масштаб по подвыборке попарных расстояний.
         sub_n = min(4000, N)
         sub_idx = rng.choice(N, size=sub_n, replace=False)
@@ -1239,6 +1320,8 @@ class DirectedArtifacts:
     inlier_masks: List[np.ndarray]  # маска инлайеров в robust-solver
     inlier_counts: List[int]  # число инлайеров
     inlier_fracs: List[float]  # доля инлайеров
+    local_id_x: List[float]  # локальная ID в X по центрам (если применимо)
+    local_id_y: List[float]  # локальная ID в Y по центрам (если применимо)
 
 
 def _compute_local_intrinsic_dims_for_pair(
@@ -1279,6 +1362,8 @@ def _metric_directed_for_pair(
     seed: int = 42,
     dims_x: Optional[np.ndarray] = None,
     dims_y: Optional[np.ndarray] = None,
+    X_local_id_features: Optional[np.ndarray] = None,
+    Y_local_id_features: Optional[np.ndarray] = None,
 ) -> Tuple[float, DirectedArtifacts]:
     """
     Вычисляет направленную m(X->Y) как среднее по центрам:
@@ -1314,30 +1399,103 @@ def _metric_directed_for_pair(
         inlier_masks=[],
         inlier_counts=[],
         inlier_fracs=[],
+        local_id_x=[],
+        local_id_y=[],
     )
 
     if spec.kind == "local_id_diff":
-        if dims_x is None or dims_y is None:
-            raise ValueError("Для local_id_diff нужно передать dims_x и dims_y.")
+        if X_local_id_features is None or Y_local_id_features is None:
+            raise ValueError(
+                "Для local_id_diff нужно передать X_local_id_features и Y_local_id_features."
+            )
 
         vals = []
-        n_neighbors_eff = max(2, min(int(spec.local_id_n_neighbors), X.shape[0] - 1))
-        for center_idx in center_indices:
-            diff = float(dims_x[int(center_idx)] - dims_y[int(center_idx)])
+        percentile_key = (
+            spec.sigma_percentile
+            if spec.sigma_percentile is not None
+            else spec.eps_percentile
+        )
+
+        def _append_center(
+            center_idx: int,
+            idxs: np.ndarray,
+            neighbor_size: int,
+            neighbor_dists: Optional[np.ndarray] = None,
+            sigma_value: float = float("nan"),
+            eps_value: float = float("nan"),
+        ) -> None:
+            idxs_arr = np.asarray(idxs, dtype=np.int32).reshape(-1)
+            center_pos_candidates = np.where(idxs_arr == int(center_idx))[0]
+            if center_pos_candidates.size == 0:
+                return
+            center_pos = int(center_pos_candidates[0])
+
+            id_x = _estimate_local_intrinsic_dim_at_center(
+                X_local_id_features[idxs_arr],
+                center_local_idx=center_pos,
+                estimator_name=spec.local_id_estimator,
+            )
+            id_y = _estimate_local_intrinsic_dim_at_center(
+                Y_local_id_features[idxs_arr],
+                center_local_idx=center_pos,
+                estimator_name=spec.local_id_estimator,
+            )
+            diff = float(id_x - id_y)
             vals.append(diff)
             artifacts.singular_values.append(np.zeros((0,), dtype=np.float32))
             artifacts.residuals.append(float("nan"))
             artifacts.relative_residuals.append(float("nan"))
             artifacts.ranks.append(0)
             artifacts.metric_ranks.append(diff)
-            artifacts.neighbor_sizes.append(int(n_neighbors_eff))
-            artifacts.neighbor_distances.append(np.zeros((0,), dtype=np.float32))
-            artifacts.sigma_values.append(float("nan"))
-            artifacts.eps_values.append(float("nan"))
+            artifacts.local_id_x.append(id_x)
+            artifacts.local_id_y.append(id_y)
+            artifacts.neighbor_sizes.append(int(neighbor_size))
+            if neighbor_dists is None:
+                artifacts.neighbor_distances.append(np.zeros((0,), dtype=np.float32))
+            else:
+                artifacts.neighbor_distances.append(
+                    np.asarray(neighbor_dists, dtype=np.float32)
+                )
+            artifacts.sigma_values.append(float(sigma_value))
+            artifacts.eps_values.append(float(eps_value))
             artifacts.sample_weights.append(np.ones((0,), dtype=np.float32))
             artifacts.inlier_masks.append(np.zeros((0,), dtype=bool))
             artifacts.inlier_counts.append(0)
             artifacts.inlier_fracs.append(float("nan"))
+
+        if spec.k is not None:
+            nn = cache_X.knn[spec.k]
+            nn_dist = cache_X.knn_distances[spec.k]
+            for center_idx, idxs, dists in zip(center_indices, nn, nn_dist):
+                _append_center(
+                    int(center_idx),
+                    idxs=idxs,
+                    neighbor_size=int(spec.k),
+                    neighbor_dists=dists,
+                )
+        elif percentile_key is not None:
+            neigh = cache_X.eps[percentile_key]
+            neigh_distances = cache_X.eps_distances[percentile_key]
+            sigma_val = cache_X.sigma_values.get(percentile_key, float("nan"))
+            eps_val = cache_X.eps_values.get(percentile_key, float("nan"))
+            for center_idx, idxs, dists in zip(center_indices, neigh, neigh_distances):
+                if idxs.size < 2:
+                    continue
+                _append_center(
+                    int(center_idx),
+                    idxs=idxs,
+                    neighbor_size=int(idxs.size),
+                    neighbor_dists=dists,
+                    sigma_value=sigma_val,
+                    eps_value=eps_val,
+                )
+        else:
+            for center_idx in center_indices:
+                _append_center(
+                    int(center_idx),
+                    idxs=np.asarray([int(center_idx)], dtype=np.int32),
+                    neighbor_size=1,
+                )
 
         if not vals or not np.any(np.isfinite(vals)):
             return float("nan"), artifacts
@@ -1596,10 +1754,14 @@ def _artifacts_match_current_geometry(artifacts: Dict[str, Any]) -> bool:
     return meta.get("local_geometry_mode") == _LOCAL_GEOMETRY_MODE
 
 
-def _build_local_id_meta(estimator_name: str, n_neighbors: int) -> Dict[str, Any]:
+def _build_local_id_meta(
+    estimator_name: str,
+    n_neighbors: int,
+    method: str = "skdim_fit_transform_pw",
+) -> Dict[str, Any]:
     meta = {
         "schema_version": 1,
-        "local_id_method": "skdim_fit_transform_pw",
+        "local_id_method": str(method),
         "local_id_estimator": str(estimator_name),
         "local_id_n_neighbors": int(n_neighbors),
     }
@@ -1625,9 +1787,12 @@ def _local_id_artifacts_match_current_config(
         return False
     if not isinstance(meta, dict):
         return False
+    method = str(meta.get("local_id_method", ""))
+    if method == "metric_local_neighborhood":
+        return meta.get("local_geometry_mode") == _LOCAL_GEOMETRY_MODE
     return (
         meta.get("local_geometry_mode") == _LOCAL_GEOMETRY_MODE
-        and meta.get("local_id_method") == "skdim_fit_transform_pw"
+        and method == "skdim_fit_transform_pw"
         and str(meta.get("local_id_estimator", "")) == str(estimator_name)
         and int(meta.get("local_id_n_neighbors", -1)) == int(n_neighbors)
     )
@@ -1646,11 +1811,19 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
     словарь здесь; в скрипт диагностики лезть не нужно.
     """
     if spec.kind == "local_id_diff":
+        if spec.k is not None:
+            neighborhood_desc = f"на той же kNN-окрестности (k={spec.k})"
+        elif spec.eps_percentile is not None:
+            neighborhood_desc = (
+                f"на той же epsilon-окрестности (eps_percentile={spec.eps_percentile})"
+            )
+        else:
+            neighborhood_desc = "на локальной окрестности метрики"
         ranks_axis_label = "Локальная размерность X - локальная размерность Y"
         ranks_short_label = "Local ID diff"
         ranks_description = (
             "Разность локальных intrinsic dimensions, оценённых независимо в пространствах X и Y "
-            f"методом {spec.local_id_estimator} с n_neighbors={spec.local_id_n_neighbors}."
+            f"методом {spec.local_id_estimator} {neighborhood_desc}."
         )
         residual_axis_label = "Residual (не применяется)"
         residual_short_label = "Residual (N/A)"
@@ -1819,6 +1992,10 @@ def _save_artifacts(
     artifacts[f"{prefix}/inlier_fracs"] = np.array(
         directed.inlier_fracs, dtype=np.float32
     )
+    if directed.local_id_x:
+        artifacts[f"{prefix}/local_id_x"] = np.array(directed.local_id_x, dtype=np.float32)
+    if directed.local_id_y:
+        artifacts[f"{prefix}/local_id_y"] = np.array(directed.local_id_y, dtype=np.float32)
 
     # Записываем diagnostics_meta_json один раз при первом вызове (когда ключа ещё нет).
     # Содержит описание полей residuals и ranks: формулы, подписи осей, единицы измерения.
@@ -1839,6 +2016,7 @@ def _save_local_id_artifacts(
     center_indices: np.ndarray,
     estimator_name: str,
     n_neighbors: int,
+    method: str = "skdim_fit_transform_pw",
 ) -> None:
     prefix = f"{model_i}_to_{model_j}"
     artifacts[f"{prefix}/intrinsic_dims_x"] = np.asarray(
@@ -1855,7 +2033,7 @@ def _save_local_id_artifacts(
     )
     artifacts[f"{prefix}/center_indices"] = np.asarray(center_indices, dtype=np.int32)
     artifacts["local_id_meta_json"] = json.dumps(
-        _build_local_id_meta(estimator_name, n_neighbors), ensure_ascii=False
+        _build_local_id_meta(estimator_name, n_neighbors, method=method), ensure_ascii=False
     )
     np.savez_compressed(path, **artifacts)
 
@@ -2149,6 +2327,14 @@ def main():
     # Поэтому кэш безопасно держать на уровне всего запуска и не пересчитывать
     # одни и те же per-point оценки для w_eps_1 / w_eps_2 / w_eps_3 заново.
     global_local_id_dims_by_model: Dict[Tuple[str, str, int], np.ndarray] = {}
+    prepared_local_id_features_by_model: Dict[str, np.ndarray] = {}
+
+    def get_local_id_features_for_model(model_name: str) -> np.ndarray:
+        if model_name not in prepared_local_id_features_by_model:
+            prepared_local_id_features_by_model[model_name] = _prepare_features_for_local_id(
+                embeddings[model_name], spec=None
+            )
+        return prepared_local_id_features_by_model[model_name]
 
     def get_local_id_dims_for_model_global(
         model_name: str,
@@ -2157,7 +2343,7 @@ def main():
     ) -> np.ndarray:
         key = (model_name, str(estimator_name), int(n_neighbors))
         if key not in global_local_id_dims_by_model:
-            X_local_id = _prepare_features_for_local_id(embeddings[model_name], spec=None)
+            X_local_id = get_local_id_features_for_model(model_name)
             global_local_id_dims_by_model[key] = _estimate_local_intrinsic_dim_pw(
                 X_local_id,
                 estimator_name=estimator_name,
@@ -2298,17 +2484,11 @@ def main():
             cache_i_local = get_cache_for_model_i(model_i)
             dims_x_local = None
             dims_y_local = None
+            Xi_local_id_features = None
+            Yj_local_id_features = None
             if spec.kind == "local_id_diff":
-                dims_x_local = get_local_id_dims_for_model_global(
-                    model_i,
-                    spec.local_id_estimator,
-                    spec.local_id_n_neighbors,
-                )
-                dims_y_local = get_local_id_dims_for_model_global(
-                    model_j,
-                    spec.local_id_estimator,
-                    spec.local_id_n_neighbors,
-                )
+                Xi_local_id_features = get_local_id_features_for_model(model_i)
+                Yj_local_id_features = get_local_id_features_for_model(model_j)
             return _metric_directed_for_pair(
                 spec,
                 Xi_local,
@@ -2317,19 +2497,91 @@ def main():
                 seed=args.seed,
                 dims_x=dims_x_local,
                 dims_y=dims_y_local,
+                X_local_id_features=Xi_local_id_features,
+                Y_local_id_features=Yj_local_id_features,
             )
 
-        def _ensure_local_id_for_direction(model_i: str, model_j: str) -> None:
+        def _ensure_local_id_for_direction(
+            model_i: str,
+            model_j: str,
+            directed_artifacts: Optional[DirectedArtifacts] = None,
+        ) -> None:
             if not args.compute_local_id_diagnostics:
                 return
             cache_x_local = get_cache_for_model_i(model_i)
+            center_indices_expected = np.asarray(
+                list(_iter_metric_center_indices(cache_x_local, spec)),
+                dtype=np.int32,
+            )
             if _local_id_artifact_key_exists(
                 saved_local_id_artifacts,
                 model_i,
                 model_j,
-                center_indices=cache_x_local.center_indices,
+                center_indices=center_indices_expected,
             ):
                 return
+            if (
+                spec.kind == "local_id_diff"
+                and directed_artifacts is not None
+                and directed_artifacts.local_id_x
+                and directed_artifacts.local_id_y
+            ):
+                local_id = LocalIDArtifacts(
+                    intrinsic_dims_x=[float(v) for v in directed_artifacts.local_id_x],
+                    intrinsic_dims_y=[float(v) for v in directed_artifacts.local_id_y],
+                    neighbor_sizes_x=[int(v) for v in directed_artifacts.neighbor_sizes],
+                    neighbor_sizes_y=[int(v) for v in directed_artifacts.neighbor_sizes],
+                )
+                _save_local_id_artifacts(
+                    local_id_artifacts_path,
+                    saved_local_id_artifacts,
+                    model_i,
+                    model_j,
+                    local_id,
+                    center_indices=center_indices_expected,
+                    estimator_name=spec.local_id_estimator,
+                    n_neighbors=0,
+                    method="metric_local_neighborhood",
+                )
+                return
+            if spec.kind == "local_id_diff":
+                prefix = f"{model_i}_to_{model_j}"
+                local_id_x_saved = saved_artifacts.get(f"{prefix}/local_id_x", None)
+                local_id_y_saved = saved_artifacts.get(f"{prefix}/local_id_y", None)
+                neighbor_sizes_saved = saved_artifacts.get(
+                    f"{prefix}/neighbor_sizes", None
+                )
+                if (
+                    local_id_x_saved is not None
+                    and local_id_y_saved is not None
+                    and neighbor_sizes_saved is not None
+                ):
+                    local_id = LocalIDArtifacts(
+                        intrinsic_dims_x=np.asarray(
+                            local_id_x_saved, dtype=np.float32
+                        ).reshape(-1).tolist(),
+                        intrinsic_dims_y=np.asarray(
+                            local_id_y_saved, dtype=np.float32
+                        ).reshape(-1).tolist(),
+                        neighbor_sizes_x=np.asarray(
+                            neighbor_sizes_saved, dtype=np.int32
+                        ).reshape(-1).tolist(),
+                        neighbor_sizes_y=np.asarray(
+                            neighbor_sizes_saved, dtype=np.int32
+                        ).reshape(-1).tolist(),
+                    )
+                    _save_local_id_artifacts(
+                        local_id_artifacts_path,
+                        saved_local_id_artifacts,
+                        model_i,
+                        model_j,
+                        local_id,
+                        center_indices=center_indices_expected,
+                        estimator_name=spec.local_id_estimator,
+                        n_neighbors=0,
+                        method="metric_local_neighborhood",
+                    )
+                    return
             dims_x_all = get_local_id_dims_for_model_global(
                 model_i,
                 args.local_id_estimator,
@@ -2360,7 +2612,7 @@ def main():
                 model_i,
                 model_j,
                 local_id,
-                center_indices=cache_x_local.center_indices,
+                center_indices=center_indices_expected,
                 estimator_name=args.local_id_estimator,
                 n_neighbors=args.local_id_n_neighbors,
             )
@@ -2389,11 +2641,11 @@ def main():
 
                     # m(i->j)
                     mij, artifacts_ij = _directed_metric(mi, mj)
-                    _ensure_local_id_for_direction(mi, mj)
+                    _ensure_local_id_for_direction(mi, mj, artifacts_ij)
 
                     # m(j->i)
                     mji, artifacts_ji = _directed_metric(mj, mi)
-                    _ensure_local_id_for_direction(mj, mi)
+                    _ensure_local_id_for_direction(mj, mi, artifacts_ji)
 
                     # Для local_id_diff directed-величина уже является signed difference
                     # на фиксированном наборе центров. Поэтому для антисимметричной матрицы
@@ -2440,11 +2692,11 @@ def main():
 
                     # m(i->j)
                     mij, artifacts_ij = _directed_metric(mi, mj)
-                    _ensure_local_id_for_direction(mi, mj)
+                    _ensure_local_id_for_direction(mi, mj, artifacts_ij)
 
                     # m(j->i)
                     mji, artifacts_ji = _directed_metric(mj, mi)
-                    _ensure_local_id_for_direction(mj, mi)
+                    _ensure_local_id_for_direction(mj, mi, artifacts_ji)
 
                     sij = np.float32(0.5 * (mij + mji))
                     out_matrix[i, j] = sij
@@ -2474,7 +2726,7 @@ def main():
                     if not np.isnan(out_matrix[i, j]):
                         continue
                     val, artifacts_ij = _directed_metric(mi, mj)
-                    _ensure_local_id_for_direction(mi, mj)
+                    _ensure_local_id_for_direction(mi, mj, artifacts_ij)
                     out_matrix[i, j] = np.float32(val)
 
                     # Сохраняем артефакты для направления i->j.

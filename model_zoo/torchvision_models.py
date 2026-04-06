@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import torch
 
 
-def build_torchvision_model(model_name: str) -> torch.nn.Module:
+def build_torchvision_model(
+    model_name: str,
+    weights_enum: Optional[str] = None,
+) -> torch.nn.Module:
     """
     Фабрика torchvision-моделей с фиксированными весами.
 
@@ -16,26 +19,23 @@ def build_torchvision_model(model_name: str) -> torch.nn.Module:
 
     name = model_name.lower()
 
-    factories: Dict[str, Callable[[], torch.nn.Module]] = {
-        "resnet18": lambda: M.resnet18(weights=M.ResNet18_Weights.IMAGENET1K_V1),
-        "resnet34": lambda: M.resnet34(weights=M.ResNet34_Weights.IMAGENET1K_V1),
-        "resnet50": lambda: M.resnet50(weights=M.ResNet50_Weights.IMAGENET1K_V1),
-        "resnet101": lambda: M.resnet101(weights=M.ResNet101_Weights.IMAGENET1K_V1),
-        "wide_resnet50_2": lambda: M.wide_resnet50_2(
-            weights=M.Wide_ResNet50_2_Weights.IMAGENET1K_V1
-        ),
-        "vgg11": lambda: M.vgg11(weights=M.VGG11_Weights.IMAGENET1K_V1),
-        "vgg16": lambda: M.vgg16(weights=M.VGG16_Weights.IMAGENET1K_V1),
-        "vgg19": lambda: M.vgg19(weights=M.VGG19_Weights.IMAGENET1K_V1),
-        "densenet121": lambda: M.densenet121(
-            weights=M.DenseNet121_Weights.IMAGENET1K_V1
-        ),
-        "mobilenet_v2": lambda: M.mobilenet_v2(
-            weights=M.MobileNet_V2_Weights.IMAGENET1K_V1
-        ),
-        "vit_b_16": lambda: M.vit_b_16(weights=M.ViT_B_16_Weights.IMAGENET1K_V1),
-        "vit_b_32": lambda: M.vit_b_32(weights=M.ViT_B_32_Weights.IMAGENET1K_V1),
-        "vit_l_16": lambda: M.vit_l_16(weights=M.ViT_L_16_Weights.IMAGENET1K_V1),
+    factories: Dict[str, Callable[[Optional[object]], torch.nn.Module]] = {
+        "resnet18": lambda weights: M.resnet18(weights=weights),
+        "resnet34": lambda weights: M.resnet34(weights=weights),
+        "resnet50": lambda weights: M.resnet50(weights=weights),
+        "resnet101": lambda weights: M.resnet101(weights=weights),
+        "wide_resnet50_2": lambda weights: M.wide_resnet50_2(weights=weights),
+        "wide_resnet101_2": lambda weights: M.wide_resnet101_2(weights=weights),
+        "vgg11": lambda weights: M.vgg11(weights=weights),
+        "vgg13": lambda weights: M.vgg13(weights=weights),
+        "vgg16": lambda weights: M.vgg16(weights=weights),
+        "vgg19": lambda weights: M.vgg19(weights=weights),
+        "densenet121": lambda weights: M.densenet121(weights=weights),
+        "mobilenet_v2": lambda weights: M.mobilenet_v2(weights=weights),
+        "vit_b_16": lambda weights: M.vit_b_16(weights=weights),
+        "vit_b_32": lambda weights: M.vit_b_32(weights=weights),
+        "vit_l_16": lambda weights: M.vit_l_16(weights=weights),
+        "vit_l_32": lambda weights: M.vit_l_32(weights=weights),
     }
 
     if name not in factories:
@@ -43,4 +43,5 @@ def build_torchvision_model(model_name: str) -> torch.nn.Module:
             f"Неизвестная torchvision-модель: {model_name}. Доступные варианты: {list(factories.keys())}"
         )
 
-    return factories[name]()
+    weights = M.get_weight(weights_enum) if weights_enum else None
+    return factories[name](weights)
