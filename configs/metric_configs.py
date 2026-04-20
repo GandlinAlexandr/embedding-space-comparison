@@ -61,7 +61,7 @@ _SAMPLE_SIZE = None
 
 # k для kNN-метрик: менять здесь, список определяет абляцию.
 _K_DEFAULT = 10
-_K_KNN_ABLATION = [5, 10, 20, 40, 80, 200]   # antisym и sym
+_K_KNN_ABLATION = [5, 10, 20, 40, 60, 80, 100]   # antisym и sym
 _K_LIST_DEFAULT = [5, 10, 20, 40]        # для multiscale
 _AGG_DEFAULT = "mean"
 
