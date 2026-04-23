@@ -30,13 +30,26 @@ run_compute_embedding_metrics.py
   В incremental-режиме мы оставляем старый блок как есть и досчитываем только новые пары,
   заполняя sim[i,j] = 0.5*(m(i->j)+m(j->i)) и симметризуя.
 
+АГРЕГАЦИЯ РАНГА:
+- По умолчанию используется формула RankMe (энтропийная, из статьи):
+    rankme(s) = exp(-sum(p_k * log(p_k))), где p_k = s_k / sum(s)
+  Значение интерпретируется как "эффективное число измерений", от 1 до D.
+- Альтернатива: hard_rank — количество сингулярных значений выше абсолютного порога.
+  Значение интерпретируемо напрямую: "матрица M имеет ранг N".
+  Управляется через параметры rank_aggregation и hard_rank_threshold в конфиге метрики.
+- Старые .npz-файлы (посчитанные с rankme) при добавлении hard_rank-конфигов не затрагиваются:
+  новые конфиги записываются в отдельные файлы.
+
 АРТЕФАКТЫ:
 - Вместе с матрицей метрики всегда сохраняется файл
   artifacts/{metric_name}_artifacts.npz внутри out_dir.
 - Артефакты содержат сырые данные по каждому центру для каждого направления (i->j):
     singular_values: (n_centers, d) — сингулярные значения матрицы M
-    residuals:       (n_centers,)   — норма невязки ||Xc @ M - Yc||_F
-    ranks:           (n_centers,)   — жёсткий ранг M по порогу
+    residuals:       (n_centers,)   — legacy-невязка ||(Xc-xc) @ M - (Yc-yc)||_F
+    ranks:           (n_centers,)   — legacy hard-rank по относительному порогу
+- Для новых конфигов и диагностики дополнительно сохраняются:
+    relative_residuals: (n_centers,) — относительная ошибка по локальным отклонениям Y - yc
+    metric_ranks:       (n_centers,) — ранг в той же агрегации, что и сама метрика
 - Для расширенной диагностики новых методов также сохраняются:
     neighbor_sizes:  (n_centers,)   — сколько точек вошло в окрестность
     neighbor_distances: object      — расстояния до точек окрестности по центрам
@@ -57,13 +70,18 @@ import argparse
 import json
 import os
 import re
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, asdict, replace
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from scipy.linalg import svd
 from scipy.spatial.distance import cdist, pdist
 from tqdm import tqdm
+
+try:
+    import skdim
+except ImportError:
+    skdim = None
 
 # ВАЖНО: запускаем как модуль: python -m scripts.run_compute_embedding_metrics
 from configs.metric_configs import get_embedding_metric_configs
@@ -188,7 +206,7 @@ def _merge_model_lists_preserve_order(
 
 
 # ============================================================
-# 1) RankMe (мягкий ранг) и метрика локального ранга отображения
+# 1) RankMe, hard_rank и метрика локального ранга отображения
 # ============================================================
 
 
@@ -197,6 +215,38 @@ def rankme(s: np.ndarray) -> float:
     p_k = np.abs(s) / (norm_1 + 1e-10)
     entropy = -np.sum(p_k * np.log(p_k + 1e-10))
     return float(np.exp(entropy))
+
+
+def hard_rank(s: np.ndarray, threshold: float = 1e-2) -> float:
+    """
+    Количество сингулярных значений, превышающих абсолютный порог threshold.
+
+    В отличие от RankMe, значение напрямую интерпретируемо:
+    "матрица отображения M имеет ранг N".
+
+    Важно: для kNN с k < D система недоопределена, и ранг ограничен сверху
+    самим k — это честное отражение того, что окрестность слишком мала.
+    """
+    return float(np.sum(s > threshold))
+
+
+def _aggregate_rank(
+    s: np.ndarray,
+    rank_aggregation: str,
+    hard_rank_threshold: float,
+) -> float:
+    """
+    Выбирает способ агрегации ранга по сингулярным значениям матрицы M.
+
+    rank_aggregation:
+      "rankme"    — энтропийная формула из статьи RankMe (значение от 1 до D,
+                    интерпретируется как "эффективное число измерений").
+      "hard_rank" — количество сингулярных значений выше порога hard_rank_threshold
+                    (значение целочисленное, напрямую интерпретируемо как ранг).
+    """
+    if rank_aggregation == "hard_rank":
+        return hard_rank(s, threshold=hard_rank_threshold)
+    return rankme(s)
 
 
 def _fit_local_linear_map(
@@ -347,15 +397,40 @@ def _fit_local_linear_map_ransac(
 
 @dataclass
 class LocalSolveResult:
-    rankme_value: float
+    rank_value: float  # значение агрегированного ранга (rankme или hard_rank)
     singular_values: np.ndarray
-    residual: float
+    raw_residual: float
+    relative_residual: float
     inlier_mask: np.ndarray
+
+
+_LOCAL_GEOMETRY_MODE = "centered_offsets_v1"
+_LOCAL_GEOMETRY_MODE_CHOICES = ("centered_offsets_v1", "absolute_coords_v0")
+
+
+def _local_geometry_meta() -> Dict[str, Any]:
+    if _LOCAL_GEOMETRY_MODE == "absolute_coords_v0":
+        return {
+            "local_geometry_mode": _LOCAL_GEOMETRY_MODE,
+            "local_geometry_description": (
+                "Локальная affine-линеаризация без центрирования: "
+                "Xc @ M ≈ Yc. Это legacy-режим, использовавшийся до centered_offsets_v1."
+            ),
+        }
+    return {
+        "local_geometry_mode": _LOCAL_GEOMETRY_MODE,
+        "local_geometry_description": (
+            "Локальная affine-линеаризация через центрирование: "
+            "(Xc - xc) @ M ≈ (Yc - yc). Эквивалентно добавлению локального сдвига."
+        ),
+    }
 
 
 def _solve_local_linear_map_and_rank(
     Xc: np.ndarray,
     Yc: np.ndarray,
+    X_center: np.ndarray,
+    Y_center: np.ndarray,
     sample_weights: Optional[np.ndarray] = None,
     solver: str = "lstsq",
     rng: Optional[np.random.RandomState] = None,
@@ -363,21 +438,38 @@ def _solve_local_linear_map_and_rank(
     ransac_sample_frac: float = 0.5,
     ransac_min_inliers: int = 4,
     ransac_threshold_scale: float = 2.5,
+    rank_aggregation: str = "rankme",
+    hard_rank_threshold: float = 1e-2,
 ) -> LocalSolveResult:
     """
-    Решает Xc * M ≈ Yc и возвращает:
-      - RankMe по сингулярным значениям M
+    Решает локальную affine-линеаризацию в одном из режимов:
+      - centered_offsets_v1:
+            (Xc - xc) * M ≈ (Yc - yc)
+      - absolute_coords_v0:
+            Xc * M ≈ Yc
+    и возвращает:
+      - rank_value: агрегированный ранг по сингулярным значениям M
+          * rank_aggregation="rankme"    -> RankMe (энтропийная, от 1 до D)
+          * rank_aggregation="hard_rank" -> количество s_i > hard_rank_threshold
       - сингулярные значения M (для диагностики)
-      - residual ||Xc @ M - Yc||_F (для диагностики)
+      - raw_residual: legacy-невязка в выбранной локальной геометрии
+      - relative_residual: относительная ошибка в выбранной локальной геометрии
     """
+    Xc_work = np.asarray(Xc, dtype=np.float64)
+    Yc_work = np.asarray(Yc, dtype=np.float64)
+    if _LOCAL_GEOMETRY_MODE == "centered_offsets_v1":
+        X_center = np.asarray(X_center, dtype=np.float64).reshape(1, -1)
+        Y_center = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
+        Xc_work = Xc_work - X_center
+        Yc_work = Yc_work - Y_center
     inlier_mask = np.ones(Xc.shape[0], dtype=bool)
 
     if solver == "ransac":
         if rng is None:
             rng = np.random.RandomState(42)
         M, inlier_mask = _fit_local_linear_map_ransac(
-            Xc,
-            Yc,
+            Xc_work,
+            Yc_work,
             sample_weights=sample_weights,
             rng=rng,
             n_iter=ransac_n_iter,
@@ -386,25 +478,34 @@ def _solve_local_linear_map_and_rank(
             threshold_scale=ransac_threshold_scale,
         )
     else:
-        M = _fit_local_linear_map(Xc, Yc, sample_weights=sample_weights)
+        M = _fit_local_linear_map(Xc_work, Yc_work, sample_weights=sample_weights)
 
     s = svd(M, full_matrices=False, compute_uv=False)
 
-    # Невязка: насколько хорошо линейное приближение работает в данной точке.
-    X_eval = Xc[inlier_mask]
-    Y_eval = Yc[inlier_mask]
+    # Legacy residual сохраняем в старом поле для обратной совместимости артефактов.
+    # Дополнительно считаем интерпретируемую относительную ошибку по локальным отклонениям Y.
+    X_eval = Xc_work[inlier_mask]
+    Y_eval = Yc_work[inlier_mask]
     if sample_weights is None:
-        residual = float(np.linalg.norm(X_eval @ M - Y_eval, "fro"))
+        err = X_eval @ M - Y_eval
+        raw_residual = float(np.linalg.norm(err, "fro"))
+        mean_abs_err = float(np.mean(np.abs(err)))
+        mean_abs_y = float(np.mean(np.abs(Y_eval)))
     else:
         w_eval = np.asarray(sample_weights, dtype=np.float64).reshape(-1)[inlier_mask]
         w_eval = np.clip(w_eval, 1e-8, None)
+        err = X_eval @ M - Y_eval
         sqrt_w = np.sqrt(w_eval)[:, None]
-        residual = float(np.linalg.norm((X_eval @ M - Y_eval) * sqrt_w, "fro"))
+        raw_residual = float(np.linalg.norm(err * sqrt_w, "fro"))
+        mean_abs_err = float(np.average(np.mean(np.abs(err), axis=1), weights=w_eval))
+        mean_abs_y = float(np.average(np.mean(np.abs(Y_eval), axis=1), weights=w_eval))
+    relative_residual = mean_abs_err / (mean_abs_y + 1e-8)
 
     return LocalSolveResult(
-        rankme_value=rankme(s),
+        rank_value=_aggregate_rank(s, rank_aggregation, hard_rank_threshold),
         singular_values=s,
-        residual=residual,
+        raw_residual=raw_residual,
+        relative_residual=relative_residual,
         inlier_mask=inlier_mask,
     )
 
@@ -422,6 +523,120 @@ def _rff_features(
     return Z.astype(np.float32)
 
 
+def _prepare_features_for_local_id(
+    X: np.ndarray, spec: Optional["MetricSpec"] = None
+) -> np.ndarray:
+    # Local ID должен описывать локальную геометрию самого эмбеддинга,
+    # а не вспомогательного пространства признаков, используемого конкретной метрикой.
+    return np.asarray(_zscore_rows(X), dtype=np.float32)
+
+
+def _estimate_local_intrinsic_dim_pw(
+    X: np.ndarray,
+    estimator_name: str,
+    n_neighbors: int,
+    n_jobs: int = 1,
+) -> np.ndarray:
+    """
+    Точная схема по ссылке руководителя:
+      skdim.id.<Estimator>().fit_transform_pw(data, n_neighbors=..., n_jobs=...)
+    """
+    if skdim is None:
+        raise RuntimeError(
+            "Для --compute_local_id_diagnostics требуется пакет scikit-dimension "
+            "(модуль skdim). Установите его в окружение проекта."
+        )
+
+    if not hasattr(skdim.id, estimator_name):
+        raise ValueError(f"Неизвестный skdim estimator: {estimator_name}")
+
+    X = np.asarray(X, dtype=np.float32)
+    if X.ndim != 2 or X.shape[0] < 3:
+        return np.full((X.shape[0],), np.nan, dtype=np.float32)
+
+    n_neighbors_eff = max(2, min(int(n_neighbors), X.shape[0] - 1))
+    estimator = getattr(skdim.id, estimator_name)()
+    dims = estimator.fit_transform_pw(
+        X,
+        n_neighbors=n_neighbors_eff,
+        n_jobs=n_jobs,
+    )
+    return np.asarray(dims, dtype=np.float32).reshape(-1)
+
+
+def _estimate_local_intrinsic_dim_at_center(
+    X_subset: np.ndarray,
+    center_local_idx: int,
+    estimator_name: str,
+) -> float:
+    X_subset = np.asarray(X_subset, dtype=np.float32)
+    if X_subset.ndim != 2 or X_subset.shape[0] < 3:
+        return float("nan")
+    if center_local_idx < 0 or center_local_idx >= X_subset.shape[0]:
+        return float("nan")
+
+    dims = _estimate_local_intrinsic_dim_pw(
+        X_subset,
+        estimator_name=estimator_name,
+        n_neighbors=max(2, X_subset.shape[0] - 1),
+        n_jobs=1,
+    )
+    if dims.size <= center_local_idx:
+        return float("nan")
+    return float(dims[int(center_local_idx)])
+
+
+def _iter_metric_center_indices(
+    cache: "NeighborCache",
+    spec: "MetricSpec",
+) -> Iterable[int]:
+    if spec.kind in {"linear_knn", "rff_knn", "multiscale_knn"}:
+        for center_idx in cache.center_indices:
+            yield int(center_idx)
+        return
+
+    if spec.kind == "local_id_diff":
+        if spec.eps_percentile is not None or spec.sigma_percentile is not None:
+            percentile_key = (
+                spec.sigma_percentile
+                if spec.sigma_percentile is not None
+                else spec.eps_percentile
+            )
+            assert percentile_key is not None
+            for center_idx, idxs in zip(cache.center_indices, cache.eps[percentile_key]):
+                if np.asarray(idxs).size < 2:
+                    continue
+                yield int(center_idx)
+            return
+
+        for center_idx in cache.center_indices:
+            yield int(center_idx)
+        return
+
+    if spec.kind == "linear_eps":
+        percentile_key = (
+            spec.sigma_percentile
+            if spec.sigma_percentile is not None
+            else spec.eps_percentile
+        )
+        assert percentile_key is not None
+        for center_idx, idxs in zip(cache.center_indices, cache.eps[percentile_key]):
+            if np.asarray(idxs).size < 2:
+                continue
+            yield int(center_idx)
+        return
+
+    raise ValueError(f"Неизвестный spec.kind для local ID: {spec.kind}")
+
+
+@dataclass
+class LocalIDArtifacts:
+    intrinsic_dims_x: List[float]
+    intrinsic_dims_y: List[float]
+    neighbor_sizes_x: List[int]
+    neighbor_sizes_y: List[int]
+
+
 # ============================================================
 # 2) Разбор конфигов (устойчивый к текущей схеме именования)
 # ============================================================
@@ -430,7 +645,7 @@ def _rff_features(
 @dataclass(frozen=True)
 class MetricSpec:
     name: str
-    kind: str  # "linear_knn" | "linear_eps" | "multiscale_knn" | "rff_knn"
+    kind: str  # "linear_knn" | "linear_eps" | "multiscale_knn" | "rff_knn" | "local_id_diff"
     pair_agg: str  # "directed" | "antisym" | "sym"
 
     # параметры окрестности
@@ -446,6 +661,10 @@ class MetricSpec:
     # параметры глобального усреднения
     n_centers: int = 200
 
+    # параметры local ID
+    local_id_estimator: str = "MLE"
+    local_id_n_neighbors: int = 100
+
     # параметры RFF
     rff_n_features: int = 256
     rff_gamma: float = 1.0
@@ -456,6 +675,12 @@ class MetricSpec:
     ransac_sample_frac: float = 0.5
     ransac_min_inliers: int = 4
     ransac_threshold_scale: float = 2.5
+
+    # агрегация ранга:
+    #   "rankme"    — энтропийная формула (значение от 1 до D, обратно совместимо)
+    #   "hard_rank" — количество сингулярных значений выше порога hard_rank_threshold
+    rank_aggregation: str = "rankme"
+    hard_rank_threshold: float = 1e-2
 
 
 def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> MetricSpec:
@@ -504,6 +729,11 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     ransac_sample_frac = 0.5
     ransac_min_inliers = 4
     ransac_threshold_scale = 2.5
+    # Параметры агрегации ранга (новые, с обратной совместимостью по умолчанию).
+    rank_aggregation = "rankme"
+    hard_rank_threshold = 1e-2
+    local_id_estimator = "MLE"
+    local_id_n_neighbors = 100
     if isinstance(meta, dict):
         try:
             eps_scale = float(meta.get("eps_scale", eps_scale))
@@ -533,10 +763,59 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             )
         except Exception:
             pass
+        rank_aggregation = str(meta.get("rank_aggregation", rank_aggregation))
+        try:
+            hard_rank_threshold = float(
+                meta.get("hard_rank_threshold", hard_rank_threshold)
+            )
+        except Exception:
+            pass
+        local_id_estimator = str(
+            meta.get("estimator", meta.get("local_id_estimator", local_id_estimator))
+        )
+        try:
+            local_id_n_neighbors = int(
+                meta.get(
+                    "n_neighbors",
+                    meta.get("local_id_n_neighbors", local_id_n_neighbors),
+                )
+            )
+        except Exception:
+            pass
 
     # Новый канонический путь: строим спецификацию из meta, а имя используем как label.
     variant = str(meta.get("variant", "")) if isinstance(meta, dict) else ""
     if variant:
+        if variant in {
+            "local_id_diff_knn",
+            "local_id_diff_knn_antisym",
+            "local_id_diff_knn_sym",
+        }:
+            return MetricSpec(
+                name=name,
+                kind="local_id_diff",
+                pair_agg=pair_agg,
+                k=int(meta.get("k", 10)),
+                n_centers=n_centers,
+                local_id_estimator=local_id_estimator,
+                local_id_n_neighbors=local_id_n_neighbors,
+            )
+
+        if variant in {
+            "local_id_diff_epsilon",
+            "local_id_diff_epsilon_antisym",
+            "local_id_diff_epsilon_sym",
+        }:
+            return MetricSpec(
+                name=name,
+                kind="local_id_diff",
+                pair_agg=pair_agg,
+                eps_percentile=int(meta.get("eps_percentile")),
+                n_centers=n_centers,
+                local_id_estimator=local_id_estimator,
+                local_id_n_neighbors=local_id_n_neighbors,
+            )
+
         if variant in {"linear_knn", "linear_knn_antisym", "linear_knn_sym"}:
             k = int(meta.get("k", 10))
             return MetricSpec(
@@ -545,6 +824,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 pair_agg=pair_agg,
                 k=k,
                 n_centers=n_centers,
+                rank_aggregation=rank_aggregation,
+                hard_rank_threshold=hard_rank_threshold,
             )
 
         if variant in {"linear_epsilon_antisym", "linear_epsilon_sym"}:
@@ -560,6 +841,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 ransac_sample_frac=ransac_sample_frac,
                 ransac_min_inliers=ransac_min_inliers,
                 ransac_threshold_scale=ransac_threshold_scale,
+                rank_aggregation=rank_aggregation,
+                hard_rank_threshold=hard_rank_threshold,
             )
 
         if variant in {"weighted_epsilon_antisym", "weighted_epsilon_sym"}:
@@ -576,6 +859,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 ransac_sample_frac=ransac_sample_frac,
                 ransac_min_inliers=ransac_min_inliers,
                 ransac_threshold_scale=ransac_threshold_scale,
+                rank_aggregation=rank_aggregation,
+                hard_rank_threshold=hard_rank_threshold,
             )
 
         if variant in {"weighted_epsilon_ransac_antisym", "weighted_epsilon_ransac_sym"}:
@@ -592,6 +877,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 ransac_sample_frac=ransac_sample_frac,
                 ransac_min_inliers=ransac_min_inliers,
                 ransac_threshold_scale=ransac_threshold_scale,
+                rank_aggregation=rank_aggregation,
+                hard_rank_threshold=hard_rank_threshold,
             )
 
         if variant in {"multiscale_knn", "multiscale_knn_sym"}:
@@ -604,6 +891,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 k_list=k_list,
                 aggregator=agg,
                 n_centers=n_centers,
+                rank_aggregation=rank_aggregation,
+                hard_rank_threshold=hard_rank_threshold,
             )
 
         if variant in {"rff_knn", "rff_knn_sym"}:
@@ -620,6 +909,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 rff_n_features=rff_n_features,
                 rff_gamma=rff_gamma,
                 rff_seed=rff_seed,
+                rank_aggregation=rank_aggregation,
+                hard_rank_threshold=hard_rank_threshold,
             )
 
     lower = name.lower()
@@ -633,6 +924,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             pair_agg="directed",
             k=int(m.group(1)),
             n_centers=n_centers,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     m = re.fullmatch(r"lin_k(\d+)(_antisym|_sym)?", lower)
@@ -644,6 +937,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             pair_agg=pair_agg_short,
             k=int(m.group(1)),
             n_centers=n_centers,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     m = re.fullmatch(r"lin_eps_(\d+)(_antisym|_sym)?", lower)
@@ -661,12 +956,15 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             ransac_sample_frac=ransac_sample_frac,
             ransac_min_inliers=ransac_min_inliers,
             ransac_threshold_scale=ransac_threshold_scale,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
-    m = re.fullmatch(r"w_eps_(\d+)(_rsc)?(_antisym|_sym)?", lower)
+    m = re.fullmatch(r"w_eps_(\d+)(_rsc)?(_hr)?(_antisym|_sym)?", lower)
     if m:
-        pair_agg_short = "sym" if m.group(3) == "_sym" else "antisym"
+        pair_agg_short = "sym" if m.group(4) == "_sym" else "antisym"
         solver_short = "ransac" if m.group(2) else solver
+        rank_aggregation_short = "hard_rank" if m.group(3) else rank_aggregation
         return MetricSpec(
             name=name,
             kind="linear_eps",
@@ -680,6 +978,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             ransac_sample_frac=ransac_sample_frac,
             ransac_min_inliers=ransac_min_inliers,
             ransac_threshold_scale=ransac_threshold_scale,
+            rank_aggregation=rank_aggregation_short,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     if lower in {"multiscale_mean", "multiscale_mean_antisym", "multiscale_mean_sym"}:
@@ -690,6 +990,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             k_list=(5, 10, 20, 40),
             aggregator="mean",
             n_centers=n_centers,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     m = re.fullmatch(r"rff_k(\d+)(_antisym|_sym)?", lower)
@@ -700,6 +1002,42 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             pair_agg="sym" if m.group(2) == "_sym" else "antisym",
             k=int(m.group(1)),
             n_centers=n_centers,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
+        )
+
+    m = re.fullmatch(r"id_diff_k(\d+)_([a-z0-9]+)(_antisym|_sym)?", lower)
+    if m:
+        if m.group(3) == "_sym":
+            pair_agg_short = "sym"
+        elif m.group(3) == "_antisym":
+            pair_agg_short = "antisym"
+        else:
+            pair_agg_short = pair_agg
+        return MetricSpec(
+            name=name,
+            kind="local_id_diff",
+            pair_agg=pair_agg_short,
+            k=int(m.group(1)),
+            n_centers=n_centers,
+            local_id_estimator=m.group(2).upper(),
+        )
+
+    m = re.fullmatch(r"id_diff_eps(\d+)_([a-z0-9]+)(_antisym|_sym)?", lower)
+    if m:
+        if m.group(3) == "_sym":
+            pair_agg_short = "sym"
+        elif m.group(3) == "_antisym":
+            pair_agg_short = "antisym"
+        else:
+            pair_agg_short = pair_agg
+        return MetricSpec(
+            name=name,
+            kind="local_id_diff",
+            pair_agg=pair_agg_short,
+            eps_percentile=int(m.group(1)),
+            n_centers=n_centers,
+            local_id_estimator=m.group(2).upper(),
         )
 
     # linear knn
@@ -707,7 +1045,13 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     if m:
         k = int(m.group(1))
         return MetricSpec(
-            name=name, kind="linear_knn", pair_agg=pair_agg, k=k, n_centers=n_centers
+            name=name,
+            kind="linear_knn",
+            pair_agg=pair_agg,
+            k=k,
+            n_centers=n_centers,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     # weighted epsilon via sigma percentile, optionally with RANSAC
@@ -740,6 +1084,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             ransac_sample_frac=ransac_sample_frac,
             ransac_min_inliers=ransac_min_inliers,
             ransac_threshold_scale=ransac_threshold_scale,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     # linear epsilon
@@ -758,6 +1104,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             ransac_sample_frac=ransac_sample_frac,
             ransac_min_inliers=ransac_min_inliers,
             ransac_threshold_scale=ransac_threshold_scale,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     # multiscale knn
@@ -780,6 +1128,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             k_list=k_list,
             aggregator=agg,
             n_centers=n_centers,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     # rff knn
@@ -803,6 +1153,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             rff_n_features=rff_n_features,
             rff_gamma=rff_gamma,
             rff_seed=rff_seed,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
         )
 
     raise ValueError(f"Не удалось восстановить спецификацию метрики по имени: {name}")
@@ -815,6 +1167,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
 
 @dataclass
 class NeighborCache:
+    center_indices: np.ndarray  # (C,) индексы центральных точек в исходной выборке
     centers: np.ndarray  # (C, D)
     knn: Dict[int, np.ndarray]  # k -> (C, k) индексы
     knn_distances: Dict[int, np.ndarray]  # k -> (C, k) расстояния
@@ -837,6 +1190,7 @@ def _build_neighbor_cache(
     X: np.ndarray,
     spec: MetricSpec,
     seed: int = 42,
+    center_indices: Optional[np.ndarray] = None,
 ) -> NeighborCache:
     """
     Предвычисляет:
@@ -851,8 +1205,15 @@ def _build_neighbor_cache(
     Xn = _zscore_rows(X)
 
     # Центры.
-    C = min(spec.n_centers, N)
-    centers_idx = rng.choice(N, size=C, replace=False)
+    if center_indices is None:
+        C = min(spec.n_centers, N)
+        centers_idx = rng.choice(N, size=C, replace=False)
+    else:
+        centers_idx = np.asarray(center_indices, dtype=np.int32).reshape(-1)
+        if centers_idx.size == 0:
+            raise ValueError("center_indices пусты")
+        if np.any(centers_idx < 0) or np.any(centers_idx >= N):
+            raise ValueError("center_indices выходят за допустимые границы")
     centers = Xn[centers_idx]
 
     knn: Dict[int, np.ndarray] = {}
@@ -865,6 +1226,8 @@ def _build_neighbor_cache(
     # Какие k нам нужны.
     ks: List[int] = []
     if spec.kind in {"linear_knn", "rff_knn"} and spec.k is not None:
+        ks.append(spec.k)
+    if spec.kind == "local_id_diff" and spec.k is not None:
         ks.append(spec.k)
     if spec.kind == "multiscale_knn" and spec.k_list is not None:
         ks.extend(list(spec.k_list))
@@ -888,7 +1251,9 @@ def _build_neighbor_cache(
             knn_distances[k] = D[row, nn[:, :k]]
 
     # eps-окрестность:
-    if spec.kind == "linear_eps":
+    if spec.kind in {"linear_eps", "local_id_diff"} and (
+        spec.eps_percentile is not None or spec.sigma_percentile is not None
+    ):
         percentile = (
             spec.sigma_percentile
             if spec.sigma_percentile is not None
@@ -897,7 +1262,7 @@ def _build_neighbor_cache(
     else:
         percentile = None
 
-    if spec.kind == "linear_eps" and percentile is not None:
+    if percentile is not None:
         # Оцениваем характерный масштаб по подвыборке попарных расстояний.
         sub_n = min(4000, N)
         sub_idx = rng.choice(N, size=sub_n, replace=False)
@@ -933,6 +1298,7 @@ def _build_neighbor_cache(
             eps_distances[p] = eps_dist_arr
 
     return NeighborCache(
+        center_indices=centers_idx.astype(np.int32),
         centers=centers,
         knn=knn,
         knn_distances=knn_distances,
@@ -953,8 +1319,10 @@ def _build_neighbor_cache(
 @dataclass
 class DirectedArtifacts:
     singular_values: List[np.ndarray]  # список (d,) — по одному на центр
-    residuals: List[float]  # невязка по каждому центру
-    ranks: List[int]  # жёсткий ранг M по каждому центру
+    residuals: List[float]  # legacy-невязка по каждому центру
+    relative_residuals: List[float]  # относительная ошибка по каждому центру
+    ranks: List[int]  # legacy hard-rank M по каждому центру
+    metric_ranks: List[float]  # ранг в той же агрегации, что и итоговая метрика
     neighbor_sizes: List[int]  # число точек в окрестности по каждому центру
     neighbor_distances: List[np.ndarray]  # расстояния до точек окрестности
     sigma_values: List[float]  # sigma по каждому центру (если применимо)
@@ -963,6 +1331,38 @@ class DirectedArtifacts:
     inlier_masks: List[np.ndarray]  # маска инлайеров в robust-solver
     inlier_counts: List[int]  # число инлайеров
     inlier_fracs: List[float]  # доля инлайеров
+    local_id_x: List[float]  # локальная ID в X по центрам (если применимо)
+    local_id_y: List[float]  # локальная ID в Y по центрам (если применимо)
+
+
+def _compute_local_intrinsic_dims_for_pair(
+    spec: MetricSpec,
+    cache_x: NeighborCache,
+    dims_x_all: np.ndarray,
+    dims_y_all: np.ndarray,
+    n_neighbors_eff: int,
+) -> LocalIDArtifacts:
+    """
+    Независимо оценивает локальную размерность в пространствах X и Y
+    на согласованных центрах.
+    """
+    dims_x: List[float] = []
+    dims_y: List[float] = []
+    sizes_x: List[int] = []
+    sizes_y: List[int] = []
+
+    for center_idx in _iter_metric_center_indices(cache_x, spec):
+        dims_x.append(float(dims_x_all[int(center_idx)]))
+        dims_y.append(float(dims_y_all[int(center_idx)]))
+        sizes_x.append(int(n_neighbors_eff))
+        sizes_y.append(int(n_neighbors_eff))
+
+    return LocalIDArtifacts(
+        intrinsic_dims_x=dims_x,
+        intrinsic_dims_y=dims_y,
+        neighbor_sizes_x=sizes_x,
+        neighbor_sizes_y=sizes_y,
+    )
 
 
 def _metric_directed_for_pair(
@@ -971,19 +1371,148 @@ def _metric_directed_for_pair(
     Y: np.ndarray,
     cache_X: NeighborCache,
     seed: int = 42,
+    dims_x: Optional[np.ndarray] = None,
+    dims_y: Optional[np.ndarray] = None,
+    X_local_id_features: Optional[np.ndarray] = None,
+    Y_local_id_features: Optional[np.ndarray] = None,
 ) -> Tuple[float, DirectedArtifacts]:
     """
     Вычисляет направленную m(X->Y) как среднее по центрам:
       - выбираем окрестность в X вокруг каждого центра (kNN или eps)
       - берём соответствующие строки в Y (те же индексы)
-      - решаем локальное линейное отображение и считаем RankMe по сингулярным значениям
+      - решаем локальное линейное отображение и считаем ранг по сингулярным значениям
 
-    Дополнительно собирает DiagnosticData для каждого центра:
+    Агрегация ранга определяется spec.rank_aggregation:
+      "rankme"    — энтропийная формула RankMe
+      "hard_rank" — количество сингулярных значений выше spec.hard_rank_threshold
+
+    Дополнительно собирает DirectedArtifacts для каждого центра:
       - сингулярные значения M
-      - residual ||Xc @ M - Yc||_F
-      - жёсткий ранг M
+      - legacy residual ||(Xc-xc) @ M - (Yc-yc)||_F
+      - relative residual по локальным отклонениям Y - yc
+      - legacy hard-rank M (по относительному порогу, для совместимости)
+      - metric_rank: ранг в той же агрегации, что и итоговая метрика
     """
     rng = np.random.RandomState(seed)
+    center_indices = cache_X.center_indices
+
+    artifacts = DirectedArtifacts(
+        singular_values=[],
+        residuals=[],
+        relative_residuals=[],
+        ranks=[],
+        metric_ranks=[],
+        neighbor_sizes=[],
+        neighbor_distances=[],
+        sigma_values=[],
+        eps_values=[],
+        sample_weights=[],
+        inlier_masks=[],
+        inlier_counts=[],
+        inlier_fracs=[],
+        local_id_x=[],
+        local_id_y=[],
+    )
+
+    if spec.kind == "local_id_diff":
+        if X_local_id_features is None or Y_local_id_features is None:
+            raise ValueError(
+                "Для local_id_diff нужно передать X_local_id_features и Y_local_id_features."
+            )
+
+        vals = []
+        percentile_key = (
+            spec.sigma_percentile
+            if spec.sigma_percentile is not None
+            else spec.eps_percentile
+        )
+
+        def _append_center(
+            center_idx: int,
+            idxs: np.ndarray,
+            neighbor_size: int,
+            neighbor_dists: Optional[np.ndarray] = None,
+            sigma_value: float = float("nan"),
+            eps_value: float = float("nan"),
+        ) -> None:
+            idxs_arr = np.asarray(idxs, dtype=np.int32).reshape(-1)
+            center_pos_candidates = np.where(idxs_arr == int(center_idx))[0]
+            if center_pos_candidates.size == 0:
+                return
+            center_pos = int(center_pos_candidates[0])
+
+            id_x = _estimate_local_intrinsic_dim_at_center(
+                X_local_id_features[idxs_arr],
+                center_local_idx=center_pos,
+                estimator_name=spec.local_id_estimator,
+            )
+            id_y = _estimate_local_intrinsic_dim_at_center(
+                Y_local_id_features[idxs_arr],
+                center_local_idx=center_pos,
+                estimator_name=spec.local_id_estimator,
+            )
+            diff = float(id_x - id_y)
+            vals.append(diff)
+            artifacts.singular_values.append(np.zeros((0,), dtype=np.float32))
+            artifacts.residuals.append(float("nan"))
+            artifacts.relative_residuals.append(float("nan"))
+            artifacts.ranks.append(0)
+            artifacts.metric_ranks.append(diff)
+            artifacts.local_id_x.append(id_x)
+            artifacts.local_id_y.append(id_y)
+            artifacts.neighbor_sizes.append(int(neighbor_size))
+            if neighbor_dists is None:
+                artifacts.neighbor_distances.append(np.zeros((0,), dtype=np.float32))
+            else:
+                artifacts.neighbor_distances.append(
+                    np.asarray(neighbor_dists, dtype=np.float32)
+                )
+            artifacts.sigma_values.append(float(sigma_value))
+            artifacts.eps_values.append(float(eps_value))
+            artifacts.sample_weights.append(np.ones((0,), dtype=np.float32))
+            artifacts.inlier_masks.append(np.zeros((0,), dtype=bool))
+            artifacts.inlier_counts.append(0)
+            artifacts.inlier_fracs.append(float("nan"))
+
+        if spec.k is not None:
+            nn = cache_X.knn[spec.k]
+            nn_dist = cache_X.knn_distances[spec.k]
+            for center_idx, idxs, dists in zip(center_indices, nn, nn_dist):
+                _append_center(
+                    int(center_idx),
+                    idxs=idxs,
+                    neighbor_size=int(spec.k),
+                    neighbor_dists=dists,
+                )
+        elif percentile_key is not None:
+            neigh = cache_X.eps[percentile_key]
+            neigh_distances = cache_X.eps_distances[percentile_key]
+            sigma_val = cache_X.sigma_values.get(percentile_key, float("nan"))
+            eps_val = cache_X.eps_values.get(percentile_key, float("nan"))
+            for center_idx, idxs, dists in zip(center_indices, neigh, neigh_distances):
+                if idxs.size < 2:
+                    continue
+                _append_center(
+                    int(center_idx),
+                    idxs=idxs,
+                    neighbor_size=int(idxs.size),
+                    neighbor_dists=dists,
+                    sigma_value=sigma_val,
+                    eps_value=eps_val,
+                )
+        else:
+            for center_idx in center_indices:
+                _append_center(
+                    int(center_idx),
+                    idxs=np.asarray([int(center_idx)], dtype=np.int32),
+                    neighbor_size=1,
+                )
+
+        if not vals or not np.any(np.isfinite(vals)):
+            return float("nan"), artifacts
+        return float(np.nanmean(np.asarray(vals, dtype=np.float32))), artifacts
+
+    vals = []
     Xn = cache_X.X_norm
     Yn = _zscore_rows(Y)
 
@@ -1001,27 +1530,15 @@ def _metric_directed_for_pair(
             seed=spec.rff_seed,
         )
 
-    vals = []
-    artifacts = DirectedArtifacts(
-        singular_values=[],
-        residuals=[],
-        ranks=[],
-        neighbor_sizes=[],
-        neighbor_distances=[],
-        sigma_values=[],
-        eps_values=[],
-        sample_weights=[],
-        inlier_masks=[],
-        inlier_counts=[],
-        inlier_fracs=[],
-    )
-
-    # Порог для жёсткого ранга (относительный, от максимального сингулярного значения).
+    # Порог для жёсткого ранга в артефактах (относительный, от максимального сингулярного значения).
+    # Используется только для поля ranks в артефактах — не зависит от rank_aggregation.
     rank_tol_ratio = 1e-10
 
     def _accumulate(
         Xc: np.ndarray,
         Yc: np.ndarray,
+        X_center: np.ndarray,
+        Y_center: np.ndarray,
         neighbor_distances: Optional[np.ndarray] = None,
         sample_weights: Optional[np.ndarray] = None,
         sigma_value: float = float("nan"),
@@ -1031,6 +1548,8 @@ def _metric_directed_for_pair(
         solve_result = _solve_local_linear_map_and_rank(
             Xc,
             Yc,
+            X_center=X_center,
+            Y_center=Y_center,
             sample_weights=sample_weights,
             solver=spec.solver,
             rng=rng,
@@ -1038,16 +1557,25 @@ def _metric_directed_for_pair(
             ransac_sample_frac=spec.ransac_sample_frac,
             ransac_min_inliers=spec.ransac_min_inliers,
             ransac_threshold_scale=spec.ransac_threshold_scale,
+            rank_aggregation=spec.rank_aggregation,
+            hard_rank_threshold=spec.hard_rank_threshold,
         )
-        rankme_val = solve_result.rankme_value
+        rank_val = solve_result.rank_value
         s = solve_result.singular_values
-        residual = solve_result.residual
+        raw_residual = solve_result.raw_residual
+        relative_residual = solve_result.relative_residual
         inlier_mask = solve_result.inlier_mask
+
+        # Жёсткий ранг в артефактах считается по относительному порогу —
+        # независимо от rank_aggregation, чтобы диагностика была сопоставимой.
         tol = rank_tol_ratio * float(np.max(s)) if len(s) > 0 else 0.0
-        hard_rank = int(np.sum(s > tol))
+        hard_rank_val = int(np.sum(s > tol))
+
         artifacts.singular_values.append(s)
-        artifacts.residuals.append(residual)
-        artifacts.ranks.append(hard_rank)
+        artifacts.residuals.append(raw_residual)
+        artifacts.relative_residuals.append(relative_residual)
+        artifacts.ranks.append(hard_rank_val)
+        artifacts.metric_ranks.append(float(rank_val))
         artifacts.neighbor_sizes.append(int(Xc.shape[0]))
         if neighbor_distances is None:
             artifacts.neighbor_distances.append(
@@ -1069,16 +1597,24 @@ def _metric_directed_for_pair(
         artifacts.inlier_fracs.append(
             float(inlier_count / len(inlier_mask)) if len(inlier_mask) > 0 else float("nan")
         )
-        return rankme_val
+        return rank_val
 
     if spec.kind in {"linear_knn", "rff_knn"}:
         assert spec.k is not None
         nn = cache_X.knn[spec.k]
         nn_dist = cache_X.knn_distances[spec.k]
-        for idxs, dists in zip(nn, nn_dist):
+        for center_idx, idxs, dists in zip(center_indices, nn, nn_dist):
             Xc = Xn[idxs]
             Yc = Yn[idxs]
-            vals.append(_accumulate(Xc, Yc, neighbor_distances=dists))
+            vals.append(
+                _accumulate(
+                    Xc,
+                    Yc,
+                    X_center=Xn[int(center_idx)],
+                    Y_center=Yn[int(center_idx)],
+                    neighbor_distances=dists,
+                )
+            )
 
     elif spec.kind == "multiscale_knn":
         assert spec.k_list is not None
@@ -1087,10 +1623,18 @@ def _metric_directed_for_pair(
             nn = cache_X.knn[int(k)]
             nn_dist = cache_X.knn_distances[int(k)]
             tmp = []
-            for idxs, dists in zip(nn, nn_dist):
+            for center_idx, idxs, dists in zip(center_indices, nn, nn_dist):
                 Xc = Xn[idxs]
                 Yc = Yn[idxs]
-                tmp.append(_accumulate(Xc, Yc, neighbor_distances=dists))
+                tmp.append(
+                    _accumulate(
+                        Xc,
+                        Yc,
+                        X_center=Xn[int(center_idx)],
+                        Y_center=Yn[int(center_idx)],
+                        neighbor_distances=dists,
+                    )
+                )
             per_scale.append(np.asarray(tmp, dtype=np.float32))
         # Агрегируем масштабы.
         stack = np.stack(per_scale, axis=0)  # (S, C)
@@ -1118,7 +1662,7 @@ def _metric_directed_for_pair(
         sigma_val = max(float(sigma_val), 1e-8)
         eps_val = cache_X.eps_values.get(percentile_key, float("nan"))
 
-        for idxs, dists in zip(neigh, neigh_distances):
+        for center_idx, idxs, dists in zip(center_indices, neigh, neigh_distances):
             if idxs.size < 2:
                 continue
             Xc = Xn[idxs]
@@ -1131,6 +1675,8 @@ def _metric_directed_for_pair(
                 _accumulate(
                     Xc,
                     Yc,
+                    X_center=Xn[int(center_idx)],
+                    Y_center=Yn[int(center_idx)],
                     neighbor_distances=dists,
                     sample_weights=sample_weights,
                     sigma_value=sigma_val,
@@ -1155,6 +1701,10 @@ def _artifacts_path(out_dir: str, metric_name: str) -> str:
     return os.path.join(out_dir, "artifacts", f"{metric_name}_artifacts.npz")
 
 
+def _local_id_artifacts_path(out_dir: str, metric_name: str) -> str:
+    return os.path.join(out_dir, "artifacts", f"{metric_name}_local_id_artifacts.npz")
+
+
 def _load_artifacts(path: str) -> Dict[str, Any]:
     """
     Загружает существующий файл артефактов в словарь {ключ -> массив}.
@@ -1172,16 +1722,260 @@ def _artifact_key_exists(artifacts: Dict[str, Any], model_i: str, model_j: str) 
     return key in artifacts
 
 
+def _local_id_artifact_key_exists(
+    artifacts: Dict[str, Any],
+    model_i: str,
+    model_j: str,
+    center_indices: Optional[np.ndarray] = None,
+) -> bool:
+    key = f"{model_i}_to_{model_j}/intrinsic_dims_x"
+    if key not in artifacts:
+        return False
+    if center_indices is None:
+        return True
+    centers_key = f"{model_i}_to_{model_j}/center_indices"
+    if centers_key not in artifacts:
+        return False
+    saved = np.asarray(artifacts[centers_key], dtype=np.int32).reshape(-1)
+    current = np.asarray(center_indices, dtype=np.int32).reshape(-1)
+    return saved.shape == current.shape and np.array_equal(saved, current)
+
+
+def _load_diagnostics_meta_from_artifacts(artifacts: Dict[str, Any]) -> Dict[str, Any]:
+    raw = artifacts.get("diagnostics_meta_json", None)
+    if raw is None:
+        return {}
+    if hasattr(raw, "item"):
+        raw = raw.item()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _artifacts_match_current_geometry(artifacts: Dict[str, Any]) -> bool:
+    if not artifacts:
+        return True
+    meta = _load_diagnostics_meta_from_artifacts(artifacts)
+    return meta.get("local_geometry_mode") == _LOCAL_GEOMETRY_MODE
+
+
+def _build_local_id_meta(
+    estimator_name: str,
+    n_neighbors: int,
+    method: str = "skdim_fit_transform_pw",
+) -> Dict[str, Any]:
+    meta = {
+        "schema_version": 1,
+        "local_id_method": str(method),
+        "local_id_estimator": str(estimator_name),
+        "local_id_n_neighbors": int(n_neighbors),
+    }
+    meta.update(_local_geometry_meta())
+    return meta
+
+
+def _local_id_artifacts_match_current_config(
+    artifacts: Dict[str, Any], estimator_name: str, n_neighbors: int
+) -> bool:
+    if not artifacts:
+        return True
+    raw = artifacts.get("local_id_meta_json", None)
+    if raw is None:
+        return False
+    if hasattr(raw, "item"):
+        raw = raw.item()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    try:
+        meta = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return False
+    if not isinstance(meta, dict):
+        return False
+    method = str(meta.get("local_id_method", ""))
+    if method == "metric_local_neighborhood":
+        return meta.get("local_geometry_mode") == _LOCAL_GEOMETRY_MODE
+    return (
+        meta.get("local_geometry_mode") == _LOCAL_GEOMETRY_MODE
+        and method == "skdim_fit_transform_pw"
+        and str(meta.get("local_id_estimator", "")) == str(estimator_name)
+        and int(meta.get("local_id_n_neighbors", -1)) == int(n_neighbors)
+    )
+
+
+def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
+    """
+    Формирует словарь метаданных для диагностики, который сохраняется в файл артефактов.
+
+    Скрипт run_diagnose_local_map.py читает эти данные и использует их для:
+      - подписей осей и заголовков графиков;
+      - подписей в текстовых отчётах;
+      - определения смысла поля residuals.
+
+    Если поменялась формула residual или агрегация ранга — достаточно обновить этот
+    словарь здесь; в скрипт диагностики лезть не нужно.
+    """
+    if spec.kind == "local_id_diff":
+        if spec.k is not None:
+            neighborhood_desc = f"на той же kNN-окрестности (k={spec.k})"
+        elif spec.eps_percentile is not None:
+            neighborhood_desc = (
+                f"на той же epsilon-окрестности (eps_percentile={spec.eps_percentile})"
+            )
+        else:
+            neighborhood_desc = "на локальной окрестности метрики"
+        ranks_axis_label = "Локальная размерность X - локальная размерность Y"
+        ranks_short_label = "Local ID diff"
+        ranks_description = (
+            "Разность локальных intrinsic dimensions, оценённых независимо в пространствах X и Y "
+            f"методом {spec.local_id_estimator} {neighborhood_desc}."
+        )
+        residual_axis_label = "Residual (не применяется)"
+        residual_short_label = "Residual (N/A)"
+        residual_summary_label = "Residual (не применяется)"
+        residual_description = (
+            "Для метрики local_id_diff локальное линейное отображение не решается, "
+            "поэтому residuals сохраняются как NaN только для совместимости с форматом артефактов."
+        )
+    else:
+        rank_agg = spec.rank_aggregation
+        if rank_agg == "hard_rank":
+            ranks_axis_label = (
+                f"Ранг отображения M (кол-во сингулярных значений > {spec.hard_rank_threshold:.0e})"
+            )
+            ranks_short_label = f"Hard rank (thr={spec.hard_rank_threshold:.0e})"
+            ranks_description = (
+                f"Количество сингулярных значений матрицы M, превышающих порог "
+                f"{spec.hard_rank_threshold:.0e}. Значение напрямую интерпретируется как ранг."
+            )
+        else:
+            ranks_axis_label = "Ранг отображения M (RankMe, эффективное число измерений)"
+            ranks_short_label = "RankMe"
+            ranks_description = (
+                "Энтропийная оценка ранга (RankMe): exp(-sum(p_k * log(p_k))), "
+                "p_k = s_k / sum(s). Значение от 1 до D."
+            )
+
+        if _LOCAL_GEOMETRY_MODE == "absolute_coords_v0":
+            residual_axis_label = (
+                r"Относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
+            )
+            residual_short_label = "Rel. residual"
+            residual_summary_label = (
+                r"Средняя относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
+            )
+            residual_description = (
+                "Относительная ошибка в legacy-геометрии без центрирования: "
+                "mean(|Xc @ M - Yc|) / mean(|Yc|). "
+                "Показывает, на сколько процентов линейное отображение искажает абсолютные координаты Y."
+            )
+        else:
+            residual_axis_label = (
+                r"Относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
+            )
+            residual_short_label = "Rel. residual"
+            residual_summary_label = (
+                r"Средняя относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
+            )
+            residual_description = (
+                "Относительная ошибка по локальным приращениям Y: "
+                "mean(|(Xc - xc) @ M - (Yc - yc)|) / mean(|Yc - yc|). "
+                "Показывает, на сколько процентов линейное отображение искажает отклонения новых координат от центра."
+            )
+
+    meta = {
+        "schema_version": 5,
+        "rank_aggregation": spec.rank_aggregation,
+        "hard_rank_threshold": spec.hard_rank_threshold,
+        "preferred_rank_field": "metric_ranks",
+        "legacy_rank_field": "ranks",
+        "ranks_axis_label": ranks_axis_label,
+        "ranks_short_label": ranks_short_label,
+        "ranks_description": ranks_description,
+        "preferred_residual_field": "relative_residuals",
+        "legacy_residual_field": "residuals",
+        "residual_axis_label": residual_axis_label,
+        "residual_short_label": residual_short_label,
+        "residual_summary_label": residual_summary_label,
+        "residual_description": residual_description,
+    }
+    meta.update(_local_geometry_meta())
+    return meta
+
+
+def _metric_from_saved_singular_values(
+    singular_values: np.ndarray,
+    rank_aggregation: str,
+    hard_rank_threshold: float,
+) -> Tuple[float, np.ndarray]:
+    """
+    Переагрегирует уже сохранённые сингулярные значения без пересчёта локальных M.
+    Возвращает:
+      - среднее значение метрики по центрам
+      - per-center значения metric_ranks
+    """
+    per_center = []
+    for sv in singular_values:
+        arr = np.asarray(sv, dtype=np.float64).reshape(-1)
+        per_center.append(_aggregate_rank(arr, rank_aggregation, hard_rank_threshold))
+    if not per_center:
+        return float("nan"), np.array([], dtype=np.float32)
+    metric_ranks = np.asarray(per_center, dtype=np.float32)
+    return float(np.mean(metric_ranks)), metric_ranks
+
+
+def _maybe_reaggregate_direction_from_artifacts(
+    artifacts: Dict[str, Any],
+    model_i: str,
+    model_j: str,
+    spec: "MetricSpec",
+) -> Optional[Tuple[float, np.ndarray]]:
+    """
+    Если для направления уже сохранены singular_values, переагрегирует значение метрики
+    по ним. Это позволяет менять hard-rank threshold без нового решения локальных задач.
+    """
+    if not _artifacts_match_current_geometry(artifacts):
+        return None
+    prefix = f"{model_i}_to_{model_j}"
+    if spec.kind == "local_id_diff":
+        key = f"{prefix}/metric_ranks"
+        if key not in artifacts:
+            return None
+        metric_ranks = np.asarray(artifacts[key], dtype=np.float32).reshape(-1)
+        if metric_ranks.size == 0 or not np.any(np.isfinite(metric_ranks)):
+            return float("nan"), metric_ranks
+        return float(np.nanmean(metric_ranks)), metric_ranks
+    key = f"{prefix}/singular_values"
+    if key not in artifacts:
+        return None
+    return _metric_from_saved_singular_values(
+        artifacts[key],
+        rank_aggregation=spec.rank_aggregation,
+        hard_rank_threshold=spec.hard_rank_threshold,
+    )
+
+
 def _save_artifacts(
     path: str,
     artifacts: Dict[str, Any],
     model_i: str,
     model_j: str,
-    directed: DirectedArtifacts,
+    directed: "DirectedArtifacts",
+    spec: Optional["MetricSpec"] = None,
 ) -> None:
     """
     Дописывает артефакты направления model_i -> model_j в общий файл метрики.
     Существующие ключи не трогает — только добавляет новые.
+
+    Если передан spec, при первом вызове записывает в файл поле diagnostics_meta_json —
+    словарь с описанием смысла полей residuals и ranks (подписи осей, формулы и т.п.).
+    Скрипт run_diagnose_local_map.py читает эти данные и не держит подписи в хардкоде.
     """
     prefix = f"{model_i}_to_{model_j}"
 
@@ -1200,7 +1994,13 @@ def _save_artifacts(
 
     artifacts[f"{prefix}/singular_values"] = sv_array
     artifacts[f"{prefix}/residuals"] = np.array(directed.residuals, dtype=np.float32)
+    artifacts[f"{prefix}/relative_residuals"] = np.array(
+        directed.relative_residuals, dtype=np.float32
+    )
     artifacts[f"{prefix}/ranks"] = np.array(directed.ranks, dtype=np.int32)
+    artifacts[f"{prefix}/metric_ranks"] = np.array(
+        directed.metric_ranks, dtype=np.float32
+    )
     artifacts[f"{prefix}/neighbor_sizes"] = np.array(
         directed.neighbor_sizes, dtype=np.int32
     )
@@ -1217,7 +2017,49 @@ def _save_artifacts(
     artifacts[f"{prefix}/inlier_fracs"] = np.array(
         directed.inlier_fracs, dtype=np.float32
     )
+    if directed.local_id_x:
+        artifacts[f"{prefix}/local_id_x"] = np.array(directed.local_id_x, dtype=np.float32)
+    if directed.local_id_y:
+        artifacts[f"{prefix}/local_id_y"] = np.array(directed.local_id_y, dtype=np.float32)
 
+    # Записываем diagnostics_meta_json один раз при первом вызове (когда ключа ещё нет).
+    # Содержит описание полей residuals и ranks: формулы, подписи осей, единицы измерения.
+    # run_diagnose_local_map.py читает эти данные — менять подписи достаточно здесь.
+    if spec is not None and "diagnostics_meta_json" not in artifacts:
+        diag_meta = _build_diagnostics_meta(spec)
+        artifacts["diagnostics_meta_json"] = json.dumps(diag_meta, ensure_ascii=False)
+
+    np.savez_compressed(path, **artifacts)
+
+
+def _save_local_id_artifacts(
+    path: str,
+    artifacts: Dict[str, Any],
+    model_i: str,
+    model_j: str,
+    local_id: LocalIDArtifacts,
+    center_indices: np.ndarray,
+    estimator_name: str,
+    n_neighbors: int,
+    method: str = "skdim_fit_transform_pw",
+) -> None:
+    prefix = f"{model_i}_to_{model_j}"
+    artifacts[f"{prefix}/intrinsic_dims_x"] = np.asarray(
+        local_id.intrinsic_dims_x, dtype=np.float32
+    )
+    artifacts[f"{prefix}/intrinsic_dims_y"] = np.asarray(
+        local_id.intrinsic_dims_y, dtype=np.float32
+    )
+    artifacts[f"{prefix}/neighbor_sizes_x"] = np.asarray(
+        local_id.neighbor_sizes_x, dtype=np.int32
+    )
+    artifacts[f"{prefix}/neighbor_sizes_y"] = np.asarray(
+        local_id.neighbor_sizes_y, dtype=np.int32
+    )
+    artifacts[f"{prefix}/center_indices"] = np.asarray(center_indices, dtype=np.int32)
+    artifacts["local_id_meta_json"] = json.dumps(
+        _build_local_id_meta(estimator_name, n_neighbors, method=method), ensure_ascii=False
+    )
     np.savez_compressed(path, **artifacts)
 
 
@@ -1264,21 +2106,31 @@ def _ensure_meta_compatible(meta_old: Dict[str, Any], new_spec: MetricSpec) -> N
     """
     В режиме инкрементного вычисления: запрещаем расширение, если metric_spec отличается.
     """
-    try:
-        old_spec = meta_old.get("metric_spec", None)
-        if old_spec is None:
-            return
-        if old_spec != asdict(new_spec):
+    old_spec = meta_old.get("metric_spec", None)
+    if old_spec is not None:
+        old_spec_cmp = dict(old_spec) if isinstance(old_spec, dict) else old_spec
+        new_spec_cmp = asdict(new_spec)
+        if isinstance(old_spec_cmp, dict) and old_spec_cmp.get("kind") != "local_id_diff":
+            old_spec_cmp.pop("local_id_estimator", None)
+            old_spec_cmp.pop("local_id_n_neighbors", None)
+            new_spec_cmp.pop("local_id_estimator", None)
+            new_spec_cmp.pop("local_id_n_neighbors", None)
+        if old_spec_cmp != new_spec_cmp:
             raise RuntimeError(
                 "Инкрементальный режим: у существующего файла метрики другой metric_spec.\n"
                 f"Существующий: {old_spec}\n"
                 f"Новый:        {asdict(new_spec)}\n"
                 "Расширение отменено, чтобы не смешивать несовместимые матрицы."
             )
-    except Exception:
-        # Если анализ метаданных неисправен, не надо сразу падать; всё же безопаснее продолжить?
-        # Мы выбираем быть строгими ТОЛЬКО тогда, когда можем надёжно сравнить данные.
-        return
+
+    old_geometry_mode = meta_old.get("local_geometry_mode", None)
+    if old_geometry_mode != _LOCAL_GEOMETRY_MODE:
+        raise RuntimeError(
+            "Инкрементальный режим: файл метрики был посчитан в другом режиме локальной геометрии.\n"
+            f"Существующий режим: {old_geometry_mode!r}\n"
+            f"Новый режим:        {_LOCAL_GEOMETRY_MODE!r}\n"
+            "Расширение отменено, чтобы не смешивать матрицы без центрирования и с центрированием."
+        )
 
 
 def _build_model_list_incremental(current: List[str], old: List[str]) -> List[str]:
@@ -1355,7 +2207,66 @@ def main():
             "Например: --models resnet50,vit_b_16"
         ),
     )
+    parser.add_argument(
+        "--hard_rank_threshold_override",
+        type=float,
+        default=float("nan"),
+        help=(
+            "Если задано и метрика использует hard-rank, переопределяет absolute threshold. "
+            "При наличии сохранённых singular_values значение метрики будет переагрегировано "
+            "без нового решения локальных задач."
+        ),
+    )
+    parser.add_argument(
+        "--compute_local_id_diagnostics",
+        action="store_true",
+        help=(
+            "Если флаг задан, независимо оценивает локальную intrinsic dimension "
+            "в пространствах X и Y и сохраняет её в sidecar-файл для диагностики."
+        ),
+    )
+    parser.add_argument(
+        "--local_id_n_neighbors",
+        "--local_id_min_neighbors",
+        dest="local_id_n_neighbors",
+        type=int,
+        default=100,
+        help=(
+            "Число соседей для skdim.id.<Estimator>().fit_transform_pw(...) "
+            "при оценке local intrinsic dimension."
+        ),
+    )
+    parser.add_argument(
+        "--local_id_estimator",
+        type=str,
+        default="MLE",
+        help="Имя локального оценивателя из skdim.id, например MLE, TLE или MOM.",
+    )
+    parser.add_argument(
+        "--local_geometry_mode",
+        type=str,
+        choices=list(_LOCAL_GEOMETRY_MODE_CHOICES),
+        default="centered_offsets_v1",
+        help=(
+            "Режим локальной геометрии для solve_local_linear_map. "
+            "'centered_offsets_v1' — текущий режим с центрированием; "
+            "'absolute_coords_v0' — legacy-режим без центрирования, как в exp01."
+        ),
+    )
+    parser.add_argument(
+        "--disable_centering",
+        action="store_true",
+        help=(
+            "Удобный alias для legacy-режима без центрирования. "
+            "Эквивалентно --local_geometry_mode absolute_coords_v0."
+        ),
+    )
     args = parser.parse_args()
+
+    global _LOCAL_GEOMETRY_MODE
+    if args.disable_centering:
+        args.local_geometry_mode = "absolute_coords_v0"
+    _LOCAL_GEOMETRY_MODE = str(args.local_geometry_mode)
 
     if not args.out_dir:
         if not args.experiment_dir:
@@ -1397,6 +2308,7 @@ def main():
     )
     for name in manifest_model_names:
         print(f"  * {name}")
+    print(f"\nРежим локальной геометрии: {_LOCAL_GEOMETRY_MODE}")
 
     cfgs = get_embedding_metric_configs()
 
@@ -1460,6 +2372,36 @@ def main():
             embeddings[m] = embeddings[m][idx]
         print(f"\nПодвыбраны строки: N={N0} -> {sample_size}")
 
+    # Local ID зависит только от самих эмбеддингов и глобальных CLI-параметров
+    # estimator/n_neighbors, а не от конкретной eps/k-конфигурации метрики.
+    # Поэтому кэш безопасно держать на уровне всего запуска и не пересчитывать
+    # одни и те же per-point оценки для w_eps_1 / w_eps_2 / w_eps_3 заново.
+    global_local_id_dims_by_model: Dict[Tuple[str, str, int], np.ndarray] = {}
+    prepared_local_id_features_by_model: Dict[str, np.ndarray] = {}
+
+    def get_local_id_features_for_model(model_name: str) -> np.ndarray:
+        if model_name not in prepared_local_id_features_by_model:
+            prepared_local_id_features_by_model[model_name] = _prepare_features_for_local_id(
+                embeddings[model_name], spec=None
+            )
+        return prepared_local_id_features_by_model[model_name]
+
+    def get_local_id_dims_for_model_global(
+        model_name: str,
+        estimator_name: str,
+        n_neighbors: int,
+    ) -> np.ndarray:
+        key = (model_name, str(estimator_name), int(n_neighbors))
+        if key not in global_local_id_dims_by_model:
+            X_local_id = get_local_id_features_for_model(model_name)
+            global_local_id_dims_by_model[key] = _estimate_local_intrinsic_dim_pw(
+                X_local_id,
+                estimator_name=estimator_name,
+                n_neighbors=n_neighbors,
+                n_jobs=1,
+            )
+        return global_local_id_dims_by_model[key]
+
     # Вычисление отдельно для каждой метрики.
     for name in chosen:
         cfg = cfgs[name]
@@ -1468,9 +2410,16 @@ def main():
             cfg.get("meta", {}) if isinstance(cfg, dict) else cfg,
             default_n_centers=200,
         )
+        if (
+            spec.rank_aggregation == "hard_rank"
+            and np.isfinite(args.hard_rank_threshold_override)
+            and args.hard_rank_threshold_override > 0.0
+        ):
+            spec = replace(spec, hard_rank_threshold=float(args.hard_rank_threshold_override))
 
         out_path = os.path.join(args.out_dir, f"{name}.npz")
         artifacts_path = _artifacts_path(args.out_dir, name)
+        local_id_artifacts_path = _local_id_artifacts_path(args.out_dir, name)
         os.makedirs(os.path.dirname(artifacts_path), exist_ok=True)
 
         # ------------------------------------------------------------
@@ -1535,6 +2484,32 @@ def main():
         # Загружаем существующие артефакты (или пустой словарь если файла нет).
         # Артефакты всегда синхронны с матрицей: если пара посчитана — артефакты есть.
         saved_artifacts = _load_artifacts(artifacts_path)
+        if saved_artifacts and not _artifacts_match_current_geometry(saved_artifacts):
+            print(
+                "[WARN] Найдены артефакты, посчитанные без текущего локального центрирования. "
+                "Они будут проигнорированы и перезаписаны."
+            )
+            saved_artifacts = {}
+
+        saved_local_id_artifacts = (
+            _load_artifacts(local_id_artifacts_path)
+            if args.compute_local_id_diagnostics
+            else {}
+        )
+        if (
+            args.compute_local_id_diagnostics
+            and saved_local_id_artifacts
+            and not _local_id_artifacts_match_current_config(
+                saved_local_id_artifacts,
+                args.local_id_estimator,
+                args.local_id_n_neighbors,
+            )
+        ):
+            print(
+                "[WARN] Найдены local-ID артефакты с несовместимой конфигурацией. "
+                "Они будут проигнорированы и перезаписаны."
+            )
+            saved_local_id_artifacts = {}
 
         # ============================================================
         # Вычисление значений
@@ -1542,6 +2517,155 @@ def main():
         # - antisym: out_matrix — антисимметричная A
         # - sym: out_matrix — симметричная sim
         # ============================================================
+
+        def _directed_metric(model_i: str, model_j: str) -> Tuple[float, Optional[DirectedArtifacts]]:
+            reused = _maybe_reaggregate_direction_from_artifacts(
+                saved_artifacts, model_i, model_j, spec
+            )
+            if reused is not None:
+                value, metric_ranks = reused
+                saved_artifacts[f"{model_i}_to_{model_j}/metric_ranks"] = np.array(
+                    metric_ranks, dtype=np.float32
+                )
+                return value, None
+
+            Xi_local = embeddings[model_i]
+            Yj_local = embeddings[model_j]
+            cache_i_local = get_cache_for_model_i(model_i)
+            dims_x_local = None
+            dims_y_local = None
+            Xi_local_id_features = None
+            Yj_local_id_features = None
+            if spec.kind == "local_id_diff":
+                Xi_local_id_features = get_local_id_features_for_model(model_i)
+                Yj_local_id_features = get_local_id_features_for_model(model_j)
+            return _metric_directed_for_pair(
+                spec,
+                Xi_local,
+                Yj_local,
+                cache_i_local,
+                seed=args.seed,
+                dims_x=dims_x_local,
+                dims_y=dims_y_local,
+                X_local_id_features=Xi_local_id_features,
+                Y_local_id_features=Yj_local_id_features,
+            )
+
+        def _ensure_local_id_for_direction(
+            model_i: str,
+            model_j: str,
+            directed_artifacts: Optional[DirectedArtifacts] = None,
+        ) -> None:
+            if not args.compute_local_id_diagnostics:
+                return
+            cache_x_local = get_cache_for_model_i(model_i)
+            center_indices_expected = np.asarray(
+                list(_iter_metric_center_indices(cache_x_local, spec)),
+                dtype=np.int32,
+            )
+            if _local_id_artifact_key_exists(
+                saved_local_id_artifacts,
+                model_i,
+                model_j,
+                center_indices=center_indices_expected,
+            ):
+                return
+            if (
+                spec.kind == "local_id_diff"
+                and directed_artifacts is not None
+                and directed_artifacts.local_id_x
+                and directed_artifacts.local_id_y
+            ):
+                local_id = LocalIDArtifacts(
+                    intrinsic_dims_x=[float(v) for v in directed_artifacts.local_id_x],
+                    intrinsic_dims_y=[float(v) for v in directed_artifacts.local_id_y],
+                    neighbor_sizes_x=[int(v) for v in directed_artifacts.neighbor_sizes],
+                    neighbor_sizes_y=[int(v) for v in directed_artifacts.neighbor_sizes],
+                )
+                _save_local_id_artifacts(
+                    local_id_artifacts_path,
+                    saved_local_id_artifacts,
+                    model_i,
+                    model_j,
+                    local_id,
+                    center_indices=center_indices_expected,
+                    estimator_name=spec.local_id_estimator,
+                    n_neighbors=0,
+                    method="metric_local_neighborhood",
+                )
+                return
+            if spec.kind == "local_id_diff":
+                prefix = f"{model_i}_to_{model_j}"
+                local_id_x_saved = saved_artifacts.get(f"{prefix}/local_id_x", None)
+                local_id_y_saved = saved_artifacts.get(f"{prefix}/local_id_y", None)
+                neighbor_sizes_saved = saved_artifacts.get(
+                    f"{prefix}/neighbor_sizes", None
+                )
+                if (
+                    local_id_x_saved is not None
+                    and local_id_y_saved is not None
+                    and neighbor_sizes_saved is not None
+                ):
+                    local_id = LocalIDArtifacts(
+                        intrinsic_dims_x=np.asarray(
+                            local_id_x_saved, dtype=np.float32
+                        ).reshape(-1).tolist(),
+                        intrinsic_dims_y=np.asarray(
+                            local_id_y_saved, dtype=np.float32
+                        ).reshape(-1).tolist(),
+                        neighbor_sizes_x=np.asarray(
+                            neighbor_sizes_saved, dtype=np.int32
+                        ).reshape(-1).tolist(),
+                        neighbor_sizes_y=np.asarray(
+                            neighbor_sizes_saved, dtype=np.int32
+                        ).reshape(-1).tolist(),
+                    )
+                    _save_local_id_artifacts(
+                        local_id_artifacts_path,
+                        saved_local_id_artifacts,
+                        model_i,
+                        model_j,
+                        local_id,
+                        center_indices=center_indices_expected,
+                        estimator_name=spec.local_id_estimator,
+                        n_neighbors=0,
+                        method="metric_local_neighborhood",
+                    )
+                    return
+            dims_x_all = get_local_id_dims_for_model_global(
+                model_i,
+                args.local_id_estimator,
+                args.local_id_n_neighbors,
+            )
+            dims_y_all = get_local_id_dims_for_model_global(
+                model_j,
+                args.local_id_estimator,
+                args.local_id_n_neighbors,
+            )
+            n_neighbors_eff_x = max(
+                2, min(int(args.local_id_n_neighbors), embeddings[model_i].shape[0] - 1)
+            )
+            n_neighbors_eff_y = max(
+                2, min(int(args.local_id_n_neighbors), embeddings[model_j].shape[0] - 1)
+            )
+            n_neighbors_eff = min(n_neighbors_eff_x, n_neighbors_eff_y)
+            local_id = _compute_local_intrinsic_dims_for_pair(
+                spec,
+                cache_x_local,
+                dims_x_all,
+                dims_y_all,
+                n_neighbors_eff=n_neighbors_eff,
+            )
+            _save_local_id_artifacts(
+                local_id_artifacts_path,
+                saved_local_id_artifacts,
+                model_i,
+                model_j,
+                local_id,
+                center_indices=center_indices_expected,
+                estimator_name=args.local_id_estimator,
+                n_neighbors=args.local_id_n_neighbors,
+            )
 
         if spec.pair_agg == "antisym":
             # out_matrix хранит A. Мы никогда не трогаем старый блок. Вычисляем только NaN.
@@ -1552,9 +2676,6 @@ def main():
                 # Если в строке нигде нет NaN, можно быстро пропустить шаг.
                 if not np.isnan(out_matrix[i]).any():
                     continue
-
-                Xi = embeddings[mi]
-                cache_i = get_cache_for_model_i(mi)
 
                 for j, mj in enumerate(model_names):
                     if i == j:
@@ -1568,32 +2689,31 @@ def main():
                     ):
                         continue
 
-                    # Вычисляем в обоих направлениях
-                    Yj = embeddings[mj]
-
                     # m(i->j)
-                    mij, artifacts_ij = _metric_directed_for_pair(
-                        spec, Xi, Yj, cache_i, seed=args.seed
-                    )
+                    mij, artifacts_ij = _directed_metric(mi, mj)
+                    _ensure_local_id_for_direction(mi, mj, artifacts_ij)
 
                     # m(j->i)
-                    Xj = embeddings[mj]
-                    cache_j = get_cache_for_model_i(mj)
-                    mji, artifacts_ji = _metric_directed_for_pair(
-                        spec, Xj, Xi, cache_j, seed=args.seed
-                    )
+                    mji, artifacts_ji = _directed_metric(mj, mi)
+                    _ensure_local_id_for_direction(mj, mi, artifacts_ji)
 
-                    aij = np.float32(mij - mji)
+                    # Для local_id_diff directed-величина уже является signed difference
+                    # на фиксированном наборе центров. Поэтому для антисимметричной матрицы
+                    # усредняем две направленные оценки, а не вычитаем второй раз.
+                    antisym_scale = 0.5 if spec.kind == "local_id_diff" else 1.0
+                    aij = np.float32(antisym_scale * (mij - mji))
                     out_matrix[i, j] = aij
                     out_matrix[j, i] = np.float32(-aij)
 
                     # Сохраняем артефакты для обоих направлений.
-                    _save_artifacts(
-                        artifacts_path, saved_artifacts, mi, mj, artifacts_ij
-                    )
-                    _save_artifacts(
-                        artifacts_path, saved_artifacts, mj, mi, artifacts_ji
-                    )
+                    if artifacts_ij is not None:
+                        _save_artifacts(
+                            artifacts_path, saved_artifacts, mi, mj, artifacts_ij, spec=spec
+                        )
+                    if artifacts_ji is not None:
+                        _save_artifacts(
+                            artifacts_path, saved_artifacts, mj, mi, artifacts_ji, spec=spec
+                        )
 
             # Обеспечивает точную антисимметрию и нулевую диагональ
             np.fill_diagonal(out_matrix, 0.0)
@@ -1608,9 +2728,6 @@ def main():
                 if not np.isnan(out_matrix[i]).any():
                     continue
 
-                Xi = embeddings[mi]
-                cache_i = get_cache_for_model_i(mi)
-
                 for j, mj in enumerate(model_names):
                     if i == j:
                         if np.isnan(out_matrix[i, j]):
@@ -1623,31 +2740,27 @@ def main():
                     ):
                         continue
 
-                    Yj = embeddings[mj]
-
                     # m(i->j)
-                    mij, artifacts_ij = _metric_directed_for_pair(
-                        spec, Xi, Yj, cache_i, seed=args.seed
-                    )
+                    mij, artifacts_ij = _directed_metric(mi, mj)
+                    _ensure_local_id_for_direction(mi, mj, artifacts_ij)
 
                     # m(j->i)
-                    Xj = embeddings[mj]
-                    cache_j = get_cache_for_model_i(mj)
-                    mji, artifacts_ji = _metric_directed_for_pair(
-                        spec, Xj, Xi, cache_j, seed=args.seed
-                    )
+                    mji, artifacts_ji = _directed_metric(mj, mi)
+                    _ensure_local_id_for_direction(mj, mi, artifacts_ji)
 
                     sij = np.float32(0.5 * (mij + mji))
                     out_matrix[i, j] = sij
                     out_matrix[j, i] = sij
 
                     # Сохраняем артефакты для обоих направлений.
-                    _save_artifacts(
-                        artifacts_path, saved_artifacts, mi, mj, artifacts_ij
-                    )
-                    _save_artifacts(
-                        artifacts_path, saved_artifacts, mj, mi, artifacts_ji
-                    )
+                    if artifacts_ij is not None:
+                        _save_artifacts(
+                            artifacts_path, saved_artifacts, mi, mj, artifacts_ij, spec=spec
+                        )
+                    if artifacts_ji is not None:
+                        _save_artifacts(
+                            artifacts_path, saved_artifacts, mj, mi, artifacts_ji, spec=spec
+                        )
 
             # Обеспечиваем симметрию и нулевую диагональ
             np.fill_diagonal(out_matrix, 0.0)
@@ -1659,22 +2772,25 @@ def main():
                 if not np.isnan(out_matrix[i]).any():
                     continue
 
-                Xi = embeddings[mi]
-                cache_i = get_cache_for_model_i(mi)
-
                 for j, mj in enumerate(model_names):
                     if not np.isnan(out_matrix[i, j]):
                         continue
-                    Yj = embeddings[mj]
-                    val, artifacts_ij = _metric_directed_for_pair(
-                        spec, Xi, Yj, cache_i, seed=args.seed
-                    )
+                    val, artifacts_ij = _directed_metric(mi, mj)
+                    _ensure_local_id_for_direction(mi, mj, artifacts_ij)
                     out_matrix[i, j] = np.float32(val)
 
                     # Сохраняем артефакты для направления i->j.
-                    _save_artifacts(
-                        artifacts_path, saved_artifacts, mi, mj, artifacts_ij
-                    )
+                    if artifacts_ij is not None:
+                        _save_artifacts(
+                            artifacts_path, saved_artifacts, mi, mj, artifacts_ij, spec=spec
+                        )
+
+        if args.compute_local_id_diagnostics:
+            for mi in model_names:
+                for mj in model_names:
+                    if mi == mj:
+                        continue
+                    _ensure_local_id_for_direction(mi, mj)
 
         # Флаги:
         # - pair_agg="directed": направленная величина m(X->Y)
@@ -1686,9 +2802,18 @@ def main():
             "is_paired": True,
             "is_symmetric": bool(spec.pair_agg in {"antisym", "sym"}),
             "pair_agg": spec.pair_agg,
+            "rank_aggregation": spec.rank_aggregation,
+            "hard_rank_threshold": spec.hard_rank_threshold,
             "metric_spec": asdict(spec),
             "metric_config": cfg.get("meta", {}) if isinstance(cfg, dict) else {},
         }
+        meta.update(_local_geometry_meta())
+
+        if saved_artifacts:
+            saved_artifacts["diagnostics_meta_json"] = json.dumps(
+                _build_diagnostics_meta(spec), ensure_ascii=False
+            )
+            np.savez_compressed(artifacts_path, **saved_artifacts)
 
         np.savez_compressed(
             out_path,

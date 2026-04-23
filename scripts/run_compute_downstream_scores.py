@@ -94,11 +94,26 @@ def _infer_dataset_name_from_path(path: Optional[str]) -> Optional[str]:
 
     base = os.path.basename(os.path.normpath(path)).lower()
 
-    m = re.match(r"^(.+?)_(train|test)(?:_.*)?$", base)
+    m = re.match(r"^(.+?)_(trainval|train|val|test)(?:_.*)?$", base)
     if m:
         return m.group(1)
 
     return base
+
+
+def _infer_split_from_path(path: Optional[str]) -> Optional[str]:
+    """
+    Пытается угадать split по имени папки эмбеддингов.
+    """
+    if not path:
+        return None
+
+    base = os.path.basename(os.path.normpath(path)).lower()
+    m = re.match(r"^.+?_(trainval|train|val|test)(?:_.*)?$", base)
+    if m:
+        return m.group(1)
+
+    return None
 
 
 def _resolve_dataset_name(
@@ -129,10 +144,8 @@ def _resolve_labels_holdout(
     Метки для holdout-режима:
     - если labels_path задан, грузим из файла;
     - иначе пытаемся загрузить по (dataset_name, data_root, split), где split
-      выводится из имени папки embeddings_dir:
-        *_train* -> train
-        *_test*  -> test
-      если не удалось — считаем split='test' по умолчанию.
+      выводится из имени папки embeddings_dir.
+      Если не удалось — считаем split='test' по умолчанию.
     """
     if labels_path:
         return _load_labels_file(labels_path)
@@ -143,14 +156,7 @@ def _resolve_labels_holdout(
             "(или чтобы --dataset можно было вывести из имени папки эмбеддингов)."
         )
 
-    base = os.path.basename(os.path.normpath(embeddings_dir)).lower()
-    if "_train" in base:
-        split = "train"
-    elif "_test" in base:
-        split = "test"
-    else:
-        # Для режима вида embeddings/cifar10 считаем test по умолчанию
-        split = "test"
+    split = _infer_split_from_path(embeddings_dir) or "test"
 
     return load_labels(dataset_name, data_root, split).astype(np.int64)
 
@@ -160,6 +166,8 @@ def _resolve_labels_train_test(
     labels_path: Optional[str],
     dataset_name: Optional[str],
     data_root: Optional[str],
+    train_embeddings_dir: Optional[str],
+    test_embeddings_dir: Optional[str],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Метки для train/test-режима:
@@ -178,19 +186,26 @@ def _resolve_labels_train_test(
             "(или чтобы --dataset можно было вывести из имени папок эмбеддингов)."
         )
 
-    y_train = load_labels(dataset_name, data_root, "train").astype(np.int64)
-    y_test = load_labels(dataset_name, data_root, "test").astype(np.int64)
+    train_split = _infer_split_from_path(train_embeddings_dir) or "train"
+    test_split = _infer_split_from_path(test_embeddings_dir) or "test"
+
+    y_train = load_labels(dataset_name, data_root, train_split).astype(np.int64)
+    y_test = load_labels(dataset_name, data_root, test_split).astype(np.int64)
     return y_train, y_test
 
 
 class MLPProbe(nn.Module):
     def __init__(self, dim: int, n_classes: int, dropout: float = 0.3):
         super().__init__()
+        # Совмещаем текущий пайплайн с архитектурой probe из прошлогоднего benchmark'а:
+        # 3 линейных слоя, 2 ReLU и 1 Dropout.
         self.net = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.ReLU(),
+            nn.Linear(dim, 2048),
             nn.Dropout(dropout),
-            nn.Linear(dim, n_classes),
+            nn.ReLU(),
+            nn.Linear(2048, 2048),
+            nn.ReLU(),
+            nn.Linear(2048, n_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -549,6 +564,8 @@ def main():
             labels_path=args.labels_path,
             dataset_name=dataset_name,
             data_root=args.data_root,
+            train_embeddings_dir=args.train_embeddings_dir,
+            test_embeddings_dir=args.test_embeddings_dir,
         )
 
         for m in tqdm(common, desc="Модели", unit="model"):

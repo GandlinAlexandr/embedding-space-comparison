@@ -24,6 +24,7 @@ from tqdm import tqdm
 from datasets.io import (
     build_dataset,
     build_loader,
+    default_transform_imagenet224,
 )  # вынесено в отдельный пакет datasets/
 from model_zoo.registry import (
     get_model,
@@ -69,7 +70,7 @@ def main():
         description="Извлечь эмбеддинги из torchvision-моделей."
     )
     parser.add_argument("--dataset", type=str, default="cifar10")
-    parser.add_argument("--split", type=str, default="test", help="train|test")
+    parser.add_argument("--split", type=str, default="test", help="train|val|test|trainval")
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
 
@@ -86,6 +87,11 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Пересчитывать эмбеддинги даже если файл уже существует.",
+    )
     parser.add_argument(
         "--num_samples",
         type=int,
@@ -106,35 +112,51 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Устройство: {device}")
 
-    dataset = build_dataset(args.dataset, args.data_root, split=args.split)
+    base_dataset = build_dataset(args.dataset, args.data_root, split=args.split)
 
     # Необязательная подвыборка
     subset_indices = _subset_indices(
-        len(dataset), args.num_samples, args.subset_strategy, args.seed
+        len(base_dataset), args.num_samples, args.subset_strategy, args.seed
     )
-    if len(subset_indices) != len(dataset):
-        dataset = Subset(dataset, subset_indices)
+    if len(subset_indices) != len(base_dataset):
 
         # Исправление: сохраняем индексы, чтобы downstream мог взять те же объекты
         idx_path = os.path.join(args.output_dir, "subset_indices.npy")
         np.save(idx_path, np.asarray(subset_indices, dtype=np.int64))
         print(f"Сохранены индексы подвыборки: {idx_path}")
     else:
-        print(f"Используется полный сплит: {args.split} (n={len(dataset)})")
-
-    loader = build_loader(
-        dataset, batch_size=args.batch_size, num_workers=args.num_workers
-    )
+        print(f"Используется полный сплит: {args.split} (n={len(base_dataset)})")
 
     model_names = [m.strip() for m in args.models.split(",") if m.strip()]
     for model_name in model_names:
+        out_path = os.path.join(args.output_dir, f"{model_name}.npy")
+        if os.path.exists(out_path) and not args.overwrite:
+            print(f"\n=== Модель: {model_name} ===")
+            print(f"Пропуск: файл уже существует: {out_path}")
+            continue
+
         print(f"\n=== Модель: {model_name} ===")
 
         model, spec = get_model(model_name)
-        print(f"Базовая модель: {spec.base_name} | экстрактор: {spec.extractor_id}")
+        print(
+            f"Базовая модель: {spec.base_name} | экстрактор: {spec.extractor_id} | "
+            f"input_size={spec.input_size}"
+        )
+
+        dataset = build_dataset(
+            args.dataset,
+            args.data_root,
+            split=args.split,
+            transform=default_transform_imagenet224(spec.input_size),
+        )
+        if len(subset_indices) != len(base_dataset):
+            dataset = Subset(dataset, subset_indices)
+
+        loader = build_loader(
+            dataset, batch_size=args.batch_size, num_workers=args.num_workers
+        )
 
         embs = extract_embeddings_from_model(model, loader, device=device)
-        out_path = os.path.join(args.output_dir, f"{model_name}.npy")
         np.save(out_path, embs.astype(np.float32))
         print(f"Сохранено: {out_path} | shape={embs.shape}")
 

@@ -211,6 +211,32 @@ def _adjust_correct_ratio_like_last_year(
     return cr
 
 
+def _infer_metric_kind(meta: Dict[str, Any], metric_path: str) -> str:
+    metric_spec = meta.get("metric_spec", None)
+    if isinstance(metric_spec, dict):
+        kind = metric_spec.get("kind", "")
+        if isinstance(kind, str) and kind:
+            return kind
+
+    stem = os.path.splitext(os.path.basename(metric_path))[0].lower()
+    if stem.startswith("id_diff_"):
+        return "local_id_diff"
+    return ""
+
+
+def _validate_eval_protocol_for_metric(
+    metric_path: str, meta: Dict[str, Any], eval_protocol: str
+) -> None:
+    kind = _infer_metric_kind(meta, metric_path)
+    if kind == "local_id_diff" and eval_protocol != "delta_signed":
+        raise ValueError(
+            "Метрика local_id_diff поддерживает только eval_protocol='delta_signed'. "
+            f"Получено: {eval_protocol!r} для файла {os.path.basename(metric_path)!r}. "
+            "Протокол delta_abs сравнивает |Δacc| с signed-антисимметричной величиной "
+            "ID(X)-ID(Y) и поэтому не имеет корректного смысла."
+        )
+
+
 def eval_one_metric(
     metric_path: str,
     downstream: Dict[str, Dict[str, float]],
@@ -218,6 +244,7 @@ def eval_one_metric(
     eval_protocol: str = "delta_signed",
 ) -> Tuple[str, Dict[str, Any], List[TaskEval], Dict[str, float]]:
     model_names, M, meta = load_metric_matrix(metric_path)
+    _validate_eval_protocol_for_metric(metric_path, meta, eval_protocol)
     models = intersect_models(model_names, downstream)
     idx = {m: i for i, m in enumerate(model_names)}
 
@@ -352,6 +379,7 @@ def _compute_pair_cloud(
     delta_abs: target = |Δacc|, неупорядоченные пары
     """
     model_names, M, meta = load_metric_matrix(metric_path)
+    _validate_eval_protocol_for_metric(metric_path, meta, eval_protocol)
     models = intersect_models(model_names, downstream)
     idx = {m: i for i, m in enumerate(model_names)}
 

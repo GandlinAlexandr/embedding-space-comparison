@@ -9,6 +9,11 @@ run_diagnose_local_map.py
 Проверяемые гипотезы (по заданию):
   1. Ошибка решения линейного уравнения (residual):
        насколько хорошо линейное приближение работает в каждой точке.
+       Поддерживаются два режима:
+         - legacy residual из main, который дополнительно нормируется в diagnose-скрипте;
+         - relative_residuals из новых артефактов:
+             mean(|Xc @ M - Yc|) / mean(|Yc|)
+       то есть показывает, на сколько процентов отображение искажает координаты Y.
   2. Вырожденность отображений:
        для скольких центров оба направления (X->Y и Y->X) одновременно вырождены.
        По гипотезе таких точек должно быть мало.
@@ -127,6 +132,24 @@ def _load_artifacts(path: str) -> Dict[str, np.ndarray]:
     return {k: data[k] for k in data.files}
 
 
+def _local_id_artifacts_path(main_artifacts_path: str) -> str:
+    if not main_artifacts_path.endswith("_artifacts.npz"):
+        base, _ = os.path.splitext(main_artifacts_path)
+        return f"{base}_local_id_artifacts.npz"
+    return main_artifacts_path.replace(
+        "_artifacts.npz", "_local_id_artifacts.npz"
+    )
+
+
+def _load_optional_local_id_artifacts(
+    main_artifacts_path: str,
+) -> Dict[str, np.ndarray]:
+    sidecar_path = _local_id_artifacts_path(main_artifacts_path)
+    if not os.path.exists(sidecar_path):
+        return {}
+    return _load_artifacts(sidecar_path)
+
+
 def _parse_direction_key(key: str) -> Optional[Tuple[str, str]]:
     """
     Из ключа вида '{model_i}_to_{model_j}/residuals' извлекает (model_i, model_j).
@@ -140,7 +163,7 @@ def _parse_direction_key(key: str) -> Optional[Tuple[str, str]]:
     # Разбиваем только по первому вхождению '_to_', чтобы не сломать имена моделей с '_to_'.
     idx = direction.index("_to_")
     model_i = direction[:idx]
-    model_j = direction[idx + 4 :]
+    model_j = direction[idx + 4:]
     return model_i, model_j
 
 
@@ -160,12 +183,54 @@ def _get_direction_data(
     """
     Возвращает (singular_values, residuals, ranks) для направления model_i -> model_j.
     singular_values — object-массив, каждый элемент — вектор сингулярных значений одного центра.
+
+    Для новых артефактов предпочитаем:
+      - relative_residuals вместо legacy residuals
+      - metric_ranks вместо legacy ranks
+
+    Для старых артефактов автоматически откатываемся к полям из main.
     """
     prefix = f"{model_i}_to_{model_j}"
+    meta = _load_diagnostics_meta(artifacts)
+
+    residual_field = str(meta.get("preferred_residual_field", ""))
+    if not residual_field or f"{prefix}/{residual_field}" not in artifacts:
+        residual_field = (
+            "relative_residuals"
+            if f"{prefix}/relative_residuals" in artifacts
+            else "residuals"
+        )
+
+    rank_field = str(meta.get("preferred_rank_field", ""))
+    if not rank_field or f"{prefix}/{rank_field}" not in artifacts:
+        rank_field = "metric_ranks" if f"{prefix}/metric_ranks" in artifacts else "ranks"
+
     sv = artifacts[f"{prefix}/singular_values"]
-    res = artifacts[f"{prefix}/residuals"]
-    ranks = artifacts[f"{prefix}/ranks"]
+    res = artifacts[f"{prefix}/{residual_field}"]
+    ranks = artifacts[f"{prefix}/{rank_field}"]
     return sv, res, ranks
+
+
+def _direction_uses_relative_residuals(
+    artifacts: Dict[str, np.ndarray], model_i: str, model_j: str
+) -> bool:
+    prefix = f"{model_i}_to_{model_j}"
+    meta = _load_diagnostics_meta(artifacts)
+    preferred = str(meta.get("preferred_residual_field", ""))
+    if preferred and f"{prefix}/{preferred}" in artifacts:
+        return preferred == "relative_residuals"
+    return f"{prefix}/relative_residuals" in artifacts
+
+
+def _direction_uses_metric_ranks(
+    artifacts: Dict[str, np.ndarray], model_i: str, model_j: str
+) -> bool:
+    prefix = f"{model_i}_to_{model_j}"
+    meta = _load_diagnostics_meta(artifacts)
+    preferred = str(meta.get("preferred_rank_field", ""))
+    if preferred and f"{prefix}/{preferred}" in artifacts:
+        return preferred == "metric_ranks"
+    return f"{prefix}/metric_ranks" in artifacts
 
 
 @dataclass
@@ -178,6 +243,14 @@ class DirectionExtraData:
     inlier_masks: Optional[np.ndarray] = None
     inlier_counts: Optional[np.ndarray] = None
     inlier_fracs: Optional[np.ndarray] = None
+
+
+@dataclass
+class DirectionLocalIDData:
+    intrinsic_dims_x: Optional[np.ndarray] = None
+    intrinsic_dims_y: Optional[np.ndarray] = None
+    neighbor_sizes_x: Optional[np.ndarray] = None
+    neighbor_sizes_y: Optional[np.ndarray] = None
 
 
 def _get_optional_direction_array(
@@ -239,6 +312,9 @@ def _compute_direction_stats(
 ) -> Dict:
     """
     Вычисляет статистику для одного направления (i->j).
+    residuals уже приведены к нужному виду вызывающей стороной:
+      - либо relative_residuals из новых артефактов,
+      - либо legacy residuals, дополнительно нормированные в diagnose-скрипте.
     """
     # Ранги
     ranks = ranks.astype(np.float32)
@@ -247,7 +323,7 @@ def _compute_direction_stats(
     rank_min = int(np.min(ranks))
     rank_max = int(np.max(ranks))
 
-    # Residuals
+    # Residuals (уже относительные)
     res_mean = float(np.mean(residuals))
     res_std = float(np.std(residuals))
     res_median = float(np.median(residuals))
@@ -268,6 +344,61 @@ def _compute_direction_stats(
         "n_degenerate": n_degenerate,
         "frac_degenerate": frac_degenerate,
     }
+
+
+# ============================================================
+# Подписи для графиков и отчётов
+# ============================================================
+# Подписи для новых артефактов читаются из diagnostics_meta_json.
+# Для старых артефактов сохраняем legacy-логику нормировки и подписей.
+
+_FALLBACK_LABELS = {
+    "ranks_axis_label": "Ранг отображения M",
+    "ranks_short_label": "Ранг",
+    "ranks_description": "Ранг матрицы отображения M.",
+    "residual_axis_label": r"Residual $\|X_c M - Y_c\|_F$",
+    "residual_short_label": "Residual",
+    "residual_summary_label": r"Средний residual / normalized residual",
+    "residual_description": "Legacy residual ||Xc @ M - Yc||_F.",
+}
+
+
+def _load_diagnostics_meta(artifacts: Dict[str, np.ndarray]) -> Dict[str, object]:
+    raw = artifacts.get("diagnostics_meta_json", None)
+    if raw is None:
+        return {}
+
+    # numpy может сохранить строку как 0-мерный массив.
+    if hasattr(raw, "item"):
+        raw = raw.item()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+
+    try:
+        meta = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return {}
+
+    if not isinstance(meta, dict):
+        return {}
+    return meta
+
+
+def _load_diagnostics_labels(artifacts: Dict[str, np.ndarray]) -> Dict[str, str]:
+    """
+    Читает подписи осей и описания полей из diagnostics_meta_json в файле артефактов.
+    Для старых артефактов без этого поля возвращает безопасные fallback-подписи.
+    """
+    meta = _load_diagnostics_meta(artifacts)
+    if not meta:
+        return dict(_FALLBACK_LABELS)
+
+    # Подставляем только известные ключи; остальное берём из fallback.
+    labels = dict(_FALLBACK_LABELS)
+    for key in _FALLBACK_LABELS:
+        if key in meta and isinstance(meta[key], str):
+            labels[key] = meta[key]
+    return labels
 
 
 def _normalized_residual_label(normalized: bool) -> str:
@@ -321,14 +452,39 @@ def _compute_effective_counts(extra: DirectionExtraData) -> Optional[np.ndarray]
     return None
 
 
+def _compute_system_point_counts(extra: DirectionExtraData) -> Optional[np.ndarray]:
+    """
+    Возвращает число точек, определяющих локальную систему.
+
+    Для диагностики определённости системы считаем именно количество точек:
+      - для robust-методов используем число инлайеров;
+      - иначе размер окрестности;
+      - в крайнем случае длину вектора весов.
+    """
+    if extra.inlier_counts is not None:
+        return np.asarray(extra.inlier_counts, dtype=np.float64)
+
+    if extra.neighbor_sizes is not None:
+        return np.asarray(extra.neighbor_sizes, dtype=np.float64)
+
+    if extra.sample_weights is not None and len(extra.sample_weights) > 0:
+        counts = []
+        for weights in extra.sample_weights:
+            w = np.asarray(weights).reshape(-1)
+            counts.append(float(len(w)))
+        return np.asarray(counts, dtype=np.float64)
+
+    return None
+
+
 def _normalize_residuals(
     residuals: np.ndarray,
     extra: DirectionExtraData,
 ) -> Tuple[np.ndarray, bool]:
     """
-    Нормирует residual до RMS-подобной ошибки на эффективную точку.
+    Нормирует legacy residual до RMS-подобной ошибки на эффективную точку.
 
-    Для старых артефактов без нужных полей возвращает residual как есть.
+    Для новых артефактов нужно использовать relative_residuals вместо этого шага.
     """
     res = np.asarray(residuals, dtype=np.float64)
     eff_counts = _compute_effective_counts(extra)
@@ -369,7 +525,7 @@ def _safe_std(arr: Optional[np.ndarray]) -> float:
     return float(np.std(finite))
 
 
-def _compute_extra_stats(extra: DirectionExtraData) -> Dict[str, float]:
+def _compute_extra_stats(extra: DirectionExtraData) -> Dict:
     """
     Сводит дополнительные артефакты в компактные числа для отчётов и таблиц.
     """
@@ -396,6 +552,122 @@ def _compute_extra_stats(extra: DirectionExtraData) -> Dict[str, float]:
         "inlier_count_mean": _safe_mean(extra.inlier_counts),
         "inlier_frac_mean": _safe_mean(extra.inlier_fracs),
         "inlier_frac_std": _safe_std(extra.inlier_fracs),
+    }
+
+
+def _compute_determinedness_stats(
+    ranks: np.ndarray,
+    extra: DirectionExtraData,
+) -> Dict[str, float]:
+    """
+    Сводит в компактные числа определённость локальной системы:
+      - сколько точек участвует в системе;
+      - насколько система переопределена: N_sys - rank;
+      - доля центров, где N_sys > rank.
+    """
+    point_counts = _compute_system_point_counts(extra)
+    if point_counts is None:
+        return {
+            "point_count_mean": float("nan"),
+            "point_count_std": float("nan"),
+            "margin_mean": float("nan"),
+            "margin_std": float("nan"),
+            "overdetermined_frac": float("nan"),
+        }
+
+    point_counts = np.asarray(point_counts, dtype=np.float64).reshape(-1)
+    ranks = np.asarray(ranks, dtype=np.float64).reshape(-1)
+    if len(point_counts) != len(ranks) or len(ranks) == 0:
+        return {
+            "point_count_mean": float("nan"),
+            "point_count_std": float("nan"),
+            "margin_mean": float("nan"),
+            "margin_std": float("nan"),
+            "overdetermined_frac": float("nan"),
+        }
+
+    finite = np.isfinite(point_counts) & np.isfinite(ranks)
+    if not np.any(finite):
+        return {
+            "point_count_mean": float("nan"),
+            "point_count_std": float("nan"),
+            "margin_mean": float("nan"),
+            "margin_std": float("nan"),
+            "overdetermined_frac": float("nan"),
+        }
+
+    point_counts = point_counts[finite]
+    ranks = ranks[finite]
+    margins = point_counts - ranks
+    return {
+        "point_count_mean": float(np.mean(point_counts)),
+        "point_count_std": float(np.std(point_counts)),
+        "margin_mean": float(np.mean(margins)),
+        "margin_std": float(np.std(margins)),
+        "overdetermined_frac": float(np.mean(margins > 0.0)),
+    }
+
+
+def _compute_local_id_stats(
+    ranks: np.ndarray,
+    extra: DirectionExtraData,
+    local_id: DirectionLocalIDData,
+) -> Dict[str, float]:
+    if local_id.intrinsic_dims_x is None or local_id.intrinsic_dims_y is None:
+        return {
+            "id_x_mean": float("nan"),
+            "id_y_mean": float("nan"),
+            "id_min_mean": float("nan"),
+            "rank_minus_id_min_mean": float("nan"),
+            "system_minus_id_min_mean": float("nan"),
+        }
+
+    id_x = np.asarray(local_id.intrinsic_dims_x, dtype=np.float64).reshape(-1)
+    id_y = np.asarray(local_id.intrinsic_dims_y, dtype=np.float64).reshape(-1)
+    ranks = np.asarray(ranks, dtype=np.float64).reshape(-1)
+    if len(id_x) != len(ranks) or len(id_y) != len(ranks) or len(ranks) == 0:
+        return {
+            "id_x_mean": float("nan"),
+            "id_y_mean": float("nan"),
+            "id_min_mean": float("nan"),
+            "rank_minus_id_min_mean": float("nan"),
+            "system_minus_id_min_mean": float("nan"),
+        }
+
+    id_min = np.minimum(id_x, id_y)
+    system_counts = _compute_system_point_counts(extra)
+    if system_counts is not None:
+        system_counts = np.asarray(system_counts, dtype=np.float64).reshape(-1)
+        if len(system_counts) != len(ranks):
+            system_counts = None
+
+    finite = np.isfinite(id_x) & np.isfinite(id_y) & np.isfinite(ranks)
+    if not np.any(finite):
+        return {
+            "id_x_mean": float("nan"),
+            "id_y_mean": float("nan"),
+            "id_min_mean": float("nan"),
+            "rank_minus_id_min_mean": float("nan"),
+            "system_minus_id_min_mean": float("nan"),
+        }
+
+    id_x = id_x[finite]
+    id_y = id_y[finite]
+    id_min = id_min[finite]
+    ranks = ranks[finite]
+    if system_counts is not None:
+        system_counts = system_counts[finite]
+
+    return {
+        "id_x_mean": float(np.mean(id_x)),
+        "id_y_mean": float(np.mean(id_y)),
+        "id_min_mean": float(np.mean(id_min)),
+        "rank_minus_id_min_mean": float(np.mean(ranks - id_min)),
+        "system_minus_id_min_mean": (
+            float(np.mean(system_counts - id_min))
+            if system_counts is not None
+            else float("nan")
+        ),
     }
 
 
@@ -474,28 +746,66 @@ def _compute_both_degenerate_fraction(
 
 def _plot_single_pair(
     artifacts: Dict[str, np.ndarray],
+    local_id_artifacts: Optional[Dict[str, np.ndarray]],
     model_i: str,
     model_j: str,
     plots_dir: str,
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
     plots_exts: Iterable[str] = ("png",),
+    labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Строит детальные графики для пары (model_i, model_j):
       - гистограммы рангов для обоих направлений
-      - распределение нормированных residuals для обоих направлений
+      - распределение residuals для обоих направлений
       - сингулярные значения (медиана ± std по центрам)
     """
+    if labels is None:
+        labels = _load_diagnostics_labels(artifacts)
+
     sv_ij, res_ij, ranks_ij = _get_direction_data(artifacts, model_i, model_j)
     sv_ji, res_ji, ranks_ji = _get_direction_data(artifacts, model_j, model_i)
     extra_ij = _get_direction_extra_data(artifacts, model_i, model_j)
     extra_ji = _get_direction_extra_data(artifacts, model_j, model_i)
-    norm_res_ij, normed_ij = _normalize_residuals(res_ij, extra_ij)
-    norm_res_ji, normed_ji = _normalize_residuals(res_ji, extra_ji)
-    residuals_normalized = bool(normed_ij and normed_ji)
-    residual_xlabel = _normalized_residual_label(residuals_normalized)
-    residual_short_label = _normalized_residual_short_label(residuals_normalized)
+    local_id_ij = _get_direction_local_id_data(
+        local_id_artifacts or {}, model_i, model_j
+    )
+    local_id_ji = _get_direction_local_id_data(
+        local_id_artifacts or {}, model_j, model_i
+    )
+    use_metric_ranks = bool(
+        _direction_uses_metric_ranks(artifacts, model_i, model_j)
+        and _direction_uses_metric_ranks(artifacts, model_j, model_i)
+    )
+    use_relative_residuals = bool(
+        _direction_uses_relative_residuals(artifacts, model_i, model_j)
+        and _direction_uses_relative_residuals(artifacts, model_j, model_i)
+    )
+
+    if use_relative_residuals:
+        plot_res_ij = np.asarray(res_ij, dtype=np.float64)
+        plot_res_ji = np.asarray(res_ji, dtype=np.float64)
+        residual_xlabel = labels["residual_axis_label"]
+        residual_short_label = labels["residual_short_label"]
+        residual_title = "Распределение относительной ошибки по направлениям"
+        residual_box_title = "Относительная ошибка по направлениям"
+    else:
+        plot_res_ij, normed_ij = _normalize_residuals(res_ij, extra_ij)
+        plot_res_ji, normed_ji = _normalize_residuals(res_ji, extra_ji)
+        residuals_normalized = bool(normed_ij and normed_ji)
+        residual_xlabel = _normalized_residual_label(residuals_normalized)
+        residual_short_label = _normalized_residual_short_label(residuals_normalized)
+        residual_title = (
+            "Распределение нормированной ошибки по направлениям"
+            if residuals_normalized
+            else "Распределение ошибки по направлениям"
+        )
+        residual_box_title = (
+            "Нормированная ошибка по направлениям"
+            if residuals_normalized
+            else "Ошибка по направлениям"
+        )
 
     label_ij = f"{model_i} → {model_j}"
     label_ji = f"{model_j} → {model_i}"
@@ -505,16 +815,16 @@ def _plot_single_pair(
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
     fig.suptitle(
         f"Диагностика локального отображения\n"
-        f"Метрика: {short_metric_name(metric_name)} | Пара: {model_i} / {model_j} | Центров на пару: {n_centers} | Порог вырожденности: {threshold:.2e}",
+        f"Метрика: {short_metric_name(metric_name)} | Пара: {model_i} / {model_j} | "
+        f"Центров на пару: {n_centers} | Порог вырожденности: {threshold:.2e}",
         fontsize=12,
     )
 
     # --- 1. Гистограмма рангов ---
     ax = axes[0, 0]
-    all_ranks = np.concatenate([ranks_ij, ranks_ji])
     ax.hist(ranks_ij, bins="auto", alpha=0.6, label=label_ij, color="steelblue")
     ax.hist(ranks_ji, bins="auto", alpha=0.6, label=label_ji, color="coral")
-    ax.set_xlabel("Ранг отображения M")
+    ax.set_xlabel(labels["ranks_axis_label"] if use_metric_ranks else "Ранг отображения M")
     ax.set_ylabel("Количество центров")
     ax.set_title("Гистограмма рангов по направлениям")
     ax.legend(fontsize=8)
@@ -522,24 +832,24 @@ def _plot_single_pair(
 
     # --- 2. Распределение residuals ---
     ax = axes[0, 1]
-    ax.hist(norm_res_ij, bins=30, alpha=0.6, label=label_ij, color="steelblue")
-    ax.hist(norm_res_ji, bins=30, alpha=0.6, label=label_ji, color="coral")
+    ax.hist(plot_res_ij, bins=30, alpha=0.6, label=label_ij, color="steelblue")
+    ax.hist(plot_res_ji, bins=30, alpha=0.6, label=label_ji, color="coral")
     ax.set_xlabel(residual_xlabel)
     ax.set_ylabel("Количество центров")
-    ax.set_title("Распределение нормированной ошибки по направлениям")
+    ax.set_title(residual_title)
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
     # --- 3. Residuals: boxplot ---
     ax = axes[0, 2]
     ax.boxplot(
-        [norm_res_ij, norm_res_ji],
+        [plot_res_ij, plot_res_ji],
         labels=[label_ij, label_ji],
         patch_artist=True,
         boxprops=dict(facecolor="lightblue"),
     )
     ax.set_ylabel(residual_short_label)
-    ax.set_title("Нормированная ошибка по направлениям")
+    ax.set_title(residual_box_title)
     ax.grid(True, alpha=0.3)
     ax.tick_params(axis="x", labelsize=8)
 
@@ -561,13 +871,18 @@ def _plot_single_pair(
     ax = axes[1, 2]
     ax.axis("off")
     stats_ij = _compute_direction_stats(
-        sv_ij, norm_res_ij, ranks_ij, threshold=threshold
+        sv_ij, plot_res_ij, ranks_ij, threshold=threshold
     )
     stats_ji = _compute_direction_stats(
-        sv_ji, norm_res_ji, ranks_ji, threshold=threshold
+        sv_ji, plot_res_ji, ranks_ji, threshold=threshold
     )
     extra_stats_ij = _compute_extra_stats(extra_ij)
     extra_stats_ji = _compute_extra_stats(extra_ji)
+    det_stats_ij = _compute_determinedness_stats(ranks_ij, extra_ij)
+    det_stats_ji = _compute_determinedness_stats(ranks_ji, extra_ji)
+    local_id_stats_ij = _compute_local_id_stats(ranks_ij, extra_ij, local_id_ij)
+    local_id_stats_ji = _compute_local_id_stats(ranks_ji, extra_ji, local_id_ji)
+    res_short = residual_short_label
     table_data = [
         ["", label_ij[:20], label_ji[:20]],
         ["Центров", stats_ij["n_centers"], stats_ji["n_centers"]],
@@ -583,12 +898,12 @@ def _plot_single_pair(
             f"{stats_ji['rank_min']}/{stats_ji['rank_max']}",
         ],
         [
-            f"{residual_short_label} (mean)",
+            f"{res_short} (mean)",
             f"{stats_ij['residual_mean']:.2e}",
             f"{stats_ji['residual_mean']:.2e}",
         ],
         [
-            f"{residual_short_label} (std)",
+            f"{res_short} (std)",
             f"{stats_ij['residual_std']:.2e}",
             f"{stats_ji['residual_std']:.2e}",
         ],
@@ -606,6 +921,66 @@ def _plot_single_pair(
                 "Размер окр. (mean)",
                 f"{extra_stats_ij['neighbor_size_mean']:.2f}",
                 f"{extra_stats_ji['neighbor_size_mean']:.2f}",
+            ]
+        )
+    if np.isfinite(det_stats_ij["point_count_mean"]) or np.isfinite(
+        det_stats_ji["point_count_mean"]
+    ):
+        table_data.append(
+            [
+                "N_sys (mean)",
+                f"{det_stats_ij['point_count_mean']:.2f}",
+                f"{det_stats_ji['point_count_mean']:.2f}",
+            ]
+        )
+    if np.isfinite(det_stats_ij["margin_mean"]) or np.isfinite(
+        det_stats_ji["margin_mean"]
+    ):
+        table_data.append(
+            [
+                "N_sys-rank",
+                f"{det_stats_ij['margin_mean']:.2f}",
+                f"{det_stats_ji['margin_mean']:.2f}",
+            ]
+        )
+    if np.isfinite(det_stats_ij["overdetermined_frac"]) or np.isfinite(
+        det_stats_ji["overdetermined_frac"]
+    ):
+        table_data.append(
+            [
+                "N_sys>rank",
+                f"{det_stats_ij['overdetermined_frac']:.1%}",
+                f"{det_stats_ji['overdetermined_frac']:.1%}",
+            ]
+        )
+    if np.isfinite(local_id_stats_ij["id_x_mean"]) or np.isfinite(
+        local_id_stats_ji["id_x_mean"]
+    ):
+        table_data.append(
+            [
+                "ID_x (mean)",
+                f"{local_id_stats_ij['id_x_mean']:.2f}",
+                f"{local_id_stats_ji['id_x_mean']:.2f}",
+            ]
+        )
+    if np.isfinite(local_id_stats_ij["id_y_mean"]) or np.isfinite(
+        local_id_stats_ji["id_y_mean"]
+    ):
+        table_data.append(
+            [
+                "ID_y (mean)",
+                f"{local_id_stats_ij['id_y_mean']:.2f}",
+                f"{local_id_stats_ji['id_y_mean']:.2f}",
+            ]
+        )
+    if np.isfinite(local_id_stats_ij["rank_minus_id_min_mean"]) or np.isfinite(
+        local_id_stats_ji["rank_minus_id_min_mean"]
+    ):
+        table_data.append(
+            [
+                "rank-min(ID)",
+                f"{local_id_stats_ij['rank_minus_id_min_mean']:.2f}",
+                f"{local_id_stats_ji['rank_minus_id_min_mean']:.2f}",
             ]
         )
     if np.isfinite(extra_stats_ij["neighbor_distance_mean"]) or np.isfinite(
@@ -661,6 +1036,27 @@ def _plot_single_pair(
     plt.close(fig)
     for save_path in saved_paths:
         print(f"  Сохранён график: {save_path}")
+
+
+def _get_direction_local_id_data(
+    local_id_artifacts: Dict[str, np.ndarray], model_i: str, model_j: str
+) -> DirectionLocalIDData:
+    if not local_id_artifacts:
+        return DirectionLocalIDData()
+    return DirectionLocalIDData(
+        intrinsic_dims_x=_get_optional_direction_array(
+            local_id_artifacts, model_i, model_j, "intrinsic_dims_x"
+        ),
+        intrinsic_dims_y=_get_optional_direction_array(
+            local_id_artifacts, model_i, model_j, "intrinsic_dims_y"
+        ),
+        neighbor_sizes_x=_get_optional_direction_array(
+            local_id_artifacts, model_i, model_j, "neighbor_sizes_x"
+        ),
+        neighbor_sizes_y=_get_optional_direction_array(
+            local_id_artifacts, model_i, model_j, "neighbor_sizes_y"
+        ),
+    )
 
 
 def _plot_singular_values_summary(
@@ -727,35 +1123,55 @@ def _plot_aggregated(
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
     metric_spec_str: str = "",
     plots_exts: Iterable[str] = ("png",),
+    labels: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Строит агрегированные графики по всем парам:
       - общая гистограмма рангов
-      - общее распределение нормированных residuals
+      - общее распределение residuals
       - доля вырожденных отображений по парам
-      - доля одновременно вырожденных центров (оба направления) по парам
+      - определённость системы: N_sys - rank по направлениям
     """
+    if labels is None:
+        labels = _load_diagnostics_labels(artifacts)
     all_ranks = []
     all_residuals = []
     frac_deg_per_direction = []
+    point_count_means = []
+    margin_means = []
+    rank_means = []
     direction_labels = []
     normalized_flags = []
+
+    use_metric_ranks = bool(
+        _direction_uses_metric_ranks(artifacts, directions[0][0], directions[0][1])
+    )
+    use_relative_residuals = bool(
+        _direction_uses_relative_residuals(artifacts, directions[0][0], directions[0][1])
+    )
 
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
         extra = _get_direction_extra_data(artifacts, mi, mj)
-        norm_res, is_normalized = _normalize_residuals(res, extra)
-        stats = _compute_direction_stats(sv, norm_res, ranks, threshold=threshold)
+        if _direction_uses_relative_residuals(artifacts, mi, mj):
+            work_res = np.asarray(res, dtype=np.float64)
+            is_normalized = True
+        else:
+            work_res, is_normalized = _normalize_residuals(res, extra)
+        stats = _compute_direction_stats(sv, work_res, ranks, threshold=threshold)
+        det_stats = _compute_determinedness_stats(ranks, extra)
         all_ranks.extend(ranks.tolist())
-        all_residuals.extend(norm_res.tolist())
+        all_residuals.extend(work_res.tolist())
         frac_deg_per_direction.append(stats["frac_degenerate"])
+        point_count_means.append(det_stats["point_count_mean"])
+        margin_means.append(det_stats["margin_mean"])
+        rank_means.append(stats["rank_mean"])
         direction_labels.append(f"{mi[:10]}→{mj[:10]}")
         normalized_flags.append(is_normalized)
 
     all_ranks = np.array(all_ranks)
     all_residuals = np.array(all_residuals)
     residuals_normalized = bool(all(normalized_flags)) if normalized_flags else False
-    residual_xlabel = _normalized_residual_label(residuals_normalized)
 
     # n_centers — реальное количество центров первого направления, читается из артефактов.
     _, _, _ranks_first = _get_direction_data(
@@ -768,7 +1184,8 @@ def _plot_aggregated(
         f"Агрегированная диагностика локального отображения\n"
         f"Метрика: {short_metric_name(metric_name)}"
         + (f" | {metric_spec_str}" if metric_spec_str else "")
-        + f" | Центров на пару: {n_centers_per_direction} | Пар моделей: {len(directions)} | Порог вырожденности: {threshold:.2e}",
+        + f" | Центров на пару: {n_centers_per_direction} | Пар моделей: {len(directions)} | "
+        f"Порог вырожденности: {threshold:.2e}",
         fontsize=12,
     )
 
@@ -789,7 +1206,7 @@ def _plot_aggregated(
         linewidth=1.5,
         label=f"медиана={np.median(all_ranks):.2f}",
     )
-    ax.set_xlabel("Ранг отображения M")
+    ax.set_xlabel(labels["ranks_axis_label"] if use_metric_ranks else "Ранг отображения M")
     ax.set_ylabel("Количество центров (все пары)")
     ax.set_title(
         f"Гистограмма рангов (X→Y и Y→X)\nstd={np.std(all_ranks):.3f}, медиана={np.median(all_ranks):.2f}"
@@ -814,9 +1231,21 @@ def _plot_aggregated(
         linewidth=1.5,
         label=f"медиана={np.median(all_residuals):.2e}",
     )
-    ax.set_xlabel(residual_xlabel)
+    ax.set_xlabel(
+        labels["residual_axis_label"]
+        if use_relative_residuals
+        else _normalized_residual_label(residuals_normalized)
+    )
     ax.set_ylabel("Количество центров (все пары)")
-    ax.set_title("Распределение нормированной ошибки (X→Y и Y→X)")
+    ax.set_title(
+        "Распределение относительной ошибки (X→Y и Y→X)"
+        if use_relative_residuals
+        else (
+            "Распределение нормированной ошибки (X→Y и Y→X)"
+            if residuals_normalized
+            else "Распределение ошибки (X→Y и Y→X)"
+        )
+    )
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
@@ -842,46 +1271,70 @@ def _plot_aggregated(
                 fontsize=6,
             )
 
-    # --- 4. Доля одновременно вырожденных центров (оба направления) по парам ---
+    # --- 4. Определённость системы: число точек против ранга ---
     ax = axes[1, 1]
-    per_pair = both_deg_stats["per_pair"]
-    if per_pair:
-        pair_labels = [f"{r['model_i'][:8]}/{r['model_j'][:8]}" for r in per_pair]
-        pair_fracs = [r["frac_both_degenerate"] for r in per_pair]
-        x2 = np.arange(len(pair_labels))
-        bars2 = ax.bar(x2, pair_fracs, color="coral", alpha=0.8)
+    finite_margin = np.isfinite(margin_means)
+    finite_points = np.isfinite(point_count_means)
+    finite_rank = np.isfinite(rank_means)
+    if np.any(finite_margin) or np.any(finite_points):
+        x2 = np.arange(len(direction_labels))
+        bars2 = ax.bar(x2, margin_means, color="seagreen", alpha=0.8, label="mean(N_sys - rank)")
+        ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
         ax.set_xticks(x2)
-        ax.set_xticklabels(pair_labels, rotation=45, ha="right", fontsize=7)
-        ax.set_ylabel("Доля центров, где оба вырождены")
-        overall = both_deg_stats["frac_both_degenerate_overall"]
+        ax.set_xticklabels(direction_labels, rotation=45, ha="right", fontsize=7)
+        ax.set_ylabel("Средний запас N_sys - rank")
         ax.set_title(
-            f"Одновременная вырожденность X→Y и Y→X в одном центре\n"
-            f"Итого: {both_deg_stats['total_both_degenerate']} / {both_deg_stats['total_centers']} "
-            f"({overall:.1%})"
+            "Определённость локальной системы по направлениям\n"
+            "(N_sys > rank: переопределена, N_sys <= rank: недоопределена/на границе)"
         )
-        ax.set_ylim(0, max(max(pair_fracs) * 1.2, 0.05))
         ax.grid(True, alpha=0.3, axis="y")
-        for bar, val in zip(bars2, pair_fracs):
-            if val > 0:
+        if np.any(finite_margin):
+            max_abs_margin = max(1.0, float(np.nanmax(np.abs(margin_means))) * 1.2)
+            ax.set_ylim(-max_abs_margin, max_abs_margin)
+        ax2 = ax.twinx()
+        if np.any(finite_points):
+            ax2.plot(
+                x2,
+                point_count_means,
+                "D--",
+                color="darkred",
+                markersize=5,
+                label="mean(N_sys)",
+            )
+        if np.any(finite_rank):
+            ax2.plot(
+                x2,
+                rank_means,
+                "o-.",
+                color="navy",
+                markersize=4,
+                label="mean(rank)",
+            )
+        ax2.set_ylabel("Среднее значение")
+        for bar, val in zip(bars2, margin_means):
+            if np.isfinite(val):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + 0.002,
-                    f"{val:.1%}",
+                    bar.get_height() + (0.01 * ax.get_ylim()[1] if val >= 0 else -0.06 * ax.get_ylim()[1]),
+                    f"{val:.1f}",
                     ha="center",
-                    va="bottom",
+                    va="bottom" if val >= 0 else "top",
                     fontsize=6,
                 )
+        lines1, lbls1 = ax.get_legend_handles_labels()
+        lines2, lbls2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
     else:
         ax.text(
             0.5,
             0.5,
-            "Недостаточно пар\nдля анализа вырожденности",
+            "Нет данных о размере окрестности\nили числе инлайеров",
             ha="center",
             va="center",
             transform=ax.transAxes,
             fontsize=11,
         )
-        ax.set_title("Одновременная вырожденность X→Y и Y→X в одном центре")
+        ax.set_title("Определённость локальной системы")
 
     plt.tight_layout()
     fname = f"{metric_name}_aggregated_diagnostics.png"
@@ -900,11 +1353,17 @@ def _plot_aggregated(
 def _save_report(
     directions: List[Tuple[str, str]],
     artifacts: Dict[str, np.ndarray],
+    local_id_artifacts: Optional[Dict[str, np.ndarray]],
     both_deg_stats: Dict,
     reports_dir: str,
     metric_name: str,
 ) -> None:
     """Сохраняет текстовый отчёт с ключевыми числами диагностики."""
+    labels = _load_diagnostics_labels(artifacts)
+    use_relative_residuals = bool(
+        _direction_uses_relative_residuals(artifacts, directions[0][0], directions[0][1])
+    )
+    res_description = labels["residual_description"]
     lines = []
     lines.append(f"Диагностика метрики: {metric_name}")
     lines.append("=" * 60)
@@ -917,15 +1376,31 @@ def _save_report(
     for mi, mj in sorted(directions):
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
         extra_data = _get_direction_extra_data(artifacts, mi, mj)
-        norm_res, is_normalized = _normalize_residuals(res, extra_data)
-        s = _compute_direction_stats(sv, norm_res, ranks)
+        local_id_data = _get_direction_local_id_data(
+            local_id_artifacts or {}, mi, mj
+        )
+        if _direction_uses_relative_residuals(artifacts, mi, mj):
+            work_res = np.asarray(res, dtype=np.float64)
+            is_normalized = True
+        else:
+            work_res, is_normalized = _normalize_residuals(res, extra_data)
+        s = _compute_direction_stats(sv, work_res, ranks)
         extra = _compute_extra_stats(_get_direction_extra_data(artifacts, mi, mj))
+        det = _compute_determinedness_stats(ranks, extra_data)
+        lid = _compute_local_id_stats(ranks, extra_data, local_id_data)
         all_rank_stds.append(s["rank_std"])
         normalized_flags.append(is_normalized)
         direction_str = f"{mi}→{mj}"
         extra_rows.append(
             {
                 "direction": direction_str,
+                "id_x_mean": lid["id_x_mean"],
+                "id_y_mean": lid["id_y_mean"],
+                "rank_minus_id_min_mean": lid["rank_minus_id_min_mean"],
+                "system_minus_id_min_mean": lid["system_minus_id_min_mean"],
+                "point_count_mean": det["point_count_mean"],
+                "margin_mean": det["margin_mean"],
+                "overdetermined_frac": det["overdetermined_frac"],
                 "neighbor_size_mean": extra["neighbor_size_mean"],
                 "neighbor_distance_mean": extra["neighbor_distance_mean"],
                 "sigma_mean": extra["sigma_mean"],
@@ -935,26 +1410,38 @@ def _save_report(
             }
         )
 
-    residual_label = "ResN" if all(normalized_flags) else "Res"
+    if use_relative_residuals:
+        res_short = labels["residual_short_label"]
+    else:
+        res_short = _normalized_residual_short_label(bool(all(normalized_flags)))
+
     lines.append("--- Статистика по направлениям ---")
-    header = f"{'Направление':<35} {'Ранг(mean)':<12} {'Ранг(std)':<12} {f'{residual_label}(mean)':<12} {f'{residual_label}(std)':<12} {'Выр-х,%':<10}"
+    header = (
+        f"{'Направление':<35} {'Ранг(mean)':<12} {'Ранг(std)':<12} "
+        f"{f'{res_short}(mean)':<14} {f'{res_short}(std)':<14} {'Выр-х,%':<10}"
+    )
     lines.append(header)
     lines.append("-" * len(header))
 
     for mi, mj in sorted(directions):
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
         extra_data = _get_direction_extra_data(artifacts, mi, mj)
-        norm_res, _ = _normalize_residuals(res, extra_data)
-        s = _compute_direction_stats(sv, norm_res, ranks)
+        if _direction_uses_relative_residuals(artifacts, mi, mj):
+            work_res = np.asarray(res, dtype=np.float64)
+        else:
+            work_res, _ = _normalize_residuals(res, extra_data)
+        s = _compute_direction_stats(sv, work_res, ranks)
         direction_str = f"{mi}→{mj}"
         lines.append(
             f"{direction_str:<35} {s['rank_mean']:<12.3f} {s['rank_std']:<12.3f} "
-            f"{s['residual_mean']:<12.4f} {s['residual_std']:<12.4f} "
+            f"{s['residual_mean']:<14.4f} {s['residual_std']:<14.4f} "
             f"{s['frac_degenerate']:<10.1%}"
         )
 
     lines.append("")
-    if all(normalized_flags):
+    if use_relative_residuals:
+        lines.append(f"{res_short} = {res_description}")
+    elif all(normalized_flags):
         lines.append(
             "ResN = нормированная RMS-подобная ошибка ||X_c M - Y_c||_F / sqrt(N_eff)."
         )
@@ -969,7 +1456,13 @@ def _save_report(
     lines.append("")
 
     have_extra = any(
-        np.isfinite(row["neighbor_size_mean"])
+        np.isfinite(row["id_x_mean"])
+        or np.isfinite(row["id_y_mean"])
+        or np.isfinite(row["rank_minus_id_min_mean"])
+        or np.isfinite(row["system_minus_id_min_mean"])
+        or np.isfinite(row["point_count_mean"])
+        or np.isfinite(row["margin_mean"])
+        or np.isfinite(row["neighbor_size_mean"])
         or np.isfinite(row["neighbor_distance_mean"])
         or np.isfinite(row["sigma_mean"])
         or np.isfinite(row["eps_mean"])
@@ -979,7 +1472,9 @@ def _save_report(
     if have_extra:
         lines.append("--- Дополнительные артефакты новых методов ---")
         extra_header = (
-            f"{'Направление':<35} {'Nhood(mean)':<12} {'Dist(mean)':<12} "
+            f"{'Направление':<35} {'ID_x':<10} {'ID_y':<10} {'r-minID':<10} "
+            f"{'N-ID':<10} {'N_sys(mean)':<12} {'N-rank':<12} "
+            f"{'Overdet,%':<12} {'Nhood(mean)':<12} {'Dist(mean)':<12} "
             f"{'Sigma(mean)':<12} {'Eps(mean)':<12} {'Inlier(mean)':<12}"
         )
         lines.append(extra_header)
@@ -990,6 +1485,13 @@ def _save_report(
 
             lines.append(
                 f"{row['direction']:<35} "
+                f"{_fmt(row['id_x_mean'], '{:.2f}'):<10} "
+                f"{_fmt(row['id_y_mean'], '{:.2f}'):<10} "
+                f"{_fmt(row['rank_minus_id_min_mean'], '{:.2f}'):<10} "
+                f"{_fmt(row['system_minus_id_min_mean'], '{:.2f}'):<10} "
+                f"{_fmt(row['point_count_mean'], '{:.2f}'):<12} "
+                f"{_fmt(row['margin_mean'], '{:.2f}'):<12} "
+                f"{_fmt(row['overdetermined_frac'], '{:.1%}'):<12} "
                 f"{_fmt(row['neighbor_size_mean'], '{:.2f}'):<12} "
                 f"{_fmt(row['neighbor_distance_mean'], '{:.3e}'):<12} "
                 f"{_fmt(row['sigma_mean'], '{:.3e}'):<12} "
@@ -1025,6 +1527,8 @@ def _save_report(
         "n_directions": len(directions),
         "both_degenerate": both_deg_stats,
         "mean_rank_std": float(np.mean(all_rank_stds)),
+        "uses_relative_residuals": use_relative_residuals,
+        "residuals_normalized": bool(all(normalized_flags)) if normalized_flags else False,
         "direction_extras": extra_rows,
     }
     json_path = os.path.join(reports_dir, f"{metric_name}_diagnostics_report.json")
@@ -1046,20 +1550,23 @@ def _plot_summary(
 ) -> None:
     """
     Строит сводный график сравнения всех метрик по трём вопросам руководителя:
-      1. Ошибка решения (normalized residual mean ± std по всем центрам и парам)
+      1. Ошибка решения (relative или normalized residual, в зависимости от артефактов)
       2. Стабильность ранга (std ранга по всем центрам и парам)
-      3. Доля одновременно вырожденных центров (оба направления)
+      3. Определённость системы: N_sys - rank
 
     metrics_data — список словарей, по одному на метрику:
       {
         "metric_name": str,
-        "rank_means":  np.ndarray,   # среднее ранга по каждому направлению
-        "rank_stds":   np.ndarray,   # std ранга по каждому направлению
-        "res_means":   np.ndarray,   # среднее нормированного residual по каждому направлению
-        "res_stds":    np.ndarray,   # std нормированного residual по каждому направлению
-        "frac_both_degenerate": float,  # итоговая доля по всем парам
+        "rank_means":  np.ndarray,
+        "rank_stds":   np.ndarray,
+        "res_means":   np.ndarray,
+        "res_stds":    np.ndarray,
+        "system_point_means": np.ndarray,
+        "determined_margin_means": np.ndarray,
+        "overdetermined_fracs": np.ndarray,
         "n_centers":   int,
         "n_directions": int,
+        "labels": dict,   # подписи из diagnostics_meta_json
       }
     """
     if not metrics_data:
@@ -1112,13 +1619,20 @@ def _plot_summary(
     lines2, lbls2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
 
-    # --- 2. Ошибка решения: средний нормированный residual по направлениям ---
+    # --- 2. Ошибка решения ---
     ax = axes[1]
     mean_res = [float(np.mean(d["res_means"])) for d in metrics_data]
     std_res = [float(np.mean(d["res_stds"])) for d in metrics_data]
+    all_relative_residuals = all(bool(d.get("uses_relative_residuals", False)) for d in metrics_data)
     all_residuals_normalized = all(
         bool(d.get("residuals_normalized", False)) for d in metrics_data
     )
+    if all_relative_residuals:
+        res_summary_label = metrics_data[0].get("labels", _FALLBACK_LABELS)[
+            "residual_summary_label"
+        ]
+    else:
+        res_summary_label = _summary_residual_axis_label(all_residuals_normalized)
     bars = ax.bar(
         x,
         mean_res,
@@ -1130,14 +1644,17 @@ def _plot_summary(
     )
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(_summary_residual_axis_label(all_residuals_normalized))
+    ax.set_ylabel(res_summary_label)
     ax.set_title(
         (
-            "Нормированная ошибка решения линейного уравнения\n"
+            "Относительная ошибка решения линейного уравнения\n"
+            "(чем меньше — тем лучше линейное приближение; сопоставима между метриками)"
+            if all_relative_residuals
+            else "Нормированная ошибка решения линейного уравнения\n"
             "(чем меньше — тем лучше линейное приближение)"
             if all_residuals_normalized
             else "Ошибка решения линейного уравнения\n"
-            "(часть старых артефактов не содержит данных для нормировки)"
+            "(часть артефактов не содержит данных для нормировки)"
         )
     )
     ax.grid(True, alpha=0.3, axis="y")
@@ -1151,33 +1668,61 @@ def _plot_summary(
             fontsize=7,
         )
 
-    # --- 3. Одновременная вырожденность ---
+    # --- 3. Определённость системы ---
     ax = axes[2]
-    frac_both_deg = [d["frac_both_degenerate"] for d in metrics_data]
-    bars = ax.bar(x, frac_both_deg, color="mediumpurple", alpha=0.8)
+    mean_margins = [_safe_mean(d["determined_margin_means"]) for d in metrics_data]
+    mean_point_counts = [_safe_mean(d["system_point_means"]) for d in metrics_data]
+    mean_rank_values = [_safe_mean(d["rank_means"]) for d in metrics_data]
+    bars = ax.bar(x, mean_margins, color="seagreen", alpha=0.8, label="mean(N_sys - rank)")
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Доля центров")
+    ax.set_ylabel("Средний запас N_sys - rank")
     ax.set_title(
-        "Одновременная вырожденность X→Y и Y→X в одном центре\n"
-        "(по гипотезе должно быть близко к 0)"
+        "Определённость локальной системы\n"
+        "(N_sys > rank: переопределена, N_sys <= rank: недоопределена/на границе)"
     )
-    ax.set_ylim(0, max(max(frac_both_deg) * 1.3, 0.05))
     ax.grid(True, alpha=0.3, axis="y")
-    for bar, val in zip(bars, frac_both_deg):
-        if val > 0:
+    finite_margins = np.isfinite(mean_margins)
+    if np.any(finite_margins):
+        max_abs_margin = max(1.0, float(np.nanmax(np.abs(mean_margins))) * 1.2)
+        ax.set_ylim(-max_abs_margin, max_abs_margin)
+    ax2 = ax.twinx()
+    if np.any(np.isfinite(mean_point_counts)):
+        ax2.plot(
+            x,
+            mean_point_counts,
+            "D--",
+            color="darkred",
+            markersize=6,
+            label="mean(N_sys)",
+        )
+    if np.any(np.isfinite(mean_rank_values)):
+        ax2.plot(
+            x,
+            mean_rank_values,
+            "o-.",
+            color="navy",
+            markersize=5,
+            label="mean(rank)",
+        )
+    ax2.set_ylabel("Среднее значение")
+    for bar, val in zip(bars, mean_margins):
+        if np.isfinite(val):
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + max(frac_both_deg) * 0.01 + 0.001,
-                f"{val:.2%}",
+                bar.get_height() + (0.01 * ax.get_ylim()[1] if val >= 0 else -0.06 * ax.get_ylim()[1]),
+                f"{val:.1f}",
                 ha="center",
-                va="bottom",
+                va="bottom" if val >= 0 else "top",
                 fontsize=7,
             )
+    lines1, lbls1 = ax.get_legend_handles_labels()
+    lines2, lbls2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
 
     # --- 4. Спектр сингулярных значений по всем метрикам на одном поле ---
     ax = axes[3]
-    # Цветовая палитра для метрик.
     cmap = plt.get_cmap("tab10")
     for idx, d in enumerate(metrics_data):
         sp_med = d.get("spectrum_median", np.array([]))
@@ -1195,7 +1740,8 @@ def _plot_summary(
     ax.set_xlabel("Нормированный индекс сингулярного значения (0 = макс, 1 = мин)")
     ax.set_ylabel("Сингулярное значение (медиана по центрам и парам)")
     ax.set_title(
-        "Спектр сингулярных значений матрицы M\n(медиана ± std по всем центрам, X→Y и Y→X)"
+        "Спектр сингулярных значений матрицы M\n"
+        "(медиана ± std по всем центрам, X→Y и Y→X)"
     )
     ax.set_yscale("log")
     ax.legend(fontsize=7, ncol=2, loc="upper right")
@@ -1209,8 +1755,107 @@ def _plot_summary(
         print(f"  Сохранён сводный график: {save_path}")
 
 
+def _plot_summary_local_id(
+    metrics_data: List[Dict],
+    plots_dir: str,
+    plots_exts: Iterable[str] = ("png",),
+) -> None:
+    if not metrics_data:
+        return
+
+    has_local_id = any(
+        np.any(np.isfinite(d.get("local_id_min_means", np.array([]))))
+        for d in metrics_data
+    )
+    if not has_local_id:
+        return
+
+    labels = [short_metric_name(d["metric_name"]) for d in metrics_data]
+    x = np.arange(len(labels))
+
+    fig, axes = plt.subplots(3, 1, figsize=(max(12, len(labels) * 1.2), 14))
+    fig.suptitle("Сводная диагностика локальной размерности", fontsize=13)
+
+    mean_id_x = [_safe_mean(d.get("local_id_x_means")) for d in metrics_data]
+    mean_id_y = [_safe_mean(d.get("local_id_y_means")) for d in metrics_data]
+    mean_id_min = [_safe_mean(d.get("local_id_min_means")) for d in metrics_data]
+    mean_rank = [_safe_mean(d.get("rank_means")) for d in metrics_data]
+    mean_rank_gap = [
+        _safe_mean(d.get("rank_minus_id_min_means")) for d in metrics_data
+    ]
+    mean_system_gap = [
+        _safe_mean(d.get("system_minus_id_min_means")) for d in metrics_data
+    ]
+
+    ax = axes[0]
+    width = 0.25
+    ax.bar(x - width, mean_id_x, width=width, color="steelblue", alpha=0.8, label="mean(ID_x)")
+    ax.bar(x, mean_id_y, width=width, color="coral", alpha=0.8, label="mean(ID_y)")
+    ax.bar(
+        x + width,
+        mean_id_min,
+        width=width,
+        color="seagreen",
+        alpha=0.8,
+        label="mean(min(ID_x, ID_y))",
+    )
+    ax.plot(x, mean_rank, "D--", color="darkred", markersize=6, label="mean(rank)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Среднее значение")
+    ax.set_title("Локальная размерность и ранг")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(fontsize=8, loc="upper left")
+
+    ax = axes[1]
+    bars = ax.bar(x, mean_rank_gap, color="mediumpurple", alpha=0.8)
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("mean(rank - min(ID))")
+    ax.set_title("Насколько ранг превышает локальную размерность")
+    ax.grid(True, alpha=0.3, axis="y")
+    for bar, val in zip(bars, mean_rank_gap):
+        if np.isfinite(val):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + (0.01 * max(1.0, abs(bar.get_height()))),
+                f"{val:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
+
+    ax = axes[2]
+    bars = ax.bar(x, mean_system_gap, color="darkseagreen", alpha=0.8)
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("mean(N_sys - min(ID))")
+    ax.set_title("Определённость системы относительно локальной размерности")
+    ax.grid(True, alpha=0.3, axis="y")
+    for bar, val in zip(bars, mean_system_gap):
+        if np.isfinite(val):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + (0.01 * max(1.0, abs(bar.get_height()))),
+                f"{val:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
+
+    plt.tight_layout()
+    fpath = os.path.join(plots_dir, "summary_local_id_diagnostics.png")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
+    plt.close(fig)
+    for save_path in saved_paths:
+        print(f"  Сохранён сводный local-ID график: {save_path}")
+
+
 def _collect_metric_data(
     artifacts: Dict[str, np.ndarray],
+    local_id_artifacts: Optional[Dict[str, np.ndarray]],
     directions: List[Tuple[str, str]],
     metric_name: str,
     both_deg_stats: Dict,
@@ -1221,7 +1866,12 @@ def _collect_metric_data(
     """
     rank_means, rank_stds = [], []
     res_means, res_stds = [], []
+    system_point_means, determined_margin_means, overdetermined_fracs = [], [], []
+    local_id_x_means, local_id_y_means = [], []
+    local_id_min_means, rank_minus_id_min_means = [], []
+    system_minus_id_min_means = []
     residuals_normalized_flags = []
+    relative_residual_flags = []
 
     # Для спектра: собираем все сингулярные значения по всем центрам и всем направлениям.
     all_sv_lists: List[np.ndarray] = []
@@ -1229,13 +1879,31 @@ def _collect_metric_data(
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
         extra = _get_direction_extra_data(artifacts, mi, mj)
-        norm_res, is_normalized = _normalize_residuals(res, extra)
-        s = _compute_direction_stats(sv, norm_res, ranks, threshold=threshold)
+        local_id = _get_direction_local_id_data(local_id_artifacts or {}, mi, mj)
+        if _direction_uses_relative_residuals(artifacts, mi, mj):
+            work_res = np.asarray(res, dtype=np.float64)
+            is_normalized = True
+            is_relative = True
+        else:
+            work_res, is_normalized = _normalize_residuals(res, extra)
+            is_relative = False
+        s = _compute_direction_stats(sv, work_res, ranks, threshold=threshold)
+        det_stats = _compute_determinedness_stats(ranks, extra)
+        lid_stats = _compute_local_id_stats(ranks, extra, local_id)
         rank_means.append(s["rank_mean"])
         rank_stds.append(s["rank_std"])
         res_means.append(s["residual_mean"])
         res_stds.append(s["residual_std"])
+        system_point_means.append(det_stats["point_count_mean"])
+        determined_margin_means.append(det_stats["margin_mean"])
+        overdetermined_fracs.append(det_stats["overdetermined_frac"])
+        local_id_x_means.append(lid_stats["id_x_mean"])
+        local_id_y_means.append(lid_stats["id_y_mean"])
+        local_id_min_means.append(lid_stats["id_min_mean"])
+        rank_minus_id_min_means.append(lid_stats["rank_minus_id_min_mean"])
+        system_minus_id_min_means.append(lid_stats["system_minus_id_min_mean"])
         residuals_normalized_flags.append(is_normalized)
+        relative_residual_flags.append(is_relative)
         # Накапливаем сингулярные значения каждого центра.
         for sv_center in sv:
             if sv_center is not None and len(sv_center) > 0:
@@ -1263,14 +1931,26 @@ def _collect_metric_data(
         "rank_stds": np.array(rank_stds),
         "res_means": np.array(res_means),
         "res_stds": np.array(res_stds),
+        "system_point_means": np.array(system_point_means),
+        "determined_margin_means": np.array(determined_margin_means),
+        "overdetermined_fracs": np.array(overdetermined_fracs),
+        "local_id_x_means": np.array(local_id_x_means),
+        "local_id_y_means": np.array(local_id_y_means),
+        "local_id_min_means": np.array(local_id_min_means),
+        "rank_minus_id_min_means": np.array(rank_minus_id_min_means),
+        "system_minus_id_min_means": np.array(system_minus_id_min_means),
         "residuals_normalized": bool(all(residuals_normalized_flags))
         if residuals_normalized_flags
+        else False,
+        "uses_relative_residuals": bool(all(relative_residual_flags))
+        if relative_residual_flags
         else False,
         "frac_both_degenerate": both_deg_stats["frac_both_degenerate_overall"],
         "n_centers": n_centers,
         "n_directions": len(directions),
         "spectrum_median": spectrum_median,  # (min_len,) - медиана сингулярных значений
         "spectrum_std": spectrum_std,  # (min_len,) - std сингулярных значений
+        "labels": _load_diagnostics_labels(artifacts),  # подписи из diagnostics_meta_json
     }
 
 
@@ -1305,10 +1985,23 @@ def _load_metric_spec(metric_name: str) -> str:
             parts.append(f"solver={meta['solver']}")
         if "n_centers" in meta:
             parts.append(f"n_centers={meta['n_centers']}")
+        if "rank_aggregation" in meta:
+            parts.append(f"rank_agg={meta['rank_aggregation']}")
 
         return ", ".join(parts)
     except Exception:
         return ""
+
+
+def _is_local_id_diff_metric(metric_name: str) -> bool:
+    try:
+        cfgs = get_embedding_metric_configs()
+        if metric_name in cfgs:
+            meta = cfgs[metric_name].get("meta", {})
+            return str(meta.get("family", "")) == "local_id_diff"
+    except Exception:
+        pass
+    return short_metric_name(metric_name).startswith("id_diff_")
 
 
 # ============================================================
@@ -1336,7 +2029,27 @@ def _run_single_metric(
 
     print(f"\nМетрика: {metric_name}")
     print(f"Загрузка артефактов: {artifacts_path}")
+
+    if _is_local_id_diff_metric(metric_name):
+        warn = (
+            "Графики диагностики для local_id_diff временно отключены: "
+            "текущий diagnose-скрипт ориентирован на rank/residual-сравнения map-метрик "
+            "и не подходит для графиков сравнения размерностей новой метрики."
+        )
+        print(f"  [WARN] {warn}")
+        os.makedirs(reports_dir, exist_ok=True)
+        stub_path = os.path.join(reports_dir, f"{metric_name}_diagnostics_skipped.txt")
+        with open(stub_path, "w", encoding="utf-8") as f:
+            f.write(warn + "\n")
+        print(f"  [INFO] Сохранена заглушка: {stub_path}")
+        return None
+
     artifacts = _load_artifacts(artifacts_path)
+    local_id_artifacts = _load_optional_local_id_artifacts(artifacts_path)
+
+    # Читаем подписи из артефактов один раз и передаём во все функции рисования.
+    # Для старых артефактов без diagnostics_meta_json используются значения из _FALLBACK_LABELS.
+    labels = _load_diagnostics_labels(artifacts)
 
     directions = _list_directions(artifacts)
     if not directions:
@@ -1365,8 +2078,16 @@ def _run_single_metric(
         threshold=threshold,
         metric_spec_str=metric_spec_str,
         plots_exts=plots_exts,
+        labels=labels,
     )
-    _save_report(directions, artifacts, both_deg_stats, reports_dir, metric_name)
+    _save_report(
+        directions,
+        artifacts,
+        local_id_artifacts,
+        both_deg_stats,
+        reports_dir,
+        metric_name,
+    )
 
     if model_a and model_b:
         missing = []
@@ -1380,17 +2101,24 @@ def _run_single_metric(
         else:
             _plot_single_pair(
                 artifacts,
+                local_id_artifacts,
                 model_a,
                 model_b,
                 plots_dir,
                 metric_name,
                 threshold=threshold,
                 plots_exts=plots_exts,
+                labels=labels,
             )
 
     if collect_for_summary:
         return _collect_metric_data(
-            artifacts, directions, metric_name, both_deg_stats, threshold
+            artifacts,
+            local_id_artifacts,
+            directions,
+            metric_name,
+            both_deg_stats,
+            threshold,
         )
     return None
 
@@ -1471,6 +2199,7 @@ def main():
                 os.path.join(args.artifacts_dir, fn)
                 for fn in os.listdir(args.artifacts_dir)
                 if fn.endswith("_artifacts.npz")
+                and not fn.endswith("_local_id_artifacts.npz")
             ]
         )
         if not artifact_files:
@@ -1502,6 +2231,11 @@ def main():
             metrics_data,
             plots_dir,
             threshold=args.degenerate_threshold,
+            plots_exts=args.plots_ext,
+        )
+        _plot_summary_local_id(
+            metrics_data,
+            plots_dir,
             plots_exts=args.plots_ext,
         )
 

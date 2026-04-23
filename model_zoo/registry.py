@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -21,12 +21,16 @@ class ModelSpec:
     """
     Описание модели для эмбеддингов:
     - base_name: какая torchvision-модель создаётся
+    - weights_enum: какие torchvision-веса используются
     - extractor_id: строка для логов и воспроизводимости
+    - input_size: какой квадратный spatial-size ожидает протокол извлечения
     - apply_extractor: функция, превращающая модель в экстрактор признаков
     """
 
     base_name: str
+    weights_enum: Optional[str]
     extractor_id: str
+    input_size: int
     apply_extractor: Callable[[torch.nn.Module], torch.nn.Module]
 
 
@@ -40,96 +44,226 @@ def _make_registry() -> Dict[str, ModelSpec]:
     """
     reg: Dict[str, ModelSpec] = {}
 
+    def add(
+        name: str,
+        *,
+        base_name: str,
+        weights_enum: str,
+        extractor_id: str,
+        input_size: int = 224,
+        apply_extractor: Callable[[torch.nn.Module], torch.nn.Module],
+    ) -> None:
+        reg[name] = ModelSpec(
+            base_name=base_name,
+            weights_enum=weights_enum,
+            extractor_id=extractor_id,
+            input_size=input_size,
+            apply_extractor=apply_extractor,
+        )
+
     # Семейство ResNet (fc -> Identity)
-    reg["resnet18"] = ModelSpec(
+    add(
+        "resnet18",
         base_name="resnet18",
+        weights_enum="ResNet18_Weights.IMAGENET1K_V1",
         extractor_id="resnet_fc_identity",
         apply_extractor=as_resnet_feature_extractor,
     )
-    reg["resnet34"] = ModelSpec(
+    add(
+        "resnet34",
         base_name="resnet34",
+        weights_enum="ResNet34_Weights.IMAGENET1K_V1",
         extractor_id="resnet_fc_identity",
         apply_extractor=as_resnet_feature_extractor,
     )
-    reg["resnet50"] = ModelSpec(
+    add(
+        "resnet50",
         base_name="resnet50",
+        weights_enum="ResNet50_Weights.IMAGENET1K_V1",
         extractor_id="resnet_fc_identity",
         apply_extractor=as_resnet_feature_extractor,
     )
-    reg["resnet101"] = ModelSpec(
+    add(
+        "resnet50_v2",
+        base_name="resnet50",
+        weights_enum="ResNet50_Weights.IMAGENET1K_V2",
+        extractor_id="resnet_fc_identity",
+        apply_extractor=as_resnet_feature_extractor,
+    )
+    add(
+        "resnet101",
         base_name="resnet101",
+        weights_enum="ResNet101_Weights.IMAGENET1K_V1",
         extractor_id="resnet_fc_identity",
         apply_extractor=as_resnet_feature_extractor,
     )
-    reg["wide_resnet50_2"] = ModelSpec(
+    add(
+        "resnet101_v2",
+        base_name="resnet101",
+        weights_enum="ResNet101_Weights.IMAGENET1K_V2",
+        extractor_id="resnet_fc_identity",
+        apply_extractor=as_resnet_feature_extractor,
+    )
+    add(
+        "wide_resnet50_2",
         base_name="wide_resnet50_2",
+        weights_enum="Wide_ResNet50_2_Weights.IMAGENET1K_V1",
+        extractor_id="resnet_fc_identity",
+        apply_extractor=as_resnet_feature_extractor,
+    )
+    add(
+        "wide_resnet50_2_v2",
+        base_name="wide_resnet50_2",
+        weights_enum="Wide_ResNet50_2_Weights.IMAGENET1K_V2",
+        extractor_id="resnet_fc_identity",
+        apply_extractor=as_resnet_feature_extractor,
+    )
+    add(
+        "wide_resnet101_2",
+        base_name="wide_resnet101_2",
+        weights_enum="Wide_ResNet101_2_Weights.IMAGENET1K_V1",
+        extractor_id="resnet_fc_identity",
+        apply_extractor=as_resnet_feature_extractor,
+    )
+    add(
+        "wide_resnet101_2_v2",
+        base_name="wide_resnet101_2",
+        weights_enum="Wide_ResNet101_2_Weights.IMAGENET1K_V2",
         extractor_id="resnet_fc_identity",
         apply_extractor=as_resnet_feature_extractor,
     )
 
     # ViT
-    reg["vit_b_16"] = ModelSpec(
+    add(
+        "vit_b_16",
         base_name="vit_b_16",
+        weights_enum="ViT_B_16_Weights.IMAGENET1K_V1",
         extractor_id="vit_heads_identity",
         apply_extractor=as_vit_feature_extractor,
     )
-    reg["vit_b_32"] = ModelSpec(
+    add(
+        "vit_b_16_swag_e2e",
+        base_name="vit_b_16",
+        weights_enum="ViT_B_16_Weights.IMAGENET1K_SWAG_E2E_V1",
+        extractor_id="vit_heads_identity",
+        input_size=384,
+        apply_extractor=as_vit_feature_extractor,
+    )
+    add(
+        "vit_b_16_swag_linear",
+        base_name="vit_b_16",
+        weights_enum="ViT_B_16_Weights.IMAGENET1K_SWAG_LINEAR_V1",
+        extractor_id="vit_heads_identity",
+        apply_extractor=as_vit_feature_extractor,
+    )
+    add(
+        "vit_b_32",
         base_name="vit_b_32",
+        weights_enum="ViT_B_32_Weights.IMAGENET1K_V1",
         extractor_id="vit_heads_identity",
         apply_extractor=as_vit_feature_extractor,
     )
-    reg["vit_l_16"] = ModelSpec(
+    add(
+        "vit_l_16",
         base_name="vit_l_16",
+        weights_enum="ViT_L_16_Weights.IMAGENET1K_V1",
+        extractor_id="vit_heads_identity",
+        apply_extractor=as_vit_feature_extractor,
+    )
+    add(
+        "vit_l_16_swag_linear",
+        base_name="vit_l_16",
+        weights_enum="ViT_L_16_Weights.IMAGENET1K_SWAG_LINEAR_V1",
+        extractor_id="vit_heads_identity",
+        apply_extractor=as_vit_feature_extractor,
+    )
+    add(
+        "vit_l_32",
+        base_name="vit_l_32",
+        weights_enum="ViT_L_32_Weights.IMAGENET1K_V1",
         extractor_id="vit_heads_identity",
         apply_extractor=as_vit_feature_extractor,
     )
 
     # DenseNet / MobileNet
-    reg["densenet121"] = ModelSpec(
+    add(
+        "densenet121",
         base_name="densenet121",
+        weights_enum="DenseNet121_Weights.IMAGENET1K_V1",
         extractor_id="densenet_classifier_identity",
         apply_extractor=as_densenet_feature_extractor,
     )
-    reg["mobilenet_v2"] = ModelSpec(
+    add(
+        "mobilenet_v2",
         base_name="mobilenet_v2",
+        weights_enum="MobileNet_V2_Weights.IMAGENET1K_V1",
         extractor_id="mobilenetv2_classifier_identity",
         apply_extractor=as_mobilenet_v2_feature_extractor,
     )
 
     # VGG11: два варианта (чтобы было честно и воспроизводимо)
-    reg["vgg11_fc4096"] = ModelSpec(
+    add(
+        "vgg11_fc4096",
         base_name="vgg11",
+        weights_enum="VGG11_Weights.IMAGENET1K_V1",
         extractor_id="vgg_classifier_last_identity_4096",
         apply_extractor=as_vgg_classifier4096,
     )
-    reg["vgg11_conv512"] = ModelSpec(
+    add(
+        "vgg11_conv512",
         base_name="vgg11",
+        weights_enum="VGG11_Weights.IMAGENET1K_V1",
         extractor_id="vgg_features_gap_512",
         apply_extractor=as_vgg_conv512,
     )
     reg["vgg11"] = reg["vgg11_conv512"]
 
-    # VGG16: два варианта (чтобы было честно и воспроизводимо)
-    reg["vgg16_fc4096"] = ModelSpec(
-        base_name="vgg16",
+    # VGG13: те же два extractor-варианта, как и для остальных VGG
+    add(
+        "vgg13_fc4096",
+        base_name="vgg13",
+        weights_enum="VGG13_Weights.IMAGENET1K_V1",
         extractor_id="vgg_classifier_last_identity_4096",
         apply_extractor=as_vgg_classifier4096,
     )
-    reg["vgg16_conv512"] = ModelSpec(
+    add(
+        "vgg13_conv512",
+        base_name="vgg13",
+        weights_enum="VGG13_Weights.IMAGENET1K_V1",
+        extractor_id="vgg_features_gap_512",
+        apply_extractor=as_vgg_conv512,
+    )
+    reg["vgg13"] = reg["vgg13_conv512"]
+
+    # VGG16: два варианта (чтобы было честно и воспроизводимо)
+    add(
+        "vgg16_fc4096",
         base_name="vgg16",
+        weights_enum="VGG16_Weights.IMAGENET1K_V1",
+        extractor_id="vgg_classifier_last_identity_4096",
+        apply_extractor=as_vgg_classifier4096,
+    )
+    add(
+        "vgg16_conv512",
+        base_name="vgg16",
+        weights_enum="VGG16_Weights.IMAGENET1K_V1",
         extractor_id="vgg_features_gap_512",
         apply_extractor=as_vgg_conv512,
     )
     reg["vgg16"] = reg["vgg16_conv512"]
 
     # VGG19: два варианта (чтобы было честно и воспроизводимо)
-    reg["vgg19_fc4096"] = ModelSpec(
+    add(
+        "vgg19_fc4096",
         base_name="vgg19",
+        weights_enum="VGG19_Weights.IMAGENET1K_V1",
         extractor_id="vgg_classifier_last_identity_4096",
         apply_extractor=as_vgg_classifier4096,
     )
-    reg["vgg19_conv512"] = ModelSpec(
+    add(
+        "vgg19_conv512",
         base_name="vgg19",
+        weights_enum="VGG19_Weights.IMAGENET1K_V1",
         extractor_id="vgg_features_gap_512",
         apply_extractor=as_vgg_conv512,
     )
@@ -158,7 +292,7 @@ def get_model(model_name: str) -> Tuple[torch.nn.Module, ModelSpec]:
 
     spec = _REGISTRY[name]
 
-    model = build_torchvision_model(spec.base_name)
+    model = build_torchvision_model(spec.base_name, spec.weights_enum)
     model = spec.apply_extractor(model)
 
     return model, spec
