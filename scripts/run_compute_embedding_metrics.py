@@ -405,9 +405,18 @@ class LocalSolveResult:
 
 
 _LOCAL_GEOMETRY_MODE = "centered_offsets_v1"
+_LOCAL_GEOMETRY_MODE_CHOICES = ("centered_offsets_v1", "absolute_coords_v0")
 
 
 def _local_geometry_meta() -> Dict[str, Any]:
+    if _LOCAL_GEOMETRY_MODE == "absolute_coords_v0":
+        return {
+            "local_geometry_mode": _LOCAL_GEOMETRY_MODE,
+            "local_geometry_description": (
+                "Локальная affine-линеаризация без центрирования: "
+                "Xc @ M ≈ Yc. Это legacy-режим, использовавшийся до centered_offsets_v1."
+            ),
+        }
     return {
         "local_geometry_mode": _LOCAL_GEOMETRY_MODE,
         "local_geometry_description": (
@@ -433,30 +442,34 @@ def _solve_local_linear_map_and_rank(
     hard_rank_threshold: float = 1e-2,
 ) -> LocalSolveResult:
     """
-    Решает локальную affine-линеаризацию через центрирование:
-        (Xc - xc) * M ≈ (Yc - yc)
+    Решает локальную affine-линеаризацию в одном из режимов:
+      - centered_offsets_v1:
+            (Xc - xc) * M ≈ (Yc - yc)
+      - absolute_coords_v0:
+            Xc * M ≈ Yc
     и возвращает:
       - rank_value: агрегированный ранг по сингулярным значениям M
           * rank_aggregation="rankme"    -> RankMe (энтропийная, от 1 до D)
           * rank_aggregation="hard_rank" -> количество s_i > hard_rank_threshold
       - сингулярные значения M (для диагностики)
-      - raw_residual: legacy-невязка ||(Xc-xc) @ M - (Yc-yc)||_F
-      - relative_residual: относительная ошибка по локальным отклонениям Y:
-            mean(|(Xc-xc) @ M - (Yc-yc)|) / (mean(|Yc-yc|) + eps)
-        Смысл: "на сколько процентов линейное отображение искажает локальные отклонения Y от центра".
+      - raw_residual: legacy-невязка в выбранной локальной геометрии
+      - relative_residual: относительная ошибка в выбранной локальной геометрии
     """
-    X_center = np.asarray(X_center, dtype=np.float64).reshape(1, -1)
-    Y_center = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
-    Xc_centered = np.asarray(Xc, dtype=np.float64) - X_center
-    Yc_centered = np.asarray(Yc, dtype=np.float64) - Y_center
+    Xc_work = np.asarray(Xc, dtype=np.float64)
+    Yc_work = np.asarray(Yc, dtype=np.float64)
+    if _LOCAL_GEOMETRY_MODE == "centered_offsets_v1":
+        X_center = np.asarray(X_center, dtype=np.float64).reshape(1, -1)
+        Y_center = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
+        Xc_work = Xc_work - X_center
+        Yc_work = Yc_work - Y_center
     inlier_mask = np.ones(Xc.shape[0], dtype=bool)
 
     if solver == "ransac":
         if rng is None:
             rng = np.random.RandomState(42)
         M, inlier_mask = _fit_local_linear_map_ransac(
-            Xc_centered,
-            Yc_centered,
+            Xc_work,
+            Yc_work,
             sample_weights=sample_weights,
             rng=rng,
             n_iter=ransac_n_iter,
@@ -465,16 +478,14 @@ def _solve_local_linear_map_and_rank(
             threshold_scale=ransac_threshold_scale,
         )
     else:
-        M = _fit_local_linear_map(
-            Xc_centered, Yc_centered, sample_weights=sample_weights
-        )
+        M = _fit_local_linear_map(Xc_work, Yc_work, sample_weights=sample_weights)
 
     s = svd(M, full_matrices=False, compute_uv=False)
 
     # Legacy residual сохраняем в старом поле для обратной совместимости артефактов.
     # Дополнительно считаем интерпретируемую относительную ошибку по локальным отклонениям Y.
-    X_eval = Xc_centered[inlier_mask]
-    Y_eval = Yc_centered[inlier_mask]
+    X_eval = Xc_work[inlier_mask]
+    Y_eval = Yc_work[inlier_mask]
     if sample_weights is None:
         err = X_eval @ M - Y_eval
         raw_residual = float(np.linalg.norm(err, "fro"))
@@ -1851,21 +1862,35 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
                 "p_k = s_k / sum(s). Значение от 1 до D."
             )
 
-        residual_axis_label = (
-            r"Относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
-        )
-        residual_short_label = "Rel. residual"
-        residual_summary_label = (
-            r"Средняя относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
-        )
-        residual_description = (
-            "Относительная ошибка по локальным приращениям Y: "
-            "mean(|(Xc - xc) @ M - (Yc - yc)|) / mean(|Yc - yc|). "
-            "Показывает, на сколько процентов линейное отображение искажает отклонения новых координат от центра."
-        )
+        if _LOCAL_GEOMETRY_MODE == "absolute_coords_v0":
+            residual_axis_label = (
+                r"Относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
+            )
+            residual_short_label = "Rel. residual"
+            residual_summary_label = (
+                r"Средняя относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
+            )
+            residual_description = (
+                "Относительная ошибка в legacy-геометрии без центрирования: "
+                "mean(|Xc @ M - Yc|) / mean(|Yc|). "
+                "Показывает, на сколько процентов линейное отображение искажает абсолютные координаты Y."
+            )
+        else:
+            residual_axis_label = (
+                r"Относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
+            )
+            residual_short_label = "Rel. residual"
+            residual_summary_label = (
+                r"Средняя относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
+            )
+            residual_description = (
+                "Относительная ошибка по локальным приращениям Y: "
+                "mean(|(Xc - xc) @ M - (Yc - yc)|) / mean(|Yc - yc|). "
+                "Показывает, на сколько процентов линейное отображение искажает отклонения новых координат от центра."
+            )
 
     meta = {
-        "schema_version": 4,
+        "schema_version": 5,
         "rank_aggregation": spec.rank_aggregation,
         "hard_rank_threshold": spec.hard_rank_threshold,
         "preferred_rank_field": "metric_ranks",
@@ -2217,7 +2242,31 @@ def main():
         default="MLE",
         help="Имя локального оценивателя из skdim.id, например MLE, TLE или MOM.",
     )
+    parser.add_argument(
+        "--local_geometry_mode",
+        type=str,
+        choices=list(_LOCAL_GEOMETRY_MODE_CHOICES),
+        default="centered_offsets_v1",
+        help=(
+            "Режим локальной геометрии для solve_local_linear_map. "
+            "'centered_offsets_v1' — текущий режим с центрированием; "
+            "'absolute_coords_v0' — legacy-режим без центрирования, как в exp01."
+        ),
+    )
+    parser.add_argument(
+        "--disable_centering",
+        action="store_true",
+        help=(
+            "Удобный alias для legacy-режима без центрирования. "
+            "Эквивалентно --local_geometry_mode absolute_coords_v0."
+        ),
+    )
     args = parser.parse_args()
+
+    global _LOCAL_GEOMETRY_MODE
+    if args.disable_centering:
+        args.local_geometry_mode = "absolute_coords_v0"
+    _LOCAL_GEOMETRY_MODE = str(args.local_geometry_mode)
 
     if not args.out_dir:
         if not args.experiment_dir:
@@ -2259,6 +2308,7 @@ def main():
     )
     for name in manifest_model_names:
         print(f"  * {name}")
+    print(f"\nРежим локальной геометрии: {_LOCAL_GEOMETRY_MODE}")
 
     cfgs = get_embedding_metric_configs()
 
