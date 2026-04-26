@@ -115,6 +115,46 @@ def _save_figure_variants(
     return saved_paths
 
 
+def _load_downstream_scores(path: str, task_name: str = "") -> Dict[str, float]:
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+
+    if isinstance(obj, dict) and all(isinstance(v, (int, float)) for v in obj.values()):
+        return {str(k): float(v) for k, v in obj.items()}
+
+    if isinstance(obj, dict) and isinstance(obj.get("scores"), dict):
+        scores = obj["scores"]
+        if all(isinstance(v, (int, float)) for v in scores.values()):
+            return {str(k): float(v) for k, v in scores.items()}
+
+    if isinstance(obj, dict):
+        out: Dict[str, float] = {}
+        preferred_task = task_name or "main"
+        for model_name, value in obj.items():
+            if isinstance(value, dict):
+                if preferred_task in value and isinstance(
+                    value[preferred_task], (int, float)
+                ):
+                    out[str(model_name)] = float(value[preferred_task])
+                elif len(value) == 1:
+                    only_val = next(iter(value.values()))
+                    if isinstance(only_val, (int, float)):
+                        out[str(model_name)] = float(only_val)
+        if out:
+            return out
+
+    raise ValueError(
+        f"Не удалось прочитать downstream scores из {path}. "
+        "Ожидался JSON вида {model: score}, {scores: {model: score}} "
+        "или {model: {task: score}}."
+    )
+
+
 # ============================================================
 # 1) Загрузка артефактов
 # ============================================================
@@ -1124,24 +1164,26 @@ def _plot_aggregated(
     metric_spec_str: str = "",
     plots_exts: Iterable[str] = ("png",),
     labels: Optional[Dict[str, str]] = None,
+    downstream_scores: Optional[Dict[str, float]] = None,
 ) -> None:
     """
     Строит агрегированные графики по всем парам:
       - общая гистограмма рангов
       - общее распределение residuals
-      - доля вырожденных отображений по парам
+      - кривая значения метрики по направлениям
       - определённость системы: N_sys - rank по направлениям
     """
     if labels is None:
         labels = _load_diagnostics_labels(artifacts)
     all_ranks = []
     all_residuals = []
-    frac_deg_per_direction = []
     point_count_means = []
     margin_means = []
     rank_means = []
+    rank_stds = []
     direction_labels = []
     normalized_flags = []
+    direction_stats = {}
 
     use_metric_ranks = bool(
         _direction_uses_metric_ranks(artifacts, directions[0][0], directions[0][1])
@@ -1162,12 +1204,16 @@ def _plot_aggregated(
         det_stats = _compute_determinedness_stats(ranks, extra)
         all_ranks.extend(ranks.tolist())
         all_residuals.extend(work_res.tolist())
-        frac_deg_per_direction.append(stats["frac_degenerate"])
         point_count_means.append(det_stats["point_count_mean"])
         margin_means.append(det_stats["margin_mean"])
         rank_means.append(stats["rank_mean"])
+        rank_stds.append(stats["rank_std"])
         direction_labels.append(f"{mi[:10]}→{mj[:10]}")
         normalized_flags.append(is_normalized)
+        direction_stats[(mi, mj)] = {
+            "rank_mean": stats["rank_mean"],
+            "residual_mean": stats["residual_mean"],
+        }
 
     all_ranks = np.array(all_ranks)
     all_residuals = np.array(all_residuals)
@@ -1179,7 +1225,10 @@ def _plot_aggregated(
     )
     n_centers_per_direction = len(_ranks_first)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes_full = plt.subplots(3, 2, figsize=(14, 15))
+    axes = axes_full[:2, :]
+    diff_ax = axes_full[2, 0]
+    unused_ax = axes_full[2, 1]
     fig.suptitle(
         f"Агрегированная диагностика локального отображения\n"
         f"Метрика: {short_metric_name(metric_name)}"
@@ -1249,27 +1298,49 @@ def _plot_aggregated(
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # --- 3. Доля вырожденных отображений по направлениям ---
+    # --- 3. Значение метрики по направлениям ---
     ax = axes[1, 0]
-    x = np.arange(len(frac_deg_per_direction))
-    bars = ax.bar(x, frac_deg_per_direction, color="steelblue", alpha=0.8)
+    x = np.arange(len(direction_labels))
+    rank_means_arr = np.asarray(rank_means, dtype=np.float64)
+    rank_stds_arr = np.asarray(rank_stds, dtype=np.float64)
+    finite_metric = np.isfinite(rank_means_arr)
     ax.set_xticks(x)
     ax.set_xticklabels(direction_labels, rotation=45, ha="right", fontsize=7)
-    ax.set_ylabel("Доля вырожденных центров")
-    ax.set_title("Вырожденность по парам моделей (X→Y и Y→X)")
-    ax.set_ylim(0, max(max(frac_deg_per_direction) * 1.2, 0.05))
+    ax.set_ylabel(f"Среднее {labels['ranks_short_label']} по центрам")
+    ax.set_title("Значение метрики по направлениям (X→Y и Y→X)")
     ax.grid(True, alpha=0.3, axis="y")
-    # Подписываем значения на барах
-    for bar, val in zip(bars, frac_deg_per_direction):
-        if val > 0:
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.002,
-                f"{val:.1%}",
-                ha="center",
-                va="bottom",
-                fontsize=6,
-            )
+    if np.any(finite_metric):
+        ax.errorbar(
+            x[finite_metric],
+            rank_means_arr[finite_metric],
+            yerr=rank_stds_arr[finite_metric],
+            fmt="o-",
+            color="steelblue",
+            ecolor="lightsteelblue",
+            elinewidth=1.2,
+            capsize=3,
+            markersize=4,
+            linewidth=1.5,
+            label=f"mean({labels['ranks_short_label']}) ± std",
+        )
+        finite_upper = rank_means_arr[finite_metric] + np.nan_to_num(
+            rank_stds_arr[finite_metric], nan=0.0
+        )
+        y_max = float(np.nanmax(finite_upper)) if finite_upper.size > 0 else 1.0
+        y_min = float(np.nanmin(rank_means_arr[finite_metric]))
+        y_pad = max(1e-6, 0.08 * max(abs(y_max), abs(y_min), 1.0))
+        ax.set_ylim(y_min - y_pad, y_max + y_pad)
+        ax.legend(fontsize=8, loc="best")
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "Нет данных о значении метрики",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=11,
+        )
 
     # --- 4. Определённость системы: число точек против ранга ---
     ax = axes[1, 1]
@@ -1311,19 +1382,18 @@ def _plot_aggregated(
                 label="mean(rank)",
             )
         ax2.set_ylabel("Среднее значение")
-        for bar, val in zip(bars2, margin_means):
-            if np.isfinite(val):
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + (0.01 * ax.get_ylim()[1] if val >= 0 else -0.06 * ax.get_ylim()[1]),
-                    f"{val:.1f}",
-                    ha="center",
-                    va="bottom" if val >= 0 else "top",
-                    fontsize=6,
-                )
         lines1, lbls1 = ax.get_legend_handles_labels()
         lines2, lbls2 = ax2.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
+        legend = ax2.legend(
+            lines1 + lines2,
+            lbls1 + lbls2,
+            fontsize=8,
+            loc="best",
+            framealpha=0.85,
+            facecolor="white",
+            edgecolor="0.8",
+        )
+        legend.set_zorder(1000)
     else:
         ax.text(
             0.5,
@@ -1335,6 +1405,125 @@ def _plot_aggregated(
             fontsize=11,
         )
         ax.set_title("Определённость локальной системы")
+
+    # --- 5. Разница между прямым и обратным отображением ---
+    seen_pairs = set()
+    pair_labels = []
+    rank_mean_diffs = []
+    residual_mean_diffs = []
+    accuracy_diffs = []
+    for mi, mj in directions:
+        if mi == mj:
+            continue
+        pair_key = tuple(sorted((mi, mj)))
+        if pair_key in seen_pairs or (mj, mi) not in direction_stats:
+            continue
+        seen_pairs.add(pair_key)
+
+        s_ij = direction_stats[(mi, mj)]
+        s_ji = direction_stats[(mj, mi)]
+        rank_mean_diffs.append(abs(s_ij["rank_mean"] - s_ji["rank_mean"]))
+        residual_mean_diffs.append(
+            abs(s_ij["residual_mean"] - s_ji["residual_mean"])
+        )
+        if (
+            downstream_scores
+            and mi in downstream_scores
+            and mj in downstream_scores
+        ):
+            accuracy_diffs.append(abs(downstream_scores[mi] - downstream_scores[mj]))
+        else:
+            accuracy_diffs.append(np.nan)
+        pair_labels.append(f"{mi[:10]}↔{mj[:10]}")
+
+    x_diff = np.arange(len(pair_labels))
+    if pair_labels:
+        rank_diff_arr = np.asarray(rank_mean_diffs, dtype=np.float64)
+        residual_diff_arr = np.asarray(residual_mean_diffs, dtype=np.float64)
+        diff_ax.bar(
+            x_diff,
+            rank_diff_arr,
+            color="steelblue",
+            alpha=0.8,
+            label=f"|Δ mean({labels['ranks_short_label']})|",
+        )
+        diff_ax.set_xticks(x_diff)
+        diff_ax.set_xticklabels(pair_labels, rotation=45, ha="right", fontsize=7)
+        diff_ax.set_ylabel(f"|Δ mean({labels['ranks_short_label']})|")
+        diff_ax.set_title(
+            "Разница между прямым и обратным отображением по парам моделей"
+        )
+        diff_ax.grid(True, alpha=0.3, axis="y")
+        if np.any(np.isfinite(rank_diff_arr)):
+            y_max = float(np.nanmax(rank_diff_arr))
+            diff_ax.set_ylim(0.0, max(1e-6, y_max * 1.15))
+
+        diff_ax2 = diff_ax.twinx()
+        diff_ax2.plot(
+            x_diff,
+            residual_diff_arr,
+            "o-",
+            color="darkorange",
+            markersize=4,
+            linewidth=1.3,
+            label="|Δ mean(residual)|",
+        )
+        diff_ax2.set_ylabel("|Δ mean(residual)|")
+
+        lines1, lbls1 = diff_ax.get_legend_handles_labels()
+        lines2, lbls2 = diff_ax2.get_legend_handles_labels()
+        diff_ax2.legend(
+            lines1 + lines2,
+            lbls1 + lbls2,
+            fontsize=8,
+            loc="best",
+            framealpha=0.85,
+            facecolor="white",
+            edgecolor="0.8",
+        )
+
+        accuracy_diff_arr = np.asarray(accuracy_diffs, dtype=np.float64)
+        if np.any(np.isfinite(accuracy_diff_arr)):
+            unused_ax.plot(
+                x_diff,
+                accuracy_diff_arr,
+                "s-",
+                color="darkgreen",
+                markersize=4,
+                linewidth=1.4,
+                label="|Δ accuracy|",
+            )
+            unused_ax.set_xticks(x_diff)
+            unused_ax.set_xticklabels(pair_labels, rotation=45, ha="right", fontsize=7)
+            unused_ax.set_ylabel("|Δ accuracy|")
+            unused_ax.set_title("Разница accuracy по парам моделей")
+            unused_ax.grid(True, alpha=0.3, axis="y")
+            unused_ax.legend(fontsize=8, loc="best")
+            y_max = float(np.nanmax(accuracy_diff_arr))
+            unused_ax.set_ylim(0.0, max(1e-6, y_max * 1.15))
+        else:
+            unused_ax.axis("off")
+            unused_ax.text(
+                0.5,
+                0.5,
+                "Нет downstream accuracy",
+                ha="center",
+                va="center",
+                transform=unused_ax.transAxes,
+                fontsize=11,
+            )
+    else:
+        diff_ax.text(
+            0.5,
+            0.5,
+            "Нет пар с обоими направлениями",
+            ha="center",
+            va="center",
+            transform=diff_ax.transAxes,
+            fontsize=11,
+        )
+        diff_ax.set_title("Разница между прямым и обратным отображением")
+        unused_ax.axis("off")
 
     plt.tight_layout()
     fname = f"{metric_name}_aggregated_diagnostics.png"
@@ -1553,6 +1742,7 @@ def _plot_summary(
       1. Ошибка решения (relative или normalized residual, в зависимости от артефактов)
       2. Стабильность ранга (std ранга по всем центрам и парам)
       3. Определённость системы: N_sys - rank
+      4. Распределение значений самой метрики по центрам
 
     metrics_data — список словарей, по одному на метрику:
       {
@@ -1578,7 +1768,7 @@ def _plot_summary(
     short_labels = [short_metric_name(l) for l in labels]
     x = np.arange(len(labels))
 
-    fig, axes = plt.subplots(4, 1, figsize=(max(12, len(labels) * 1.2), 18))
+    fig, axes = plt.subplots(5, 1, figsize=(max(12, len(labels) * 1.2), 22))
     n_centers = metrics_data[0]["n_centers"]
     fig.suptitle(
         f"Сводная диагностика локальных отображений\n"
@@ -1747,6 +1937,51 @@ def _plot_summary(
     ax.legend(fontsize=7, ncol=2, loc="upper right")
     ax.grid(True, alpha=0.3)
 
+    # --- 5. Распределение значений метрики по центрам ---
+    ax = axes[4]
+    metric_value_arrays = []
+    metric_value_positions = []
+    metric_value_labels = []
+    for idx, d in enumerate(metrics_data):
+        vals = np.asarray(d.get("all_metric_values", np.array([])), dtype=np.float64)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            continue
+        metric_value_arrays.append(vals)
+        metric_value_positions.append(idx + 1)
+        metric_value_labels.append(short_metric_name(d["metric_name"]))
+
+    if metric_value_arrays:
+        box = ax.boxplot(
+            metric_value_arrays,
+            positions=metric_value_positions,
+            widths=0.6,
+            patch_artist=True,
+            showfliers=False,
+            medianprops=dict(color="darkred", linewidth=1.4),
+        )
+        for patch in box["boxes"]:
+            patch.set_facecolor("lightsteelblue")
+            patch.set_alpha(0.85)
+        ax.set_xticks(metric_value_positions)
+        ax.set_xticklabels(metric_value_labels, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("Ранкми по направлению для данного центра")
+        ax.set_title(
+            "Распределение значений метрики по центрам и направлениям\n"
+            "(boxplot по всем центрам, X→Y и Y→X)"
+        )
+        ax.grid(True, alpha=0.3, axis="y")
+    else:
+        ax.axis("off")
+        ax.text(
+            0.5,
+            0.5,
+            "Нет доступных per-center значений метрики для summary.",
+            ha="center",
+            va="center",
+            fontsize=10,
+        )
+
     plt.tight_layout()
     fpath = os.path.join(plots_dir, "summary_diagnostics.png")
     saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
@@ -1867,6 +2102,7 @@ def _collect_metric_data(
     rank_means, rank_stds = [], []
     res_means, res_stds = [], []
     system_point_means, determined_margin_means, overdetermined_fracs = [], [], []
+    all_metric_values = []
     local_id_x_means, local_id_y_means = [], []
     local_id_min_means, rank_minus_id_min_means = [], []
     system_minus_id_min_means = []
@@ -1890,6 +2126,7 @@ def _collect_metric_data(
         s = _compute_direction_stats(sv, work_res, ranks, threshold=threshold)
         det_stats = _compute_determinedness_stats(ranks, extra)
         lid_stats = _compute_local_id_stats(ranks, extra, local_id)
+        all_metric_values.extend(np.asarray(ranks, dtype=np.float64).reshape(-1).tolist())
         rank_means.append(s["rank_mean"])
         rank_stds.append(s["rank_std"])
         res_means.append(s["residual_mean"])
@@ -1929,6 +2166,7 @@ def _collect_metric_data(
         "metric_name": metric_name,
         "rank_means": np.array(rank_means),
         "rank_stds": np.array(rank_stds),
+        "all_metric_values": np.array(all_metric_values, dtype=np.float64),
         "res_means": np.array(res_means),
         "res_stds": np.array(res_stds),
         "system_point_means": np.array(system_point_means),
@@ -2017,6 +2255,7 @@ def _run_single_metric(
     model_b: str = "",
     collect_for_summary: bool = False,
     plots_exts: Iterable[str] = ("png",),
+    downstream_scores: Optional[Dict[str, float]] = None,
 ) -> Optional[Dict]:
     """
     Запускает полную диагностику для одного файла артефактов.
@@ -2079,6 +2318,7 @@ def _run_single_metric(
         metric_spec_str=metric_spec_str,
         plots_exts=plots_exts,
         labels=labels,
+        downstream_scores=downstream_scores,
     )
     _save_report(
         directions,
@@ -2181,6 +2421,10 @@ def main():
     )
     args = parser.parse_args()
     args.plots_ext = parse_plots_exts(args.plots_ext)
+    downstream_scores = _load_downstream_scores(
+        os.path.join("data", "downstream", "cifar10_linear_probe.json"),
+        task_name="cifar10_linear_probe",
+    )
 
     if not args.artifacts_dir and not args.artifacts_path:
         parser.error("Нужно указать либо --artifacts_dir, либо --artifacts_path.")
@@ -2220,6 +2464,7 @@ def main():
                 threshold=args.degenerate_threshold,
                 collect_for_summary=True,
                 plots_exts=args.plots_ext,
+                downstream_scores=downstream_scores,
             )
             if data is not None:
                 metrics_data.append(data)
@@ -2251,6 +2496,7 @@ def main():
             model_b=args.model_b,
             collect_for_summary=False,
             plots_exts=args.plots_ext,
+            downstream_scores=downstream_scores,
         )
 
     print("\nГотово.")

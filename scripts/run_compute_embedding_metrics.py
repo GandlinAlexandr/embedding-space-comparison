@@ -70,6 +70,11 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 from dataclasses import dataclass, asdict, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -83,8 +88,125 @@ try:
 except ImportError:
     skdim = None
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 # ВАЖНО: запускаем как модуль: python -m scripts.run_compute_embedding_metrics
 from configs.metric_configs import get_embedding_metric_configs
+
+
+@dataclass(frozen=True)
+class ComputeBackend:
+    name: str
+    device: str
+    enabled: bool
+
+
+_COMPUTE_BACKEND = ComputeBackend(name="numpy", device="cpu", enabled=False)
+_PRECOMPUTED_ZSCORES: Dict[str, np.ndarray] = {}
+
+
+def _resolve_compute_backend(requested: str) -> ComputeBackend:
+    requested_norm = str(requested).strip().lower()
+    if requested_norm not in {"auto", "cpu", "cuda"}:
+        raise ValueError(
+            "Неподдерживаемый --backend. Ожидалось одно из: auto, cpu, cuda."
+        )
+
+    if requested_norm == "cpu":
+        return ComputeBackend(name="numpy", device="cpu", enabled=False)
+
+    if torch is None:
+        if requested_norm == "cuda":
+            raise RuntimeError(
+                "Запрошен --backend cuda, но torch недоступен в окружении."
+            )
+        return ComputeBackend(name="numpy", device="cpu", enabled=False)
+
+    if torch.cuda.is_available():
+        return ComputeBackend(name="torch", device="cuda", enabled=True)
+
+    if requested_norm == "cuda":
+        raise RuntimeError(
+            "Запрошен --backend cuda, но torch.cuda.is_available() == False."
+        )
+    return ComputeBackend(name="numpy", device="cpu", enabled=False)
+
+
+def _to_backend_tensor(
+    x: np.ndarray,
+    *,
+    dtype: Optional["torch.dtype"] = None,
+) -> "torch.Tensor":
+    if torch is None:
+        raise RuntimeError("torch недоступен, backend tensor создать нельзя.")
+    arr = np.ascontiguousarray(np.asarray(x))
+    return torch.as_tensor(arr, device=_COMPUTE_BACKEND.device, dtype=dtype)
+
+
+def _pairwise_distances(
+    X: np.ndarray,
+    Y: np.ndarray,
+) -> np.ndarray:
+    if _COMPUTE_BACKEND.enabled:
+        Xt = _to_backend_tensor(X, dtype=torch.float32)
+        Yt = _to_backend_tensor(Y, dtype=torch.float32)
+        D = torch.cdist(Xt, Yt, p=2)
+        return D.detach().cpu().numpy()
+    return cdist(X, Y, metric="euclidean")
+
+
+def _pdist_percentile(
+    X: np.ndarray,
+    percentile: float,
+) -> float:
+    if _COMPUTE_BACKEND.enabled:
+        Xt = _to_backend_tensor(X, dtype=torch.float32)
+        d = torch.pdist(Xt, p=2)
+        if d.numel() == 0:
+            return 0.0
+        q = float(percentile) / 100.0
+        return float(torch.quantile(d, q).detach().cpu().item())
+    d = pdist(X, metric="euclidean")
+    if d.size == 0:
+        return 0.0
+    return float(np.percentile(d, percentile))
+
+
+def _solve_lstsq_backend(
+    Xc: np.ndarray,
+    Yc: np.ndarray,
+) -> np.ndarray:
+    if _COMPUTE_BACKEND.enabled:
+        Xt = _to_backend_tensor(Xc, dtype=torch.float64)
+        Yt = _to_backend_tensor(Yc, dtype=torch.float64)
+        sol = torch.linalg.lstsq(Xt, Yt).solution
+        return sol.detach().cpu().numpy()
+    M, *_ = np.linalg.lstsq(Xc, Yc, rcond=None)
+    return M
+
+
+def _svdvals_backend(M: np.ndarray) -> np.ndarray:
+    if _COMPUTE_BACKEND.enabled:
+        Mt = _to_backend_tensor(M, dtype=torch.float64)
+        s = torch.linalg.svdvals(Mt)
+        return s.detach().cpu().numpy()
+    return svd(M, full_matrices=False, compute_uv=False)
+
+
+def _svd_backend(M: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if _COMPUTE_BACKEND.enabled:
+        Mt = _to_backend_tensor(M, dtype=torch.float64)
+        U, s, Vh = torch.linalg.svd(Mt, full_matrices=False)
+        return (
+            U.detach().cpu().numpy(),
+            s.detach().cpu().numpy(),
+            Vh.detach().cpu().numpy(),
+        )
+    U, s, Vh = svd(M, full_matrices=False, compute_uv=True)
+    return U, s, Vh
 
 
 # ============================================================
@@ -205,6 +327,171 @@ def _merge_model_lists_preserve_order(
     return merged
 
 
+def _parse_backend_list(raw: str) -> List[str]:
+    items = [part.strip().lower() for part in str(raw).split(",") if part.strip()]
+    if not items:
+        return []
+    allowed = {"cpu", "cuda"}
+    invalid = [item for item in items if item not in allowed]
+    if invalid:
+        raise ValueError(
+            f"Неподдерживаемые backend'ы в benchmark: {invalid}. Допустимые: {sorted(allowed)}"
+        )
+    unique: List[str] = []
+    seen = set()
+    for item in items:
+        if item not in seen:
+            unique.append(item)
+            seen.add(item)
+    return unique
+
+
+def _build_benchmark_command(
+    args: argparse.Namespace,
+    backend: str,
+    out_dir: str,
+) -> List[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "scripts.run_compute_embedding_metrics",
+        "--embeddings_dir",
+        str(args.embeddings_dir),
+        "--out_dir",
+        str(out_dir),
+        "--backend",
+        str(backend),
+        "--seed",
+        str(args.seed),
+        "--local_id_n_neighbors",
+        str(args.local_id_n_neighbors),
+        "--local_id_estimator",
+        str(args.local_id_estimator),
+        "--local_geometry_mode",
+        str(args.local_geometry_mode),
+    ]
+    if args.include:
+        cmd.extend(["--include", str(args.include)])
+    if args.exclude:
+        cmd.extend(["--exclude", str(args.exclude)])
+    if args.models:
+        cmd.extend(["--models", str(args.models)])
+    if args.incremental:
+        cmd.append("--incremental")
+    if args.compute_local_id_diagnostics:
+        cmd.append("--compute_local_id_diagnostics")
+    if np.isfinite(args.hard_rank_threshold_override):
+        cmd.extend(
+            [
+                "--hard_rank_threshold_override",
+                str(float(args.hard_rank_threshold_override)),
+            ]
+        )
+    return cmd
+
+
+def _run_backend_benchmarks(args: argparse.Namespace) -> None:
+    backends = _parse_backend_list(args.benchmark_backends)
+    if not backends:
+        return
+
+    repeats = max(1, int(args.benchmark_repeats))
+    warmup = max(0, int(args.benchmark_warmup))
+    benchmark_rows: List[Dict[str, Any]] = []
+
+    print("\n" + "=" * 80)
+    print("BENCHMARK MODE")
+    print("=" * 80)
+    print(f"Backends : {backends}")
+    print(f"Warmup   : {warmup}")
+    print(f"Repeats  : {repeats}")
+    print("Замеряется полный wall-clock запуск этого же скрипта на выбранных конфигах.")
+
+    for backend in backends:
+        samples: List[float] = []
+        total_runs = warmup + repeats
+        for run_idx in range(total_runs):
+            tmp_dir = tempfile.mkdtemp(prefix=f"metric_bench_{backend}_")
+            cmd = _build_benchmark_command(args, backend=backend, out_dir=tmp_dir)
+            started = time.perf_counter()
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            finally:
+                elapsed = time.perf_counter() - started
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            if proc.returncode != 0:
+                print(proc.stdout)
+                print(proc.stderr)
+                raise RuntimeError(
+                    f"Benchmark child-run завершился с ошибкой для backend={backend}"
+                )
+
+            phase = "warmup" if run_idx < warmup else "measure"
+            print(
+                f"[benchmark] backend={backend} run={run_idx + 1}/{total_runs} "
+                f"phase={phase} elapsed={elapsed:.3f}s"
+            )
+            if run_idx >= warmup:
+                samples.append(float(elapsed))
+
+        row = {
+            "backend": backend,
+            "repeats": repeats,
+            "warmup": warmup,
+            "times_sec": samples,
+            "mean_sec": float(np.mean(samples)) if samples else float("nan"),
+            "std_sec": float(np.std(samples)) if samples else float("nan"),
+            "min_sec": float(np.min(samples)) if samples else float("nan"),
+            "max_sec": float(np.max(samples)) if samples else float("nan"),
+        }
+        benchmark_rows.append(row)
+
+    if len(benchmark_rows) >= 2:
+        baseline = benchmark_rows[0]
+        base_mean = float(baseline["mean_sec"])
+        for row in benchmark_rows[1:]:
+            mean_val = float(row["mean_sec"])
+            if np.isfinite(base_mean) and np.isfinite(mean_val) and mean_val > 0:
+                row["speedup_vs_" + str(baseline["backend"])] = base_mean / mean_val
+
+    print("\nBenchmark summary:")
+    for row in benchmark_rows:
+        line = (
+            f"  - {row['backend']}: mean={row['mean_sec']:.3f}s "
+            f"std={row['std_sec']:.3f}s min={row['min_sec']:.3f}s max={row['max_sec']:.3f}s"
+        )
+        speedup_keys = [k for k in row.keys() if k.startswith("speedup_vs_")]
+        if speedup_keys:
+            key = speedup_keys[0]
+            line += f" | {key}={row[key]:.3f}x"
+        print(line)
+
+    if args.benchmark_output_json:
+        payload = {
+            "backends": backends,
+            "repeats": repeats,
+            "warmup": warmup,
+            "results": benchmark_rows,
+            "include": str(args.include),
+            "exclude": str(args.exclude),
+            "models": str(args.models),
+            "embeddings_dir": str(args.embeddings_dir),
+        }
+        out_path = str(args.benchmark_output_json)
+        out_parent = os.path.dirname(out_path)
+        if out_parent:
+            os.makedirs(out_parent, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"\nBenchmark JSON сохранён: {out_path}")
+
+
 # ============================================================
 # 1) RankMe, hard_rank и метрика локального ранга отображения
 # ============================================================
@@ -249,6 +536,99 @@ def _aggregate_rank(
     return rankme(s)
 
 
+def _weighted_svdvals_backend(
+    X: np.ndarray,
+    sample_weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    X_work = np.asarray(X, dtype=np.float64)
+    if X_work.size == 0 or X_work.shape[0] == 0 or X_work.shape[1] == 0:
+        return np.zeros((0,), dtype=np.float64)
+    if sample_weights is not None:
+        w = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
+        w = np.clip(w, 1e-8, None)
+        X_work = X_work * np.sqrt(w)[:, None]
+    return _svdvals_backend(X_work)
+
+
+def _weak_spectrum_rankme(
+    Xc_work: np.ndarray,
+    left_singular_vectors: np.ndarray,
+    singular_values: np.ndarray,
+    sample_weights: Optional[np.ndarray],
+    weak_spectrum_count: int,
+) -> float:
+    """
+    RankMe локальной структуры X в слабых направлениях отображения M.
+
+    Для row-векторов отображение записано как X @ M. Поэтому при SVD
+    M = U S Vh столбцы U задают направления в исходном пространстве X.
+    Берём направления с минимальными сингулярными значениями и считаем
+    эффективный ранг спроецированной локальной окрестности.
+    """
+    U = np.asarray(left_singular_vectors, dtype=np.float64)
+    s = np.asarray(singular_values, dtype=np.float64).reshape(-1)
+    if U.ndim != 2 or U.shape[1] == 0 or s.size == 0:
+        return float("nan")
+
+    q = int(weak_spectrum_count)
+    q = max(1, min(q, U.shape[1], s.size))
+    weak_idx = np.argsort(s)[:q]
+    weak_basis = U[:, weak_idx]
+    projected = np.asarray(Xc_work, dtype=np.float64) @ weak_basis
+    projected_s = _weighted_svdvals_backend(projected, sample_weights=sample_weights)
+    return rankme(projected_s)
+
+
+def _weak_spectrum_rankme_from_map_backend(
+    M: np.ndarray,
+    Xc_work: np.ndarray,
+    sample_weights: Optional[np.ndarray],
+    weak_spectrum_count: int,
+) -> Tuple[float, np.ndarray]:
+    """
+    Backend-aware версия weak_rankme.
+
+    CPU-ветка использует SciPy/NumPy. CUDA-ветка держит SVD M, проекцию и SVD
+    спроецированной окрестности в torch до финального скалярного результата.
+    Возвращает также сингулярные значения M для совместимых артефактов.
+    """
+    if not _COMPUTE_BACKEND.enabled:
+        U, s, _ = _svd_backend(M)
+        return (
+            _weak_spectrum_rankme(
+                Xc_work,
+                left_singular_vectors=U,
+                singular_values=s,
+                sample_weights=sample_weights,
+                weak_spectrum_count=weak_spectrum_count,
+            ),
+            s,
+        )
+
+    Mt = _to_backend_tensor(M, dtype=torch.float64)
+    Xt = _to_backend_tensor(Xc_work, dtype=torch.float64)
+    U, s_t, _ = torch.linalg.svd(Mt, full_matrices=False)
+    if U.ndim != 2 or U.shape[1] == 0 or s_t.numel() == 0:
+        return float("nan"), s_t.detach().cpu().numpy()
+
+    q = max(1, min(int(weak_spectrum_count), int(U.shape[1]), int(s_t.numel())))
+    weak_idx = torch.argsort(s_t)[:q]
+    projected = Xt @ U[:, weak_idx]
+    if sample_weights is not None:
+        wt = _to_backend_tensor(
+            np.asarray(sample_weights, dtype=np.float64).reshape(-1),
+            dtype=torch.float64,
+        )
+        wt = torch.clamp(wt, min=1e-8)
+        projected = projected * torch.sqrt(wt)[:, None]
+    projected_s = torch.linalg.svdvals(projected)
+    norm_1 = torch.sum(torch.abs(projected_s))
+    p = torch.abs(projected_s) / (norm_1 + 1e-10)
+    entropy = -torch.sum(p * torch.log(p + 1e-10))
+    rank_value = torch.exp(entropy)
+    return float(rank_value.detach().cpu().item()), s_t.detach().cpu().numpy()
+
+
 def _fit_local_linear_map(
     Xc: np.ndarray,
     Yc: np.ndarray,
@@ -258,14 +638,12 @@ def _fit_local_linear_map(
     Решает Xc * M ≈ Yc обычным или взвешенным МНК.
     """
     if sample_weights is None:
-        M, *_ = np.linalg.lstsq(Xc, Yc, rcond=None)
-        return M
+        return _solve_lstsq_backend(Xc, Yc)
 
     w = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
     w = np.clip(w, 1e-8, None)
     sqrt_w = np.sqrt(w)[:, None]
-    M, *_ = np.linalg.lstsq(Xc * sqrt_w, Yc * sqrt_w, rcond=None)
-    return M
+    return _solve_lstsq_backend(Xc * sqrt_w, Yc * sqrt_w)
 
 
 def _residual_rows(Xc: np.ndarray, Yc: np.ndarray, M: np.ndarray) -> np.ndarray:
@@ -440,6 +818,7 @@ def _solve_local_linear_map_and_rank(
     ransac_threshold_scale: float = 2.5,
     rank_aggregation: str = "rankme",
     hard_rank_threshold: float = 1e-2,
+    weak_spectrum_count: int = 5,
 ) -> LocalSolveResult:
     """
     Решает локальную affine-линеаризацию в одном из режимов:
@@ -480,7 +859,21 @@ def _solve_local_linear_map_and_rank(
     else:
         M = _fit_local_linear_map(Xc_work, Yc_work, sample_weights=sample_weights)
 
-    s = svd(M, full_matrices=False, compute_uv=False)
+    if rank_aggregation == "weak_rankme":
+        weak_weights = (
+            None
+            if sample_weights is None
+            else np.asarray(sample_weights, dtype=np.float64).reshape(-1)[inlier_mask]
+        )
+        rank_value, s = _weak_spectrum_rankme_from_map_backend(
+            M,
+            Xc_work[inlier_mask],
+            sample_weights=weak_weights,
+            weak_spectrum_count=weak_spectrum_count,
+        )
+    else:
+        s = _svdvals_backend(M)
+        rank_value = _aggregate_rank(s, rank_aggregation, hard_rank_threshold)
 
     # Legacy residual сохраняем в старом поле для обратной совместимости артефактов.
     # Дополнительно считаем интерпретируемую относительную ошибку по локальным отклонениям Y.
@@ -502,7 +895,7 @@ def _solve_local_linear_map_and_rank(
     relative_residual = mean_abs_err / (mean_abs_y + 1e-8)
 
     return LocalSolveResult(
-        rank_value=_aggregate_rank(s, rank_aggregation, hard_rank_threshold),
+        rank_value=rank_value,
         singular_values=s,
         raw_residual=raw_residual,
         relative_residual=relative_residual,
@@ -519,7 +912,14 @@ def _rff_features(
         np.float32
     )
     b = rng.uniform(low=0.0, high=2 * np.pi, size=(n_features,)).astype(np.float32)
-    Z = np.sqrt(2.0 / n_features) * np.cos(X @ W + b)
+    scale = np.float32(np.sqrt(2.0 / n_features))
+    if _COMPUTE_BACKEND.enabled:
+        Xt = _to_backend_tensor(X, dtype=torch.float32)
+        Wt = _to_backend_tensor(W, dtype=torch.float32)
+        bt = _to_backend_tensor(b, dtype=torch.float32)
+        Zt = scale * torch.cos(Xt @ Wt + bt)
+        return Zt.detach().cpu().numpy().astype(np.float32)
+    Z = scale * np.cos(X @ W + b)
     return Z.astype(np.float32)
 
 
@@ -590,7 +990,7 @@ def _iter_metric_center_indices(
     cache: "NeighborCache",
     spec: "MetricSpec",
 ) -> Iterable[int]:
-    if spec.kind in {"linear_knn", "rff_knn", "multiscale_knn"}:
+    if spec.kind in {"linear_knn", "adaptive_knn", "rff_knn", "multiscale_knn"}:
         for center_idx in cache.center_indices:
             yield int(center_idx)
         return
@@ -645,7 +1045,7 @@ class LocalIDArtifacts:
 @dataclass(frozen=True)
 class MetricSpec:
     name: str
-    kind: str  # "linear_knn" | "linear_eps" | "multiscale_knn" | "rff_knn" | "local_id_diff"
+    kind: str  # "linear_knn" | "adaptive_knn" | "linear_eps" | "multiscale_knn" | "rff_knn" | "local_id_diff"
     pair_agg: str  # "directed" | "antisym" | "sym"
 
     # параметры окрестности
@@ -679,8 +1079,13 @@ class MetricSpec:
     # агрегация ранга:
     #   "rankme"    — энтропийная формула (значение от 1 до D, обратно совместимо)
     #   "hard_rank" — количество сингулярных значений выше порога hard_rank_threshold
+    #   "weak_rankme" — RankMe окрестности, спроецированной на слабые направления M
     rank_aggregation: str = "rankme"
     hard_rank_threshold: float = 1e-2
+    weak_spectrum_count: int = 5
+    exclude_center_from_fit: bool = False
+    adaptive_selection: str = "center_prediction_error"
+    adaptive_selection_centering: str = "neighbors_mean"
 
 
 def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> MetricSpec:
@@ -732,6 +1137,10 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     # Параметры агрегации ранга (новые, с обратной совместимостью по умолчанию).
     rank_aggregation = "rankme"
     hard_rank_threshold = 1e-2
+    weak_spectrum_count = 5
+    exclude_center_from_fit = False
+    adaptive_selection = "center_prediction_error"
+    adaptive_selection_centering = "neighbors_mean"
     local_id_estimator = "MLE"
     local_id_n_neighbors = 100
     if isinstance(meta, dict):
@@ -770,6 +1179,19 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             )
         except Exception:
             pass
+        try:
+            weak_spectrum_count = int(
+                meta.get("weak_spectrum_count", weak_spectrum_count)
+            )
+        except Exception:
+            pass
+        exclude_center_from_fit = bool(
+            meta.get("exclude_center_from_fit", exclude_center_from_fit)
+        )
+        adaptive_selection = str(meta.get("adaptive_selection", adaptive_selection))
+        adaptive_selection_centering = str(
+            meta.get("adaptive_selection_centering", adaptive_selection_centering)
+        )
         local_id_estimator = str(
             meta.get("estimator", meta.get("local_id_estimator", local_id_estimator))
         )
@@ -816,6 +1238,22 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 local_id_n_neighbors=local_id_n_neighbors,
             )
 
+        if variant in {"adaptive_knn", "adaptive_knn_antisym", "adaptive_knn_sym"}:
+            k_list = tuple(int(x) for x in meta.get("k_list", (5, 10, 20, 40, 80)))
+            return MetricSpec(
+                name=name,
+                kind="adaptive_knn",
+                pair_agg=pair_agg,
+                k_list=k_list,
+                n_centers=n_centers,
+                rank_aggregation=rank_aggregation,
+                hard_rank_threshold=hard_rank_threshold,
+                weak_spectrum_count=weak_spectrum_count,
+                exclude_center_from_fit=True,
+                adaptive_selection=adaptive_selection,
+                adaptive_selection_centering=adaptive_selection_centering,
+            )
+
         if variant in {"linear_knn", "linear_knn_antisym", "linear_knn_sym"}:
             k = int(meta.get("k", 10))
             return MetricSpec(
@@ -826,6 +1264,8 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 n_centers=n_centers,
                 rank_aggregation=rank_aggregation,
                 hard_rank_threshold=hard_rank_threshold,
+                weak_spectrum_count=weak_spectrum_count,
+                exclude_center_from_fit=exclude_center_from_fit,
             )
 
         if variant in {"linear_epsilon_antisym", "linear_epsilon_sym"}:
@@ -939,6 +1379,38 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             n_centers=n_centers,
             rank_aggregation=rank_aggregation,
             hard_rank_threshold=hard_rank_threshold,
+        )
+
+    m = re.fullmatch(r"weak_k(\d+)_q(\d+)(_antisym|_sym)?", lower)
+    if m:
+        pair_agg_short = "sym" if m.group(3) == "_sym" else "antisym"
+        return MetricSpec(
+            name=name,
+            kind="linear_knn",
+            pair_agg=pair_agg_short,
+            k=int(m.group(1)),
+            n_centers=n_centers,
+            rank_aggregation="weak_rankme",
+            hard_rank_threshold=hard_rank_threshold,
+            weak_spectrum_count=int(m.group(2)),
+        )
+
+    m = re.fullmatch(r"adaptive_k([0-9_]+)(_antisym|_sym)?", lower)
+    if m:
+        pair_agg_short = "sym" if m.group(2) == "_sym" else "antisym"
+        k_list = tuple(int(x) for x in m.group(1).split("_") if x)
+        return MetricSpec(
+            name=name,
+            kind="adaptive_knn",
+            pair_agg=pair_agg_short,
+            k_list=k_list,
+            n_centers=n_centers,
+            rank_aggregation=rank_aggregation,
+            hard_rank_threshold=hard_rank_threshold,
+            weak_spectrum_count=weak_spectrum_count,
+            exclude_center_from_fit=True,
+            adaptive_selection=adaptive_selection,
+            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"lin_eps_(\d+)(_antisym|_sym)?", lower)
@@ -1180,33 +1652,103 @@ class NeighborCache:
     eps_values: Dict[int, float]  # percentile -> скалярный eps
 
 
+@dataclass(frozen=True)
+class NeighborCacheKey:
+    n_centers: int
+    ks: Tuple[int, ...]
+    percentile: Optional[int]
+    eps_scale: float
+
+
 def _zscore_rows(X: np.ndarray) -> np.ndarray:
     mu = X.mean(axis=0, keepdims=True)
     sigma = X.std(axis=0, keepdims=True) + 1e-8
     return (X - mu) / sigma
 
 
-def _build_neighbor_cache(
+def _get_precomputed_zscore(model_name: str, X: np.ndarray) -> np.ndarray:
+    cached = _PRECOMPUTED_ZSCORES.get(model_name, None)
+    if cached is not None:
+        return cached
+    return _zscore_rows(X)
+
+
+def _neighbor_ks_for_spec(spec: MetricSpec) -> Tuple[int, ...]:
+    ks: List[int] = []
+    if spec.kind in {"linear_knn", "rff_knn"} and spec.k is not None:
+        k = int(spec.k)
+        ks.append(k + 1 if spec.exclude_center_from_fit else k)
+    if spec.kind == "local_id_diff" and spec.k is not None:
+        ks.append(int(spec.k))
+    if spec.kind == "multiscale_knn" and spec.k_list is not None:
+        ks.extend(int(k) for k in spec.k_list)
+    if spec.kind == "adaptive_knn" and spec.k_list is not None:
+        ks.extend(int(k) + 1 for k in spec.k_list)
+    return tuple(sorted(set(ks)))
+
+
+def _knn_lookup_k(spec: MetricSpec, k: int) -> int:
+    if spec.kind == "adaptive_knn" or spec.exclude_center_from_fit:
+        return int(k) + 1
+    return int(k)
+
+
+def _exclude_center_from_indices(
+    center_idx: int,
+    idxs: np.ndarray,
+    dists: np.ndarray,
+    k: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    idxs_arr = np.asarray(idxs, dtype=np.int32).reshape(-1)
+    dists_arr = np.asarray(dists, dtype=np.float32).reshape(-1)
+    keep = idxs_arr != int(center_idx)
+    idxs_arr = idxs_arr[keep]
+    dists_arr = dists_arr[keep]
+    if k is not None:
+        idxs_arr = idxs_arr[: int(k)]
+        dists_arr = dists_arr[: int(k)]
+    return idxs_arr, dists_arr
+
+
+def _neighbor_percentile_for_spec(spec: MetricSpec) -> Optional[int]:
+    if spec.kind in {"linear_eps", "local_id_diff"}:
+        if spec.sigma_percentile is not None:
+            return int(spec.sigma_percentile)
+        if spec.eps_percentile is not None:
+            return int(spec.eps_percentile)
+    return None
+
+
+def _neighbor_cache_key_for_spec(spec: MetricSpec) -> NeighborCacheKey:
+    return NeighborCacheKey(
+        n_centers=int(spec.n_centers),
+        ks=_neighbor_ks_for_spec(spec),
+        percentile=_neighbor_percentile_for_spec(spec),
+        eps_scale=float(spec.eps_scale),
+    )
+
+
+def _build_neighbor_cache_from_key(
     X: np.ndarray,
-    spec: MetricSpec,
+    key: NeighborCacheKey,
     seed: int = 42,
     center_indices: Optional[np.ndarray] = None,
+    X_norm: Optional[np.ndarray] = None,
 ) -> NeighborCache:
     """
-    Предвычисляет:
-    - centers: случайное подмножество строк (размер = spec.n_centers, либо N если меньше)
-    - индексы k ближайших соседей для каждого центра (для k и/или k_list)
-    - индексы eps-окрестностей для каждого центра (если используется eps_percentile)
+    Предвычисляет окрестности для заданного плана соседей, чтобы их можно было
+    переиспользовать между метриками с одинаковой локальной геометрией.
     """
     rng = np.random.RandomState(seed)
     N = X.shape[0]
 
-    # Нормализуем один раз для вычисления расстояний.
-    Xn = _zscore_rows(X)
+    Xn = np.asarray(
+        X_norm if X_norm is not None else _zscore_rows(X),
+        dtype=np.float32,
+    )
 
-    # Центры.
     if center_indices is None:
-        C = min(spec.n_centers, N)
+        C = min(int(key.n_centers), N)
         centers_idx = rng.choice(N, size=C, replace=False)
     else:
         centers_idx = np.asarray(center_indices, dtype=np.int32).reshape(-1)
@@ -1223,79 +1765,47 @@ def _build_neighbor_cache(
     sigma_values: Dict[int, float] = {}
     eps_values: Dict[int, float] = {}
 
-    # Какие k нам нужны.
-    ks: List[int] = []
-    if spec.kind in {"linear_knn", "rff_knn"} and spec.k is not None:
-        ks.append(spec.k)
-    if spec.kind == "local_id_diff" and spec.k is not None:
-        ks.append(spec.k)
-    if spec.kind == "multiscale_knn" and spec.k_list is not None:
-        ks.extend(list(spec.k_list))
-
-    ks = sorted(set(ks))
-
     D: Optional[np.ndarray] = None
 
-    if ks:
-        # Вычисляем расстояния от центров до всех точек.
-        D = cdist(centers, Xn, metric="euclidean")
-        # argpartition до Kmax
-        Kmax = max(ks)
-        nn = np.argpartition(D, kth=Kmax, axis=1)[:, :Kmax]
-        # Сортируем внутри Kmax
-        # для стабильного порядка соседей (это не критично).
+    if key.ks:
+        D = _pairwise_distances(centers, Xn)
+        kmax = min(max(key.ks), N)
+        kth = max(kmax - 1, 0)
+        nn = np.argpartition(D, kth=kth, axis=1)[:, :kmax]
         row = np.arange(nn.shape[0])[:, None]
         nn = nn[row, np.argsort(D[row, nn], axis=1)]
-        for k in ks:
+        for k in key.ks:
             knn[k] = nn[:, :k]
             knn_distances[k] = D[row, nn[:, :k]]
 
-    # eps-окрестность:
-    if spec.kind in {"linear_eps", "local_id_diff"} and (
-        spec.eps_percentile is not None or spec.sigma_percentile is not None
-    ):
-        percentile = (
-            spec.sigma_percentile
-            if spec.sigma_percentile is not None
-            else spec.eps_percentile
-        )
-    else:
-        percentile = None
-
-    if percentile is not None:
-        # Оцениваем характерный масштаб по подвыборке попарных расстояний.
+    if key.percentile is not None:
         sub_n = min(4000, N)
         sub_idx = rng.choice(N, size=sub_n, replace=False)
-        d = pdist(Xn[sub_idx], metric="euclidean")
-        sigma_val = float(np.percentile(d, percentile))
-        eps_val = float(sigma_val * spec.eps_scale)
-        sigma_values[percentile] = sigma_val
-        eps_values[percentile] = eps_val
+        sigma_val = _pdist_percentile(Xn[sub_idx], key.percentile)
+        eps_val = float(sigma_val * float(key.eps_scale))
+        sigma_values[key.percentile] = sigma_val
+        eps_values[key.percentile] = eps_val
 
         if D is None:
-            D = cdist(centers, Xn, metric="euclidean")
+            D = _pairwise_distances(centers, Xn)
 
-        for p in [percentile]:
-            mask = D <= eps_val
-            neigh = []
-            neigh_distances = []
-            for r in range(mask.shape[0]):
-                idx_r = np.where(mask[r])[0].astype(np.int32)
-                neigh.append(idx_r)
-                neigh_distances.append(D[r, idx_r].astype(np.float32))
-            # ВАЖНО: np.array(neigh, dtype=object) при одинаковых размерах
-            # элементов создаёт 2D-массив dtype=object вместо 1D object-массива
-            # из int-массивов, что ломает индексацию Xn[idxs].
-            # Единственный надёжный способ — заполнять поэлементно.
-            eps_arr = np.empty(len(neigh), dtype=object)
-            for _i, _x in enumerate(neigh):
-                eps_arr[_i] = _x
-            eps[p] = eps_arr
+        mask = D <= eps_val
+        neigh = []
+        neigh_distances = []
+        for r in range(mask.shape[0]):
+            idx_r = np.where(mask[r])[0].astype(np.int32)
+            neigh.append(idx_r)
+            neigh_distances.append(D[r, idx_r].astype(np.float32))
 
-            eps_dist_arr = np.empty(len(neigh_distances), dtype=object)
-            for _i, _x in enumerate(neigh_distances):
-                eps_dist_arr[_i] = _x
-            eps_distances[p] = eps_dist_arr
+        eps_arr = np.empty(len(neigh), dtype=object)
+        for _i, _x in enumerate(neigh):
+            eps_arr[_i] = _x
+        eps[key.percentile] = eps_arr
+
+        eps_dist_arr = np.empty(len(neigh_distances), dtype=object)
+        for _i, _x in enumerate(neigh_distances):
+            eps_dist_arr[_i] = _x
+        eps_distances[key.percentile] = eps_dist_arr
 
     return NeighborCache(
         center_indices=centers_idx.astype(np.int32),
@@ -1307,6 +1817,22 @@ def _build_neighbor_cache(
         X_norm=Xn,
         sigma_values=sigma_values,
         eps_values=eps_values,
+    )
+
+
+def _build_neighbor_cache(
+    X: np.ndarray,
+    spec: MetricSpec,
+    seed: int = 42,
+    center_indices: Optional[np.ndarray] = None,
+    X_norm: Optional[np.ndarray] = None,
+) -> NeighborCache:
+    return _build_neighbor_cache_from_key(
+        X,
+        _neighbor_cache_key_for_spec(spec),
+        seed=seed,
+        center_indices=center_indices,
+        X_norm=X_norm,
     )
 
 
@@ -1333,6 +1859,8 @@ class DirectedArtifacts:
     inlier_fracs: List[float]  # доля инлайеров
     local_id_x: List[float]  # локальная ID в X по центрам (если применимо)
     local_id_y: List[float]  # локальная ID в Y по центрам (если применимо)
+    selected_ks: List[int]  # выбранный k для adaptive-k (если применимо)
+    center_prediction_errors: List[np.ndarray]  # ошибки центра по k-кандидатам
 
 
 def _compute_local_intrinsic_dims_for_pair(
@@ -1371,6 +1899,9 @@ def _metric_directed_for_pair(
     Y: np.ndarray,
     cache_X: NeighborCache,
     seed: int = 42,
+    Y_norm: Optional[np.ndarray] = None,
+    X_features_override: Optional[np.ndarray] = None,
+    Y_features_override: Optional[np.ndarray] = None,
     dims_x: Optional[np.ndarray] = None,
     dims_y: Optional[np.ndarray] = None,
     X_local_id_features: Optional[np.ndarray] = None,
@@ -1412,6 +1943,8 @@ def _metric_directed_for_pair(
         inlier_fracs=[],
         local_id_x=[],
         local_id_y=[],
+        selected_ks=[],
+        center_prediction_errors=[],
     )
 
     if spec.kind == "local_id_diff":
@@ -1473,6 +2006,8 @@ def _metric_directed_for_pair(
             artifacts.inlier_masks.append(np.zeros((0,), dtype=bool))
             artifacts.inlier_counts.append(0)
             artifacts.inlier_fracs.append(float("nan"))
+            artifacts.selected_ks.append(0)
+            artifacts.center_prediction_errors.append(np.zeros((0,), dtype=np.float32))
 
         if spec.k is not None:
             nn = cache_X.knn[spec.k]
@@ -1513,16 +2048,28 @@ def _metric_directed_for_pair(
         return float(np.nanmean(np.asarray(vals, dtype=np.float32))), artifacts
 
     vals = []
-    Xn = cache_X.X_norm
-    Yn = _zscore_rows(Y)
+    Xn = (
+        np.asarray(X_features_override, dtype=np.float32)
+        if X_features_override is not None
+        else cache_X.X_norm
+    )
+    Yn = (
+        np.asarray(Y_features_override, dtype=np.float32)
+        if Y_features_override is not None
+        else np.asarray(
+            Y_norm if Y_norm is not None else _zscore_rows(Y),
+            dtype=np.float32,
+        )
+    )
 
-    if spec.kind == "rff_knn":
+    if spec.kind == "rff_knn" and X_features_override is None:
         Xn = _rff_features(
             Xn,
             n_features=spec.rff_n_features,
             gamma=spec.rff_gamma,
             seed=spec.rff_seed,
         )
+    if spec.kind == "rff_knn" and Y_features_override is None:
         Yn = _rff_features(
             Yn,
             n_features=spec.rff_n_features,
@@ -1543,6 +2090,8 @@ def _metric_directed_for_pair(
         sample_weights: Optional[np.ndarray] = None,
         sigma_value: float = float("nan"),
         eps_value: float = float("nan"),
+        selected_k: int = 0,
+        center_prediction_errors: Optional[np.ndarray] = None,
     ) -> Optional[float]:
         """Решает одну локальную задачу и накапливает артефакты."""
         solve_result = _solve_local_linear_map_and_rank(
@@ -1559,6 +2108,7 @@ def _metric_directed_for_pair(
             ransac_threshold_scale=spec.ransac_threshold_scale,
             rank_aggregation=spec.rank_aggregation,
             hard_rank_threshold=spec.hard_rank_threshold,
+            weak_spectrum_count=spec.weak_spectrum_count,
         )
         rank_val = solve_result.rank_value
         s = solve_result.singular_values
@@ -1597,13 +2147,60 @@ def _metric_directed_for_pair(
         artifacts.inlier_fracs.append(
             float(inlier_count / len(inlier_mask)) if len(inlier_mask) > 0 else float("nan")
         )
+        artifacts.selected_ks.append(int(selected_k))
+        if center_prediction_errors is None:
+            artifacts.center_prediction_errors.append(np.zeros((0,), dtype=np.float32))
+        else:
+            artifacts.center_prediction_errors.append(
+                np.asarray(center_prediction_errors, dtype=np.float32)
+            )
         return rank_val
+
+    def _center_prediction_error(
+        Xc: np.ndarray,
+        Yc: np.ndarray,
+        X_center: np.ndarray,
+        Y_center: np.ndarray,
+    ) -> float:
+        if Xc.shape[0] < 2:
+            return float("inf")
+        Xc_work = np.asarray(Xc, dtype=np.float64)
+        Yc_work = np.asarray(Yc, dtype=np.float64)
+        X_center_work = np.asarray(X_center, dtype=np.float64).reshape(1, -1)
+        Y_center_work = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
+
+        if _LOCAL_GEOMETRY_MODE == "centered_offsets_v1":
+            if spec.adaptive_selection_centering == "neighbors_mean":
+                x0 = Xc_work.mean(axis=0, keepdims=True)
+                y0 = Yc_work.mean(axis=0, keepdims=True)
+            elif spec.adaptive_selection_centering == "center":
+                x0 = X_center_work
+                y0 = Y_center_work
+            else:
+                raise ValueError(
+                    "Неизвестный adaptive_selection_centering: "
+                    f"{spec.adaptive_selection_centering}"
+                )
+            M = _fit_local_linear_map(Xc_work - x0, Yc_work - y0)
+            y_pred = (X_center_work - x0) @ M + y0
+        else:
+            M = _fit_local_linear_map(Xc_work, Yc_work)
+            y_pred = X_center_work @ M
+
+        return float(np.linalg.norm(y_pred.reshape(-1) - Y_center_work.reshape(-1)))
 
     if spec.kind in {"linear_knn", "rff_knn"}:
         assert spec.k is not None
-        nn = cache_X.knn[spec.k]
-        nn_dist = cache_X.knn_distances[spec.k]
+        lookup_k = _knn_lookup_k(spec, spec.k)
+        nn = cache_X.knn[lookup_k]
+        nn_dist = cache_X.knn_distances[lookup_k]
         for center_idx, idxs, dists in zip(center_indices, nn, nn_dist):
+            if spec.exclude_center_from_fit:
+                idxs, dists = _exclude_center_from_indices(
+                    int(center_idx), idxs, dists, k=spec.k
+                )
+            if idxs.size < 2:
+                continue
             Xc = Xn[idxs]
             Yc = Yn[idxs]
             vals.append(
@@ -1613,6 +2210,56 @@ def _metric_directed_for_pair(
                     X_center=Xn[int(center_idx)],
                     Y_center=Yn[int(center_idx)],
                     neighbor_distances=dists,
+                )
+            )
+
+    elif spec.kind == "adaptive_knn":
+        assert spec.k_list is not None
+        if spec.adaptive_selection != "center_prediction_error":
+            raise ValueError(f"Неизвестный adaptive_selection: {spec.adaptive_selection}")
+        k_candidates = tuple(int(k) for k in spec.k_list)
+        for center_pos, center_idx in enumerate(center_indices):
+            best_k = 0
+            best_err = float("inf")
+            best_idxs: Optional[np.ndarray] = None
+            best_dists: Optional[np.ndarray] = None
+            per_k_errors: List[float] = []
+
+            for k in k_candidates:
+                lookup_k = _knn_lookup_k(spec, k)
+                idxs_raw = cache_X.knn[lookup_k][center_pos]
+                dists_raw = cache_X.knn_distances[lookup_k][center_pos]
+                idxs, dists = _exclude_center_from_indices(
+                    int(center_idx), idxs_raw, dists_raw, k=k
+                )
+                if idxs.size < 2:
+                    err = float("inf")
+                else:
+                    err = _center_prediction_error(
+                        Xn[idxs],
+                        Yn[idxs],
+                        X_center=Xn[int(center_idx)],
+                        Y_center=Yn[int(center_idx)],
+                    )
+                per_k_errors.append(err)
+                if np.isfinite(err) and err < best_err:
+                    best_err = err
+                    best_k = k
+                    best_idxs = idxs
+                    best_dists = dists
+
+            if best_idxs is None or best_dists is None:
+                continue
+
+            vals.append(
+                _accumulate(
+                    Xn[best_idxs],
+                    Yn[best_idxs],
+                    X_center=Xn[int(center_idx)],
+                    Y_center=Yn[int(center_idx)],
+                    neighbor_distances=best_dists,
+                    selected_k=best_k,
+                    center_prediction_errors=np.asarray(per_k_errors, dtype=np.float32),
                 )
             )
 
@@ -1854,6 +2501,16 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
                 f"Количество сингулярных значений матрицы M, превышающих порог "
                 f"{spec.hard_rank_threshold:.0e}. Значение напрямую интерпретируется как ранг."
             )
+        elif rank_agg == "weak_rankme":
+            ranks_axis_label = (
+                f"RankMe структуры X в {spec.weak_spectrum_count} слабых направлениях M"
+            )
+            ranks_short_label = f"Weak RankMe (q={spec.weak_spectrum_count})"
+            ranks_description = (
+                "Для каждого локального отображения M берутся q направлений исходного пространства X, "
+                "соответствующих минимальным сингулярным значениям M. Окрестность X проецируется на этот "
+                "базис, после чего считается RankMe спроецированной локальной структуры."
+            )
         else:
             ranks_axis_label = "Ранг отображения M (RankMe, эффективное число измерений)"
             ranks_short_label = "RankMe"
@@ -1893,6 +2550,10 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
         "schema_version": 5,
         "rank_aggregation": spec.rank_aggregation,
         "hard_rank_threshold": spec.hard_rank_threshold,
+        "weak_spectrum_count": spec.weak_spectrum_count,
+        "exclude_center_from_fit": spec.exclude_center_from_fit,
+        "adaptive_selection": spec.adaptive_selection,
+        "adaptive_selection_centering": spec.adaptive_selection_centering,
         "preferred_rank_field": "metric_ranks",
         "legacy_rank_field": "ranks",
         "ranks_axis_label": ranks_axis_label,
@@ -1951,6 +2612,10 @@ def _maybe_reaggregate_direction_from_artifacts(
         if metric_ranks.size == 0 or not np.any(np.isfinite(metric_ranks)):
             return float("nan"), metric_ranks
         return float(np.nanmean(metric_ranks)), metric_ranks
+    if spec.rank_aggregation == "weak_rankme":
+        # Эта агрегация зависит от локальных X-окрестностей и левых сингулярных
+        # векторов M, поэтому из одних сохранённых singular_values её восстановить нельзя.
+        return None
     key = f"{prefix}/singular_values"
     if key not in artifacts:
         return None
@@ -1991,6 +2656,7 @@ def _save_artifacts(
     dist_array = _to_object_array(directed.neighbor_distances)
     weights_array = _to_object_array(directed.sample_weights)
     inlier_masks_array = _to_object_array(directed.inlier_masks)
+    center_errors_array = _to_object_array(directed.center_prediction_errors)
 
     artifacts[f"{prefix}/singular_values"] = sv_array
     artifacts[f"{prefix}/residuals"] = np.array(directed.residuals, dtype=np.float32)
@@ -2017,6 +2683,8 @@ def _save_artifacts(
     artifacts[f"{prefix}/inlier_fracs"] = np.array(
         directed.inlier_fracs, dtype=np.float32
     )
+    artifacts[f"{prefix}/selected_ks"] = np.array(directed.selected_ks, dtype=np.int32)
+    artifacts[f"{prefix}/center_prediction_errors"] = center_errors_array
     if directed.local_id_x:
         artifacts[f"{prefix}/local_id_x"] = np.array(directed.local_id_x, dtype=np.float32)
     if directed.local_id_y:
@@ -2115,6 +2783,14 @@ def _ensure_meta_compatible(meta_old: Dict[str, Any], new_spec: MetricSpec) -> N
             old_spec_cmp.pop("local_id_n_neighbors", None)
             new_spec_cmp.pop("local_id_estimator", None)
             new_spec_cmp.pop("local_id_n_neighbors", None)
+        if isinstance(old_spec_cmp, dict) and "weak_spectrum_count" not in old_spec_cmp:
+            new_spec_cmp.pop("weak_spectrum_count", None)
+        if isinstance(old_spec_cmp, dict) and "exclude_center_from_fit" not in old_spec_cmp:
+            new_spec_cmp.pop("exclude_center_from_fit", None)
+        if isinstance(old_spec_cmp, dict) and "adaptive_selection" not in old_spec_cmp:
+            new_spec_cmp.pop("adaptive_selection", None)
+        if isinstance(old_spec_cmp, dict) and "adaptive_selection_centering" not in old_spec_cmp:
+            new_spec_cmp.pop("adaptive_selection_centering", None)
         if old_spec_cmp != new_spec_cmp:
             raise RuntimeError(
                 "Инкрементальный режим: у существующего файла метрики другой metric_spec.\n"
@@ -2193,6 +2869,45 @@ def main():
         "--seed", type=int, default=42, help="Случайный seed для подвыборки строк."
     )
     parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help=(
+            "Численный backend для тяжёлых операций. "
+            "auto: использовать CUDA при доступности, иначе CPU/NumPy; "
+            "cpu: принудительно NumPy/Scipy; cuda: принудительно torch CUDA."
+        ),
+    )
+    parser.add_argument(
+        "--benchmark_backends",
+        type=str,
+        default="",
+        help=(
+            "Если задано, запускает benchmark-режим и сравнивает указанные backend'ы "
+            "через запятую, например: cpu,cuda. В этом режиме метрики считаются во "
+            "временные директории и затем удаляются."
+        ),
+    )
+    parser.add_argument(
+        "--benchmark_repeats",
+        type=int,
+        default=3,
+        help="Сколько измеряемых прогонов делать для каждого backend в benchmark-режиме.",
+    )
+    parser.add_argument(
+        "--benchmark_warmup",
+        type=int,
+        default=1,
+        help="Сколько прогревочных прогонов делать перед измерениями в benchmark-режиме.",
+    )
+    parser.add_argument(
+        "--benchmark_output_json",
+        type=str,
+        default="",
+        help="Необязательный путь для сохранения benchmark-сводки в JSON.",
+    )
+    parser.add_argument(
         "--incremental",
         action="store_true",
         help="Если флаг задан и файл метрики существует, расширить его и вычислить только отсутствующие пары (старый блок не трогать).",
@@ -2264,9 +2979,18 @@ def main():
     args = parser.parse_args()
 
     global _LOCAL_GEOMETRY_MODE
+    global _COMPUTE_BACKEND
+    global _PRECOMPUTED_ZSCORES
     if args.disable_centering:
         args.local_geometry_mode = "absolute_coords_v0"
     _LOCAL_GEOMETRY_MODE = str(args.local_geometry_mode)
+
+    if args.benchmark_backends:
+        _run_backend_benchmarks(args)
+        return
+
+    _COMPUTE_BACKEND = _resolve_compute_backend(args.backend)
+    _PRECOMPUTED_ZSCORES = {}
 
     if not args.out_dir:
         if not args.experiment_dir:
@@ -2309,6 +3033,9 @@ def main():
     for name in manifest_model_names:
         print(f"  * {name}")
     print(f"\nРежим локальной геометрии: {_LOCAL_GEOMETRY_MODE}")
+    print(
+        f"Численный backend: {_COMPUTE_BACKEND.name} | device={_COMPUTE_BACKEND.device}"
+    )
 
     cfgs = get_embedding_metric_configs()
 
@@ -2336,9 +3063,35 @@ def main():
             "Не выбрано ни одного конфига метрик. Проверь --include/--exclude."
         )
 
+    chosen_specs: List[Tuple[str, Dict[str, Any], MetricSpec]] = []
+    shared_neighbor_groups: Dict[NeighborCacheKey, List[str]] = {}
+    for name in chosen:
+        cfg = cfgs[name]
+        spec = _infer_metric_spec(
+            name,
+            cfg.get("meta", {}) if isinstance(cfg, dict) else cfg,
+            default_n_centers=200,
+        )
+        if (
+            spec.rank_aggregation == "hard_rank"
+            and np.isfinite(args.hard_rank_threshold_override)
+            and args.hard_rank_threshold_override > 0.0
+        ):
+            spec = replace(
+                spec,
+                hard_rank_threshold=float(args.hard_rank_threshold_override),
+            )
+        chosen_specs.append((name, cfg, spec))
+        key = _neighbor_cache_key_for_spec(spec)
+        shared_neighbor_groups.setdefault(key, []).append(name)
+
     print(f"\nБудет вычислено {len(chosen)} конфигураций метрик:")
     for name in chosen:
         print(f"  - {name}")
+    print(
+        f"\nГрупп общих neighbor-cache: {len(shared_neighbor_groups)} "
+        f"(на {len(chosen_specs)} конфигураций)"
+    )
 
     # Загружаем все эмбеддинги в память один раз.
     embeddings: Dict[str, np.ndarray] = {}
@@ -2372,6 +3125,10 @@ def main():
             embeddings[m] = embeddings[m][idx]
         print(f"\nПодвыбраны строки: N={N0} -> {sample_size}")
 
+    _PRECOMPUTED_ZSCORES = {
+        m: np.asarray(_zscore_rows(X), dtype=np.float32) for m, X in embeddings.items()
+    }
+
     # Local ID зависит только от самих эмбеддингов и глобальных CLI-параметров
     # estimator/n_neighbors, а не от конкретной eps/k-конфигурации метрики.
     # Поэтому кэш безопасно держать на уровне всего запуска и не пересчитывать
@@ -2403,19 +3160,10 @@ def main():
         return global_local_id_dims_by_model[key]
 
     # Вычисление отдельно для каждой метрики.
-    for name in chosen:
-        cfg = cfgs[name]
-        spec = _infer_metric_spec(
-            name,
-            cfg.get("meta", {}) if isinstance(cfg, dict) else cfg,
-            default_n_centers=200,
-        )
-        if (
-            spec.rank_aggregation == "hard_rank"
-            and np.isfinite(args.hard_rank_threshold_override)
-            and args.hard_rank_threshold_override > 0.0
-        ):
-            spec = replace(spec, hard_rank_threshold=float(args.hard_rank_threshold_override))
+    shared_neighbor_cache_store: Dict[Tuple[str, NeighborCacheKey], NeighborCache] = {}
+    shared_feature_cache_store: Dict[Tuple[str, Tuple[Any, ...]], np.ndarray] = {}
+
+    for name, cfg, spec in chosen_specs:
 
         out_path = os.path.join(args.out_dir, f"{name}.npz")
         artifacts_path = _artifacts_path(args.out_dir, name)
@@ -2429,14 +3177,42 @@ def main():
 
         # Создаём "главные" кэши на основе нормализованного X (zscore) и повторно используем индексы для всех пар.
         # Для повышения скорости: кэш для каждой модели i использует X_i для соседей (направленных).
-        caches: Dict[str, NeighborCache] = {}
+        cache_key = _neighbor_cache_key_for_spec(spec)
 
         def get_cache_for_model_i(model_i: str) -> NeighborCache:
-            if model_i not in caches:
-                caches[model_i] = _build_neighbor_cache(
-                    embeddings[model_i], spec, seed=args.seed
+            store_key = (model_i, cache_key)
+            if store_key not in shared_neighbor_cache_store:
+                shared_neighbor_cache_store[store_key] = _build_neighbor_cache_from_key(
+                    embeddings[model_i],
+                    cache_key,
+                    seed=args.seed,
+                    X_norm=_get_precomputed_zscore(model_i, embeddings[model_i]),
                 )
-            return caches[model_i]
+            return shared_neighbor_cache_store[store_key]
+
+        def get_metric_features_for_model(model_i: str) -> np.ndarray:
+            if spec.kind == "rff_knn":
+                feature_key = (
+                    "rff",
+                    int(spec.rff_n_features),
+                    float(spec.rff_gamma),
+                    int(spec.rff_seed),
+                )
+            else:
+                feature_key = ("zscore",)
+            store_key = (model_i, feature_key)
+            if store_key not in shared_feature_cache_store:
+                base = _get_precomputed_zscore(model_i, embeddings[model_i])
+                if spec.kind == "rff_knn":
+                    shared_feature_cache_store[store_key] = _rff_features(
+                        base,
+                        n_features=spec.rff_n_features,
+                        gamma=spec.rff_gamma,
+                        seed=spec.rff_seed,
+                    )
+                else:
+                    shared_feature_cache_store[store_key] = base
+            return shared_feature_cache_store[store_key]
 
         # ============================================================
         # ИНКРЕМЕНТАЛЬНО: определить имена моделей и инициализировать матрицу
@@ -2532,6 +3308,8 @@ def main():
             Xi_local = embeddings[model_i]
             Yj_local = embeddings[model_j]
             cache_i_local = get_cache_for_model_i(model_i)
+            Xi_metric_features = get_metric_features_for_model(model_i)
+            Yj_metric_features = get_metric_features_for_model(model_j)
             dims_x_local = None
             dims_y_local = None
             Xi_local_id_features = None
@@ -2545,6 +3323,9 @@ def main():
                 Yj_local,
                 cache_i_local,
                 seed=args.seed,
+                Y_norm=_get_precomputed_zscore(model_j, Yj_local),
+                X_features_override=Xi_metric_features,
+                Y_features_override=Yj_metric_features,
                 dims_x=dims_x_local,
                 dims_y=dims_y_local,
                 X_local_id_features=Xi_local_id_features,

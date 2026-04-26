@@ -8,6 +8,10 @@ __pycache__/
 # VSCode
 .vscode/
 
+# Local Codex notes
+AGENTS.md
+.codex_tmp*/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -15,6 +19,7 @@ Thumbs.db
 # Локальные данные (если не коммитишь их)
 data/
 logs/
+.torch-cache/
 
 # Крупные numpy-файлы (если не нужны в репо)
 *.npy

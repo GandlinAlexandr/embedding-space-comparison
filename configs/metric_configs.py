@@ -103,7 +103,11 @@ def _variant_suffix(pair_agg: str) -> str:
 
 def _rank_suffix(rank_aggregation: str) -> str:
     """Возвращает суффикс имени для способа агрегации ранга."""
-    return "_hr" if rank_aggregation == "hard_rank" else ""
+    if rank_aggregation == "hard_rank":
+        return "_hr"
+    if rank_aggregation == "weak_rankme":
+        return "_weak"
+    return ""
 
 
 # ============================================================
@@ -151,6 +155,7 @@ def _w_eps(
     solver: str = "lstsq",
     rank_aggregation: str = "rankme",
     hard_rank_threshold: float = _HARD_RANK_THRESHOLD,
+    weak_spectrum_count: int = 5,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Weighted eps: gaussian-веса exp(-d²/σ²), σ = percentile попарных расстояний,
@@ -177,6 +182,8 @@ def _w_eps(
     if rank_aggregation != "rankme":
         meta["rank_aggregation"] = rank_aggregation
         meta["hard_rank_threshold"] = hard_rank_threshold
+    if rank_aggregation == "weak_rankme":
+        meta["weak_spectrum_count"] = weak_spectrum_count
     if solver == "ransac":
         meta.update({
             "ransac_n_iter": _RANSAC_N_ITER,
@@ -186,6 +193,63 @@ def _w_eps(
         })
 
     return name, {"sample_size": _SAMPLE_SIZE, "meta": meta}
+
+
+def _weak_knn(
+    k: int,
+    pair_agg: str = "antisym",
+    weak_spectrum_count: int = 5,
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    kNN-метрика структуры в слабых направлениях локального отображения.
+
+    Для каждого центра решаем обычное локальное отображение X -> Y, берём
+    направления X, соответствующие минимальным сингулярным значениям M,
+    проецируем на них локальную окрестность и считаем RankMe уже у этой
+    спроецированной окрестности.
+    """
+    name = f"weak_k{k}_q{weak_spectrum_count}{_agg_suffix(pair_agg)}"
+    variant = f"linear_knn{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "k": k,
+            "n_centers": _N_CENTERS,
+            "rank_aggregation": "weak_rankme",
+            "weak_spectrum_count": weak_spectrum_count,
+        },
+    }
+
+
+def _adaptive_knn(
+    k_list: List[int] = None,
+    pair_agg: str = "antisym",
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Adaptive kNN: для каждого центра выбирает k по leave-center-out ошибке.
+
+    k в k_list интерпретируется как число соседей без самой центральной точки.
+    Центр не входит в систему МНК при выборе масштаба и финальном расчёте.
+    """
+    if k_list is None:
+        k_list = list(_K_LIST_DEFAULT)
+    k_part = "_".join(str(k) for k in k_list)
+    name = f"adaptive_k{k_part}{_agg_suffix(pair_agg)}"
+    variant = f"adaptive_knn{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "k_list": k_list,
+            "n_centers": _N_CENTERS,
+            "exclude_center_from_fit": True,
+            "adaptive_selection": "center_prediction_error",
+            "adaptive_selection_centering": "neighbors_mean",
+        },
+    }
 
 
 def _multiscale(
@@ -302,6 +366,13 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     for k in _K_KNN_ABLATION:
         specs.append(_lin_knn(k=k, pair_agg="antisym"))
 
+    # --- weak-spectrum kNN, antisym ---
+    for k in [10, 20, 40]:
+        specs.append(_weak_knn(k=k, pair_agg="antisym", weak_spectrum_count=5))
+
+    # --- adaptive kNN, antisym ---
+    specs.append(_adaptive_knn(k_list=[5, 10, 20, 40, 80], pair_agg="antisym"))
+
     # --- linear eps, antisym ---
     for q in [5, 10, 20]:
         specs.append(_lin_eps(eps_percentile=q, pair_agg="antisym"))
@@ -345,6 +416,13 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     # --- linear kNN, sym ---
     for k in _K_KNN_ABLATION:
         specs.append(_lin_knn(k=k, pair_agg="sym"))
+
+    # --- weak-spectrum kNN, sym ---
+    for k in [10, 20, 40]:
+        specs.append(_weak_knn(k=k, pair_agg="sym", weak_spectrum_count=5))
+
+    # --- adaptive kNN, sym ---
+    specs.append(_adaptive_knn(k_list=[5, 10, 20, 40, 80], pair_agg="sym"))
 
     # --- linear eps, sym ---
     for q in [5, 10, 20]:
