@@ -252,6 +252,66 @@ def _adaptive_knn(
     }
 
 
+def _adaptive_weak_knn(
+    k_list: List[int] = None,
+    pair_agg: str = "antisym",
+    weak_spectrum_count: int = 5,
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Adaptive kNN + weak RankMe: выбирает k по ошибке центра, затем считает
+    RankMe окрестности X в слабых направлениях локального отображения M.
+    """
+    if k_list is None:
+        k_list = list(_K_LIST_DEFAULT)
+    k_part = "_".join(str(k) for k in k_list)
+    name = f"adaptive_weak_k{k_part}_q{weak_spectrum_count}{_agg_suffix(pair_agg)}"
+    variant = f"adaptive_knn{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "k_list": k_list,
+            "n_centers": _N_CENTERS,
+            "rank_aggregation": "weak_rankme",
+            "weak_spectrum_count": weak_spectrum_count,
+            "exclude_center_from_fit": True,
+            "adaptive_selection": "center_prediction_error",
+            "adaptive_selection_centering": "neighbors_mean",
+        },
+    }
+
+
+def _adaptive_tail_knn(
+    k_list: List[int] = None,
+    pair_agg: str = "antisym",
+    weak_spectrum_count: int = 5,
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Adaptive kNN + tail spectrum: выбирает k по ошибке центра, затем напрямую
+    агрегирует q минимальных сингулярных значений M как log-ratio к медиане.
+    """
+    if k_list is None:
+        k_list = list(_K_LIST_DEFAULT)
+    k_part = "_".join(str(k) for k in k_list)
+    name = f"adaptive_tail_k{k_part}_q{weak_spectrum_count}{_agg_suffix(pair_agg)}"
+    variant = f"adaptive_knn{_variant_suffix(pair_agg)}"
+    return name, {
+        "sample_size": _SAMPLE_SIZE,
+        "meta": {
+            "family": "local_map_rank",
+            "variant": variant,
+            "k_list": k_list,
+            "n_centers": _N_CENTERS,
+            "rank_aggregation": "tail_spectrum_log_ratio",
+            "weak_spectrum_count": weak_spectrum_count,
+            "exclude_center_from_fit": True,
+            "adaptive_selection": "center_prediction_error",
+            "adaptive_selection_centering": "neighbors_mean",
+        },
+    }
+
+
 def _multiscale(
     k_list: List[int] = None,
     aggregator: str = _AGG_DEFAULT,
@@ -372,6 +432,20 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
 
     # --- adaptive kNN, antisym ---
     specs.append(_adaptive_knn(k_list=[5, 10, 20, 40, 80], pair_agg="antisym"))
+    specs.append(
+        _adaptive_weak_knn(
+            k_list=[5, 10, 20, 40, 80],
+            pair_agg="antisym",
+            weak_spectrum_count=5,
+        )
+    )
+    specs.append(
+        _adaptive_tail_knn(
+            k_list=[5, 10, 20, 40, 80],
+            pair_agg="antisym",
+            weak_spectrum_count=5,
+        )
+    )
 
     # --- linear eps, antisym ---
     for q in [5, 10, 20]:
@@ -423,6 +497,20 @@ def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
 
     # --- adaptive kNN, sym ---
     specs.append(_adaptive_knn(k_list=[5, 10, 20, 40, 80], pair_agg="sym"))
+    specs.append(
+        _adaptive_weak_knn(
+            k_list=[5, 10, 20, 40, 80],
+            pair_agg="sym",
+            weak_spectrum_count=5,
+        )
+    )
+    specs.append(
+        _adaptive_tail_knn(
+            k_list=[5, 10, 20, 40, 80],
+            pair_agg="sym",
+            weak_spectrum_count=5,
+        )
+    )
 
     # --- linear eps, sym ---
     for q in [5, 10, 20]:

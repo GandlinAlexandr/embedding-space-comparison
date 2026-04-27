@@ -493,7 +493,7 @@ def _run_backend_benchmarks(args: argparse.Namespace) -> None:
 
 
 # ============================================================
-# 1) RankMe, hard_rank и метрика локального ранга отображения
+# 1) RankMe, hard_rank, tail-spectrum и метрика локального ранга отображения
 # ============================================================
 
 
@@ -517,10 +517,30 @@ def hard_rank(s: np.ndarray, threshold: float = 1e-2) -> float:
     return float(np.sum(s > threshold))
 
 
+def tail_spectrum_log_ratio(s: np.ndarray, weak_spectrum_count: int = 5) -> float:
+    """
+    Средний log-ratio q самых малых сингулярных значений к медианному масштабу.
+
+    В отличие от weak_rankme, эта статистика напрямую смотрит на tail спектра M,
+    а нормировка на медиану делает её менее чувствительной к общему масштабу
+    локального отображения.
+    """
+    arr = np.asarray(s, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return float("nan")
+    q = max(1, min(int(weak_spectrum_count), int(arr.size)))
+    tail = np.sort(np.abs(arr))[:q]
+    scale = float(np.median(np.abs(arr)))
+    eps = 1e-12
+    return float(np.mean(np.log((tail + eps) / (scale + eps))))
+
+
 def _aggregate_rank(
     s: np.ndarray,
     rank_aggregation: str,
     hard_rank_threshold: float,
+    weak_spectrum_count: int = 5,
 ) -> float:
     """
     Выбирает способ агрегации ранга по сингулярным значениям матрицы M.
@@ -530,9 +550,16 @@ def _aggregate_rank(
                     интерпретируется как "эффективное число измерений").
       "hard_rank" — количество сингулярных значений выше порога hard_rank_threshold
                     (значение целочисленное, напрямую интерпретируемо как ранг).
+      "tail_spectrum_log_ratio" — средний log-ratio q самых малых сингулярных
+                    значений к медианному масштабу спектра.
     """
     if rank_aggregation == "hard_rank":
         return hard_rank(s, threshold=hard_rank_threshold)
+    if rank_aggregation == "tail_spectrum_log_ratio":
+        return tail_spectrum_log_ratio(
+            s,
+            weak_spectrum_count=weak_spectrum_count,
+        )
     return rankme(s)
 
 
@@ -887,7 +914,12 @@ def _solve_local_linear_map_and_rank(
         )
     else:
         s = _svdvals_backend(M)
-        rank_value = _aggregate_rank(s, rank_aggregation, hard_rank_threshold)
+        rank_value = _aggregate_rank(
+            s,
+            rank_aggregation,
+            hard_rank_threshold,
+            weak_spectrum_count=weak_spectrum_count,
+        )
 
     # Legacy residual сохраняем в старом поле для обратной совместимости артефактов.
     # Дополнительно считаем интерпретируемую относительную ошибку по локальным отклонениям Y.
@@ -1094,6 +1126,7 @@ class MetricSpec:
     #   "rankme"    — энтропийная формула (значение от 1 до D, обратно совместимо)
     #   "hard_rank" — количество сингулярных значений выше порога hard_rank_threshold
     #   "weak_rankme" — RankMe окрестности, спроецированной на слабые направления M
+    #   "tail_spectrum_log_ratio" — log-ratio слабого хвоста спектра M к медиане
     rank_aggregation: str = "rankme"
     hard_rank_threshold: float = 1e-2
     weak_spectrum_count: int = 5
@@ -1407,6 +1440,42 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             rank_aggregation="weak_rankme",
             hard_rank_threshold=hard_rank_threshold,
             weak_spectrum_count=int(m.group(2)),
+        )
+
+    m = re.fullmatch(r"adaptive_weak_k([0-9_]+)_q(\d+)(_antisym|_sym)?", lower)
+    if m:
+        pair_agg_short = "sym" if m.group(3) == "_sym" else "antisym"
+        k_list = tuple(int(x) for x in m.group(1).split("_") if x)
+        return MetricSpec(
+            name=name,
+            kind="adaptive_knn",
+            pair_agg=pair_agg_short,
+            k_list=k_list,
+            n_centers=n_centers,
+            rank_aggregation="weak_rankme",
+            hard_rank_threshold=hard_rank_threshold,
+            weak_spectrum_count=int(m.group(2)),
+            exclude_center_from_fit=True,
+            adaptive_selection=adaptive_selection,
+            adaptive_selection_centering=adaptive_selection_centering,
+        )
+
+    m = re.fullmatch(r"adaptive_tail_k([0-9_]+)_q(\d+)(_antisym|_sym)?", lower)
+    if m:
+        pair_agg_short = "sym" if m.group(3) == "_sym" else "antisym"
+        k_list = tuple(int(x) for x in m.group(1).split("_") if x)
+        return MetricSpec(
+            name=name,
+            kind="adaptive_knn",
+            pair_agg=pair_agg_short,
+            k_list=k_list,
+            n_centers=n_centers,
+            rank_aggregation="tail_spectrum_log_ratio",
+            hard_rank_threshold=hard_rank_threshold,
+            weak_spectrum_count=int(m.group(2)),
+            exclude_center_from_fit=True,
+            adaptive_selection=adaptive_selection,
+            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"adaptive_k([0-9_]+)(_antisym|_sym)?", lower)
@@ -1742,6 +1811,25 @@ def _rankme_from_torch_singular_values(s: "torch.Tensor") -> "torch.Tensor":
     p = torch.abs(s) / (torch.sum(torch.abs(s), dim=-1, keepdim=True) + 1e-10)
     entropy = -torch.sum(p * torch.log(p + 1e-10), dim=-1)
     return torch.exp(entropy)
+
+
+def _tail_spectrum_log_ratio_from_torch_singular_values(
+    s: "torch.Tensor",
+    weak_spectrum_count: int,
+) -> "torch.Tensor":
+    q = max(1, min(int(weak_spectrum_count), int(s.shape[-1])))
+    abs_s = torch.abs(s)
+    sorted_s = torch.sort(abs_s, dim=-1).values
+    tail = sorted_s[..., :q]
+    n = int(sorted_s.shape[-1])
+    if n % 2 == 1:
+        scale = sorted_s[..., n // 2 : n // 2 + 1]
+    else:
+        scale = 0.5 * (
+            sorted_s[..., n // 2 - 1 : n // 2] + sorted_s[..., n // 2 : n // 2 + 1]
+        )
+    eps = 1e-12
+    return torch.mean(torch.log((tail + eps) / (scale + eps)), dim=-1)
 
 
 def _solve_batched_lstsq_torch(
@@ -2238,7 +2326,13 @@ def _metric_directed_for_pair(
             or spec.solver != "lstsq"
             or spec.k_list is None
             or spec.adaptive_selection != "center_prediction_error"
-            or spec.rank_aggregation not in {"rankme", "hard_rank"}
+            or spec.rank_aggregation
+            not in {
+                "rankme",
+                "hard_rank",
+                "weak_rankme",
+                "tail_spectrum_log_ratio",
+            }
         ):
             return None
 
@@ -2339,11 +2433,33 @@ def _metric_directed_for_pair(
                 B = Yk
 
             M = _solve_batched_lstsq_torch(A, B)
-            s_t = torch.linalg.svdvals(M)
-            if spec.rank_aggregation == "hard_rank":
-                metric_t = torch.sum(s_t > float(spec.hard_rank_threshold), dim=1).to(torch.float64)
+            if spec.rank_aggregation == "weak_rankme":
+                U_t, s_t, _ = torch.linalg.svd(M, full_matrices=False)
+                q = max(
+                    1,
+                    min(
+                        int(spec.weak_spectrum_count),
+                        int(U_t.shape[-1]),
+                        int(s_t.shape[-1]),
+                    ),
+                )
+                weak_pos_t = torch.argsort(s_t, dim=1)[:, :q]
+                gather_idx_t = weak_pos_t[:, None, :].expand(-1, U_t.shape[1], -1)
+                weak_basis_t = torch.gather(U_t, dim=2, index=gather_idx_t)
+                projected_t = torch.bmm(A, weak_basis_t)
+                projected_s_t = torch.linalg.svdvals(projected_t)
+                metric_t = _rankme_from_torch_singular_values(projected_s_t)
             else:
-                metric_t = _rankme_from_torch_singular_values(s_t)
+                s_t = torch.linalg.svdvals(M)
+                if spec.rank_aggregation == "hard_rank":
+                    metric_t = torch.sum(s_t > float(spec.hard_rank_threshold), dim=1).to(torch.float64)
+                elif spec.rank_aggregation == "tail_spectrum_log_ratio":
+                    metric_t = _tail_spectrum_log_ratio_from_torch_singular_values(
+                        s_t,
+                        weak_spectrum_count=spec.weak_spectrum_count,
+                    )
+                else:
+                    metric_t = _rankme_from_torch_singular_values(s_t)
 
             err_t = torch.bmm(A, M) - B
             raw_t = torch.linalg.matrix_norm(err_t, ord="fro", dim=(1, 2))
@@ -2738,6 +2854,16 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
                 "соответствующих минимальным сингулярным значениям M. Окрестность X проецируется на этот "
                 "базис, после чего считается RankMe спроецированной локальной структуры."
             )
+        elif rank_agg == "tail_spectrum_log_ratio":
+            ranks_axis_label = (
+                f"Mean log tail/median spectrum ratio (q={spec.weak_spectrum_count})"
+            )
+            ranks_short_label = f"Tail log-ratio (q={spec.weak_spectrum_count})"
+            ranks_description = (
+                "Для каждого локального отображения M берутся q минимальных сингулярных значений. "
+                "Метрика равна среднему log((s_tail + eps) / (median(s) + eps)); "
+                "так она напрямую измеряет слабый хвост спектра с нормировкой на локальный масштаб."
+            )
         else:
             ranks_axis_label = "Ранг отображения M (RankMe, эффективное число измерений)"
             ranks_short_label = "RankMe"
@@ -2806,6 +2932,7 @@ def _metric_from_saved_singular_values(
     singular_values: np.ndarray,
     rank_aggregation: str,
     hard_rank_threshold: float,
+    weak_spectrum_count: int,
 ) -> Tuple[float, np.ndarray]:
     """
     Переагрегирует уже сохранённые сингулярные значения без пересчёта локальных M.
@@ -2816,7 +2943,14 @@ def _metric_from_saved_singular_values(
     per_center = []
     for sv in singular_values:
         arr = np.asarray(sv, dtype=np.float64).reshape(-1)
-        per_center.append(_aggregate_rank(arr, rank_aggregation, hard_rank_threshold))
+        per_center.append(
+            _aggregate_rank(
+                arr,
+                rank_aggregation,
+                hard_rank_threshold,
+                weak_spectrum_count=weak_spectrum_count,
+            )
+        )
     if not per_center:
         return float("nan"), np.array([], dtype=np.float32)
     metric_ranks = np.asarray(per_center, dtype=np.float32)
@@ -2855,6 +2989,7 @@ def _maybe_reaggregate_direction_from_artifacts(
         artifacts[key],
         rank_aggregation=spec.rank_aggregation,
         hard_rank_threshold=spec.hard_rank_threshold,
+        weak_spectrum_count=spec.weak_spectrum_count,
     )
 
 

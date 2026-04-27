@@ -505,6 +505,11 @@ def main():
         help="Выходной json-файл с downstream-оценками по моделям. Если пусто, путь выводится из --experiment_dir.",
     )
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Пересчитывать downstream-оценки даже если out_json уже существует.",
+    )
+    parser.add_argument(
         "--task_name",
         type=str,
         default=None,
@@ -526,6 +531,9 @@ def main():
         args.out_json = os.path.join(dstdir, f"{ds}_linear_probe.json")
 
     os.makedirs(os.path.dirname(args.out_json), exist_ok=True)
+    if os.path.exists(args.out_json) and not args.overwrite:
+        print(f"Пропуск downstream: файл уже существует: {args.out_json}")
+        return
 
     use_train_test = (
         args.train_embeddings_dir is not None and args.test_embeddings_dir is not None
