@@ -151,8 +151,8 @@ def _pairwise_distances(
     Y: np.ndarray,
 ) -> np.ndarray:
     if _COMPUTE_BACKEND.enabled:
-        Xt = _to_backend_tensor(X, dtype=torch.float32)
-        Yt = _to_backend_tensor(Y, dtype=torch.float32)
+        Xt = _to_backend_tensor(X, dtype=torch.float64)
+        Yt = _to_backend_tensor(Y, dtype=torch.float64)
         D = torch.cdist(Xt, Yt, p=2)
         return D.detach().cpu().numpy()
     return cdist(X, Y, metric="euclidean")
@@ -163,7 +163,7 @@ def _pdist_percentile(
     percentile: float,
 ) -> float:
     if _COMPUTE_BACKEND.enabled:
-        Xt = _to_backend_tensor(X, dtype=torch.float32)
+        Xt = _to_backend_tensor(X, dtype=torch.float64)
         d = torch.pdist(Xt, p=2)
         if d.numel() == 0:
             return 0.0
@@ -182,7 +182,7 @@ def _solve_lstsq_backend(
     if _COMPUTE_BACKEND.enabled:
         Xt = _to_backend_tensor(Xc, dtype=torch.float64)
         Yt = _to_backend_tensor(Yc, dtype=torch.float64)
-        sol = torch.linalg.lstsq(Xt, Yt).solution
+        sol = torch.linalg.pinv(Xt) @ Yt
         return sol.detach().cpu().numpy()
     M, *_ = np.linalg.lstsq(Xc, Yc, rcond=None)
     return M
@@ -783,7 +783,11 @@ class LocalSolveResult:
 
 
 _LOCAL_GEOMETRY_MODE = "centered_offsets_v1"
-_LOCAL_GEOMETRY_MODE_CHOICES = ("centered_offsets_v1", "absolute_coords_v0")
+_LOCAL_GEOMETRY_MODE_CHOICES = (
+    "centered_offsets_v1",
+    "centered_offsets_v2",
+    "absolute_coords_v0",
+)
 
 
 def _local_geometry_meta() -> Dict[str, Any]:
@@ -793,6 +797,16 @@ def _local_geometry_meta() -> Dict[str, Any]:
             "local_geometry_description": (
                 "Локальная affine-линеаризация без центрирования: "
                 "Xc @ M ≈ Yc. Это legacy-режим, использовавшийся до centered_offsets_v1."
+            ),
+        }
+    if _LOCAL_GEOMETRY_MODE == "centered_offsets_v2":
+        return {
+            "local_geometry_mode": _LOCAL_GEOMETRY_MODE,
+            "local_geometry_description": (
+                "Локальная affine-линеаризация через центрирование: "
+                "(Xc - xc) @ M ≈ (Yc - yc), при этом центральная точка "
+                "не входит как строка в МНК для kNN-окрестностей. "
+                "k интерпретируется как число соседей без центра."
             ),
         }
     return {
@@ -836,7 +850,7 @@ def _solve_local_linear_map_and_rank(
     """
     Xc_work = np.asarray(Xc, dtype=np.float64)
     Yc_work = np.asarray(Yc, dtype=np.float64)
-    if _LOCAL_GEOMETRY_MODE == "centered_offsets_v1":
+    if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
         X_center = np.asarray(X_center, dtype=np.float64).reshape(1, -1)
         Y_center = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
         Xc_work = Xc_work - X_center
@@ -1677,20 +1691,34 @@ def _neighbor_ks_for_spec(spec: MetricSpec) -> Tuple[int, ...]:
     ks: List[int] = []
     if spec.kind in {"linear_knn", "rff_knn"} and spec.k is not None:
         k = int(spec.k)
-        ks.append(k + 1 if spec.exclude_center_from_fit else k)
+        ks.append(k + 1 if _exclude_center_from_fit_for_spec(spec) else k)
     if spec.kind == "local_id_diff" and spec.k is not None:
         ks.append(int(spec.k))
     if spec.kind == "multiscale_knn" and spec.k_list is not None:
-        ks.extend(int(k) for k in spec.k_list)
+        if _exclude_center_from_fit_for_spec(spec):
+            ks.extend(int(k) + 1 for k in spec.k_list)
+        else:
+            ks.extend(int(k) for k in spec.k_list)
     if spec.kind == "adaptive_knn" and spec.k_list is not None:
         ks.extend(int(k) + 1 for k in spec.k_list)
     return tuple(sorted(set(ks)))
 
 
 def _knn_lookup_k(spec: MetricSpec, k: int) -> int:
-    if spec.kind == "adaptive_knn" or spec.exclude_center_from_fit:
+    if spec.kind == "adaptive_knn" or _exclude_center_from_fit_for_spec(spec):
         return int(k) + 1
     return int(k)
+
+
+def _exclude_center_from_fit_for_spec(spec: MetricSpec) -> bool:
+    if spec.exclude_center_from_fit:
+        return True
+    return _LOCAL_GEOMETRY_MODE == "centered_offsets_v2" and spec.kind in {
+        "linear_knn",
+        "rff_knn",
+        "multiscale_knn",
+        "adaptive_knn",
+    }
 
 
 def _exclude_center_from_indices(
@@ -1708,6 +1736,19 @@ def _exclude_center_from_indices(
         idxs_arr = idxs_arr[: int(k)]
         dists_arr = dists_arr[: int(k)]
     return idxs_arr, dists_arr
+
+
+def _rankme_from_torch_singular_values(s: "torch.Tensor") -> "torch.Tensor":
+    p = torch.abs(s) / (torch.sum(torch.abs(s), dim=-1, keepdim=True) + 1e-10)
+    entropy = -torch.sum(p * torch.log(p + 1e-10), dim=-1)
+    return torch.exp(entropy)
+
+
+def _solve_batched_lstsq_torch(
+    A: "torch.Tensor",
+    B: "torch.Tensor",
+) -> "torch.Tensor":
+    return torch.linalg.pinv(A) @ B
 
 
 def _neighbor_percentile_for_spec(spec: MetricSpec) -> Optional[int]:
@@ -2169,7 +2210,7 @@ def _metric_directed_for_pair(
         X_center_work = np.asarray(X_center, dtype=np.float64).reshape(1, -1)
         Y_center_work = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
 
-        if _LOCAL_GEOMETRY_MODE == "centered_offsets_v1":
+        if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
             if spec.adaptive_selection_centering == "neighbors_mean":
                 x0 = Xc_work.mean(axis=0, keepdims=True)
                 y0 = Yc_work.mean(axis=0, keepdims=True)
@@ -2189,13 +2230,185 @@ def _metric_directed_for_pair(
 
         return float(np.linalg.norm(y_pred.reshape(-1) - Y_center_work.reshape(-1)))
 
+    def _try_accumulate_adaptive_knn_batched() -> Optional[List[float]]:
+        if (
+            spec.kind != "adaptive_knn"
+            or not _COMPUTE_BACKEND.enabled
+            or torch is None
+            or spec.solver != "lstsq"
+            or spec.k_list is None
+            or spec.adaptive_selection != "center_prediction_error"
+            or spec.rank_aggregation not in {"rankme", "hard_rank"}
+        ):
+            return None
+
+        k_candidates = tuple(int(k) for k in spec.k_list)
+        center_indices_np = np.asarray(center_indices, dtype=np.int32).reshape(-1)
+        C = int(center_indices_np.size)
+        if C == 0:
+            return []
+
+        candidate_indices: Dict[int, np.ndarray] = {}
+        candidate_distances: Dict[int, np.ndarray] = {}
+        for k in k_candidates:
+            lookup_k = _knn_lookup_k(spec, k)
+            if lookup_k not in cache_X.knn:
+                return None
+            idx_rows: List[np.ndarray] = []
+            dist_rows: List[np.ndarray] = []
+            for center_idx, idxs_raw, dists_raw in zip(
+                center_indices_np,
+                cache_X.knn[lookup_k],
+                cache_X.knn_distances[lookup_k],
+            ):
+                idxs, dists = _exclude_center_from_indices(
+                    int(center_idx), idxs_raw, dists_raw, k=k
+                )
+                if idxs.size != k:
+                    return None
+                idx_rows.append(idxs)
+                dist_rows.append(dists)
+            candidate_indices[k] = np.stack(idx_rows, axis=0).astype(np.int32)
+            candidate_distances[k] = np.stack(dist_rows, axis=0).astype(np.float32)
+
+        X_center_t = _to_backend_tensor(Xn[center_indices_np], dtype=torch.float64)
+        Y_center_t = _to_backend_tensor(Yn[center_indices_np], dtype=torch.float64)
+        per_k_errors_t: List["torch.Tensor"] = []
+
+        for k in k_candidates:
+            idx = candidate_indices[k]
+            Xk = _to_backend_tensor(Xn[idx], dtype=torch.float64)
+            Yk = _to_backend_tensor(Yn[idx], dtype=torch.float64)
+
+            if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
+                if spec.adaptive_selection_centering == "neighbors_mean":
+                    x0 = Xk.mean(dim=1, keepdim=True)
+                    y0 = Yk.mean(dim=1, keepdim=True)
+                elif spec.adaptive_selection_centering == "center":
+                    x0 = X_center_t[:, None, :]
+                    y0 = Y_center_t[:, None, :]
+                else:
+                    raise ValueError(
+                        "Неизвестный adaptive_selection_centering: "
+                        f"{spec.adaptive_selection_centering}"
+                    )
+                A = Xk - x0
+                B = Yk - y0
+                M = _solve_batched_lstsq_torch(A, B)
+                y_pred = torch.bmm((X_center_t[:, None, :] - x0), M).squeeze(1) + y0.squeeze(1)
+            else:
+                M = _solve_batched_lstsq_torch(Xk, Yk)
+                y_pred = torch.bmm(X_center_t[:, None, :], M).squeeze(1)
+
+            per_k_errors_t.append(torch.linalg.vector_norm(y_pred - Y_center_t, dim=1))
+
+        errors_t = torch.stack(per_k_errors_t, dim=0)
+        best_pos_t = torch.argmin(errors_t, dim=0)
+        errors_np = errors_t.detach().cpu().numpy().astype(np.float32)
+        best_pos_np = best_pos_t.detach().cpu().numpy().astype(np.int64)
+        selected_ks_np = np.asarray(k_candidates, dtype=np.int32)[best_pos_np]
+
+        vals_batched = np.full((C,), np.nan, dtype=np.float32)
+        singular_values_by_center: List[Optional[np.ndarray]] = [None] * C
+        residuals_by_center = np.full((C,), np.nan, dtype=np.float32)
+        rel_residuals_by_center = np.full((C,), np.nan, dtype=np.float32)
+        hard_ranks_by_center = np.zeros((C,), dtype=np.int32)
+        metric_ranks_by_center = np.full((C,), np.nan, dtype=np.float32)
+        neighbor_distances_by_center: List[Optional[np.ndarray]] = [None] * C
+        sample_weights_by_center: List[Optional[np.ndarray]] = [None] * C
+        inlier_masks_by_center: List[Optional[np.ndarray]] = [None] * C
+        inlier_counts_by_center = np.zeros((C,), dtype=np.int32)
+        inlier_fracs_by_center = np.full((C,), np.nan, dtype=np.float32)
+
+        for k in k_candidates:
+            center_pos = np.where(selected_ks_np == k)[0]
+            if center_pos.size == 0:
+                continue
+
+            idx = candidate_indices[k][center_pos]
+            Xk = _to_backend_tensor(Xn[idx], dtype=torch.float64)
+            Yk = _to_backend_tensor(Yn[idx], dtype=torch.float64)
+            Xc_t = X_center_t[center_pos]
+            Yc_t = Y_center_t[center_pos]
+
+            if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
+                A = Xk - Xc_t[:, None, :]
+                B = Yk - Yc_t[:, None, :]
+            else:
+                A = Xk
+                B = Yk
+
+            M = _solve_batched_lstsq_torch(A, B)
+            s_t = torch.linalg.svdvals(M)
+            if spec.rank_aggregation == "hard_rank":
+                metric_t = torch.sum(s_t > float(spec.hard_rank_threshold), dim=1).to(torch.float64)
+            else:
+                metric_t = _rankme_from_torch_singular_values(s_t)
+
+            err_t = torch.bmm(A, M) - B
+            raw_t = torch.linalg.matrix_norm(err_t, ord="fro", dim=(1, 2))
+            mean_abs_err_t = torch.mean(torch.abs(err_t), dim=(1, 2))
+            mean_abs_y_t = torch.mean(torch.abs(B), dim=(1, 2))
+            rel_t = mean_abs_err_t / (mean_abs_y_t + 1e-8)
+            tol_t = 1e-10 * torch.max(s_t, dim=1).values
+            hard_artifact_t = torch.sum(s_t > tol_t[:, None], dim=1)
+
+            s_np = s_t.detach().cpu().numpy()
+            metric_np = metric_t.detach().cpu().numpy().astype(np.float32)
+            raw_np = raw_t.detach().cpu().numpy().astype(np.float32)
+            rel_np = rel_t.detach().cpu().numpy().astype(np.float32)
+            hard_np = hard_artifact_t.detach().cpu().numpy().astype(np.int32)
+
+            for local_pos, original_pos in enumerate(center_pos):
+                singular_values_by_center[int(original_pos)] = s_np[local_pos]
+                residuals_by_center[int(original_pos)] = raw_np[local_pos]
+                rel_residuals_by_center[int(original_pos)] = rel_np[local_pos]
+                hard_ranks_by_center[int(original_pos)] = hard_np[local_pos]
+                metric_ranks_by_center[int(original_pos)] = metric_np[local_pos]
+                vals_batched[int(original_pos)] = metric_np[local_pos]
+                neighbor_distances_by_center[int(original_pos)] = candidate_distances[k][int(original_pos)]
+                sample_weights_by_center[int(original_pos)] = np.ones((k,), dtype=np.float32)
+                inlier_masks_by_center[int(original_pos)] = np.ones((k,), dtype=bool)
+                inlier_counts_by_center[int(original_pos)] = int(k)
+                inlier_fracs_by_center[int(original_pos)] = 1.0
+
+        for center_pos in range(C):
+            if singular_values_by_center[center_pos] is None:
+                continue
+            artifacts.singular_values.append(
+                np.asarray(singular_values_by_center[center_pos], dtype=np.float64)
+            )
+            artifacts.residuals.append(float(residuals_by_center[center_pos]))
+            artifacts.relative_residuals.append(float(rel_residuals_by_center[center_pos]))
+            artifacts.ranks.append(int(hard_ranks_by_center[center_pos]))
+            artifacts.metric_ranks.append(float(metric_ranks_by_center[center_pos]))
+            selected_k = int(selected_ks_np[center_pos])
+            artifacts.neighbor_sizes.append(selected_k)
+            artifacts.neighbor_distances.append(
+                np.asarray(neighbor_distances_by_center[center_pos], dtype=np.float32)
+            )
+            artifacts.sigma_values.append(float("nan"))
+            artifacts.eps_values.append(float("nan"))
+            artifacts.sample_weights.append(
+                np.asarray(sample_weights_by_center[center_pos], dtype=np.float32)
+            )
+            artifacts.inlier_masks.append(
+                np.asarray(inlier_masks_by_center[center_pos], dtype=bool)
+            )
+            artifacts.inlier_counts.append(int(inlier_counts_by_center[center_pos]))
+            artifacts.inlier_fracs.append(float(inlier_fracs_by_center[center_pos]))
+            artifacts.selected_ks.append(selected_k)
+            artifacts.center_prediction_errors.append(errors_np[:, center_pos].copy())
+
+        return [float(v) for v in vals_batched[np.isfinite(vals_batched)]]
+
     if spec.kind in {"linear_knn", "rff_knn"}:
         assert spec.k is not None
         lookup_k = _knn_lookup_k(spec, spec.k)
         nn = cache_X.knn[lookup_k]
         nn_dist = cache_X.knn_distances[lookup_k]
         for center_idx, idxs, dists in zip(center_indices, nn, nn_dist):
-            if spec.exclude_center_from_fit:
+            if _exclude_center_from_fit_for_spec(spec):
                 idxs, dists = _exclude_center_from_indices(
                     int(center_idx), idxs, dists, k=spec.k
                 )
@@ -2217,6 +2430,13 @@ def _metric_directed_for_pair(
         assert spec.k_list is not None
         if spec.adaptive_selection != "center_prediction_error":
             raise ValueError(f"Неизвестный adaptive_selection: {spec.adaptive_selection}")
+        batched_vals = _try_accumulate_adaptive_knn_batched()
+        if batched_vals is not None:
+            vals.extend(batched_vals)
+            if not vals:
+                return float("nan"), artifacts
+            return float(np.mean(vals)), artifacts
+
         k_candidates = tuple(int(k) for k in spec.k_list)
         for center_pos, center_idx in enumerate(center_indices):
             best_k = 0
@@ -2267,10 +2487,17 @@ def _metric_directed_for_pair(
         assert spec.k_list is not None
         per_scale = []
         for k in spec.k_list:
-            nn = cache_X.knn[int(k)]
-            nn_dist = cache_X.knn_distances[int(k)]
+            lookup_k = _knn_lookup_k(spec, int(k))
+            nn = cache_X.knn[lookup_k]
+            nn_dist = cache_X.knn_distances[lookup_k]
             tmp = []
             for center_idx, idxs, dists in zip(center_indices, nn, nn_dist):
+                if _exclude_center_from_fit_for_spec(spec):
+                    idxs, dists = _exclude_center_from_indices(
+                        int(center_idx), idxs, dists, k=int(k)
+                    )
+                if idxs.size < 2:
+                    continue
                 Xc = Xn[idxs]
                 Yc = Yn[idxs]
                 tmp.append(
@@ -2545,13 +2772,18 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
                 "mean(|(Xc - xc) @ M - (Yc - yc)|) / mean(|Yc - yc|). "
                 "Показывает, на сколько процентов линейное отображение искажает отклонения новых координат от центра."
             )
+            if _LOCAL_GEOMETRY_MODE == "centered_offsets_v2":
+                residual_description += (
+                    " В режиме centered_offsets_v2 центральная точка используется "
+                    "для центрирования, но исключается из строк МНК для kNN-окрестностей."
+                )
 
     meta = {
         "schema_version": 5,
         "rank_aggregation": spec.rank_aggregation,
         "hard_rank_threshold": spec.hard_rank_threshold,
         "weak_spectrum_count": spec.weak_spectrum_count,
-        "exclude_center_from_fit": spec.exclude_center_from_fit,
+        "exclude_center_from_fit": _exclude_center_from_fit_for_spec(spec),
         "adaptive_selection": spec.adaptive_selection,
         "adaptive_selection_centering": spec.adaptive_selection_centering,
         "preferred_rank_field": "metric_ranks",
@@ -2965,6 +3197,7 @@ def main():
         help=(
             "Режим локальной геометрии для solve_local_linear_map. "
             "'centered_offsets_v1' — текущий режим с центрированием; "
+            "'centered_offsets_v2' — центрирование с исключением центральной точки из kNN-МНК; "
             "'absolute_coords_v0' — legacy-режим без центрирования, как в exp01."
         ),
     )
