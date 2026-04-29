@@ -251,6 +251,42 @@ def _get_direction_data(
     return sv, res, ranks
 
 
+def _get_direction_hard_ranks(
+    artifacts: Dict[str, np.ndarray], model_i: str, model_j: str
+) -> np.ndarray:
+    """Возвращает hard-rank отображения M для диагностики размерности системы."""
+    prefix = f"{model_i}_to_{model_j}"
+    key = f"{prefix}/ranks"
+    if key in artifacts:
+        return artifacts[key]
+    _, _, metric_values = _get_direction_data(artifacts, model_i, model_j)
+    return metric_values
+
+
+def _uses_metric_values_as_rank_reference(artifacts: Dict[str, np.ndarray]) -> bool:
+    """
+    Для RankMe/hard-rank метрик значение метрики само является rank-like величиной,
+    и график определённости должен оставаться N_sys - metric_value.
+
+    Для weak/tail/adaptive-derived значений это уже не ранг локального отображения,
+    поэтому там используем legacy hard-rank M как техническую опору системы.
+    """
+    meta = _load_diagnostics_meta(artifacts)
+    rank_aggregation = str(meta.get("rank_aggregation", "rankme"))
+    return rank_aggregation in {"", "rankme", "hard_rank"}
+
+
+def _get_direction_rank_reference(
+    artifacts: Dict[str, np.ndarray],
+    model_i: str,
+    model_j: str,
+    metric_values: np.ndarray,
+) -> Tuple[np.ndarray, str]:
+    if _uses_metric_values_as_rank_reference(artifacts):
+        return metric_values, _metric_value_short_label(_load_diagnostics_labels(artifacts))
+    return _get_direction_hard_ranks(artifacts, model_i, model_j), _hard_rank_short_label()
+
+
 def _direction_uses_relative_residuals(
     artifacts: Dict[str, np.ndarray], model_i: str, model_j: str
 ) -> bool:
@@ -360,8 +396,8 @@ def _compute_direction_stats(
     ranks = ranks.astype(np.float32)
     rank_mean = float(np.mean(ranks))
     rank_std = float(np.std(ranks))
-    rank_min = int(np.min(ranks))
-    rank_max = int(np.max(ranks))
+    rank_min = float(np.min(ranks))
+    rank_max = float(np.max(ranks))
 
     # Residuals (уже относительные)
     res_mean = float(np.mean(residuals))
@@ -401,6 +437,22 @@ _FALLBACK_LABELS = {
     "residual_summary_label": r"Средний residual / normalized residual",
     "residual_description": "Legacy residual ||Xc @ M - Yc||_F.",
 }
+
+
+def _metric_value_axis_label(labels: Dict[str, str]) -> str:
+    return labels.get("ranks_axis_label", _FALLBACK_LABELS["ranks_axis_label"])
+
+
+def _metric_value_short_label(labels: Dict[str, str]) -> str:
+    return labels.get("ranks_short_label", _FALLBACK_LABELS["ranks_short_label"])
+
+
+def _hard_rank_axis_label() -> str:
+    return "Hard rank отображения M"
+
+
+def _hard_rank_short_label() -> str:
+    return "hard rank"
 
 
 def _load_diagnostics_meta(artifacts: Dict[str, np.ndarray]) -> Dict[str, object]:
@@ -806,6 +858,12 @@ def _plot_single_pair(
 
     sv_ij, res_ij, ranks_ij = _get_direction_data(artifacts, model_i, model_j)
     sv_ji, res_ji, ranks_ji = _get_direction_data(artifacts, model_j, model_i)
+    rank_ref_ij, rank_ref_label = _get_direction_rank_reference(
+        artifacts, model_i, model_j, ranks_ij
+    )
+    rank_ref_ji, _ = _get_direction_rank_reference(
+        artifacts, model_j, model_i, ranks_ji
+    )
     extra_ij = _get_direction_extra_data(artifacts, model_i, model_j)
     extra_ji = _get_direction_extra_data(artifacts, model_j, model_i)
     local_id_ij = _get_direction_local_id_data(
@@ -864,9 +922,9 @@ def _plot_single_pair(
     ax = axes[0, 0]
     ax.hist(ranks_ij, bins="auto", alpha=0.6, label=label_ij, color="steelblue")
     ax.hist(ranks_ji, bins="auto", alpha=0.6, label=label_ji, color="coral")
-    ax.set_xlabel(labels["ranks_axis_label"] if use_metric_ranks else "Ранг отображения M")
+    ax.set_xlabel(_metric_value_axis_label(labels) if use_metric_ranks else _hard_rank_axis_label())
     ax.set_ylabel("Количество центров")
-    ax.set_title("Гистограмма рангов по направлениям")
+    ax.set_title("Гистограмма значений метрики по направлениям")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
@@ -918,24 +976,24 @@ def _plot_single_pair(
     )
     extra_stats_ij = _compute_extra_stats(extra_ij)
     extra_stats_ji = _compute_extra_stats(extra_ji)
-    det_stats_ij = _compute_determinedness_stats(ranks_ij, extra_ij)
-    det_stats_ji = _compute_determinedness_stats(ranks_ji, extra_ji)
-    local_id_stats_ij = _compute_local_id_stats(ranks_ij, extra_ij, local_id_ij)
-    local_id_stats_ji = _compute_local_id_stats(ranks_ji, extra_ji, local_id_ji)
+    det_stats_ij = _compute_determinedness_stats(rank_ref_ij, extra_ij)
+    det_stats_ji = _compute_determinedness_stats(rank_ref_ji, extra_ji)
+    local_id_stats_ij = _compute_local_id_stats(rank_ref_ij, extra_ij, local_id_ij)
+    local_id_stats_ji = _compute_local_id_stats(rank_ref_ji, extra_ji, local_id_ji)
     res_short = residual_short_label
     table_data = [
         ["", label_ij[:20], label_ji[:20]],
         ["Центров", stats_ij["n_centers"], stats_ji["n_centers"]],
         [
-            "Ранг (среднее)",
+            f"{_metric_value_short_label(labels)} (mean)",
             f"{stats_ij['rank_mean']:.2f}",
             f"{stats_ji['rank_mean']:.2f}",
         ],
-        ["Ранг (std)", f"{stats_ij['rank_std']:.2f}", f"{stats_ji['rank_std']:.2f}"],
+        [f"{_metric_value_short_label(labels)} (std)", f"{stats_ij['rank_std']:.2f}", f"{stats_ji['rank_std']:.2f}"],
         [
-            "Ранг (min/max)",
-            f"{stats_ij['rank_min']}/{stats_ij['rank_max']}",
-            f"{stats_ji['rank_min']}/{stats_ji['rank_max']}",
+            f"{_metric_value_short_label(labels)} (min/max)",
+            f"{stats_ij['rank_min']:.2f}/{stats_ij['rank_max']:.2f}",
+            f"{stats_ji['rank_min']:.2f}/{stats_ji['rank_max']:.2f}",
         ],
         [
             f"{res_short} (mean)",
@@ -978,7 +1036,7 @@ def _plot_single_pair(
     ):
         table_data.append(
             [
-                "N_sys-rank",
+                f"N_sys-{rank_ref_label}",
                 f"{det_stats_ij['margin_mean']:.2f}",
                 f"{det_stats_ji['margin_mean']:.2f}",
             ]
@@ -1018,7 +1076,7 @@ def _plot_single_pair(
     ):
         table_data.append(
             [
-                "rank-min(ID)",
+                f"{rank_ref_label}-min(ID)",
                 f"{local_id_stats_ij['rank_minus_id_min_mean']:.2f}",
                 f"{local_id_stats_ji['rank_minus_id_min_mean']:.2f}",
             ]
@@ -1181,7 +1239,9 @@ def _plot_aggregated(
     margin_means = []
     rank_means = []
     rank_stds = []
+    rank_reference_means = []
     direction_labels = []
+    direction_is_forward = []
     normalized_flags = []
     direction_stats = {}
 
@@ -1194,6 +1254,9 @@ def _plot_aggregated(
 
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
+        rank_ref, rank_ref_label = _get_direction_rank_reference(
+            artifacts, mi, mj, ranks
+        )
         extra = _get_direction_extra_data(artifacts, mi, mj)
         if _direction_uses_relative_residuals(artifacts, mi, mj):
             work_res = np.asarray(res, dtype=np.float64)
@@ -1201,14 +1264,16 @@ def _plot_aggregated(
         else:
             work_res, is_normalized = _normalize_residuals(res, extra)
         stats = _compute_direction_stats(sv, work_res, ranks, threshold=threshold)
-        det_stats = _compute_determinedness_stats(ranks, extra)
+        det_stats = _compute_determinedness_stats(rank_ref, extra)
         all_ranks.extend(ranks.tolist())
         all_residuals.extend(work_res.tolist())
         point_count_means.append(det_stats["point_count_mean"])
         margin_means.append(det_stats["margin_mean"])
         rank_means.append(stats["rank_mean"])
         rank_stds.append(stats["rank_std"])
+        rank_reference_means.append(_safe_mean(rank_ref))
         direction_labels.append(f"{mi[:10]}→{mj[:10]}")
+        direction_is_forward.append(mi <= mj)
         normalized_flags.append(is_normalized)
         direction_stats[(mi, mj)] = {
             "rank_mean": stats["rank_mean"],
@@ -1255,10 +1320,10 @@ def _plot_aggregated(
         linewidth=1.5,
         label=f"медиана={np.median(all_ranks):.2f}",
     )
-    ax.set_xlabel(labels["ranks_axis_label"] if use_metric_ranks else "Ранг отображения M")
+    ax.set_xlabel(_metric_value_axis_label(labels) if use_metric_ranks else _hard_rank_axis_label())
     ax.set_ylabel("Количество центров (все пары)")
     ax.set_title(
-        f"Гистограмма рангов (X→Y и Y→X)\nstd={np.std(all_ranks):.3f}, медиана={np.median(all_ranks):.2f}"
+        f"Гистограмма значений метрики (X→Y и Y→X)\nstd={np.std(all_ranks):.3f}, медиана={np.median(all_ranks):.2f}"
     )
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
@@ -1303,26 +1368,34 @@ def _plot_aggregated(
     x = np.arange(len(direction_labels))
     rank_means_arr = np.asarray(rank_means, dtype=np.float64)
     rank_stds_arr = np.asarray(rank_stds, dtype=np.float64)
+    direction_is_forward_arr = np.asarray(direction_is_forward, dtype=bool)
     finite_metric = np.isfinite(rank_means_arr)
     ax.set_xticks(x)
     ax.set_xticklabels(direction_labels, rotation=45, ha="right", fontsize=7)
-    ax.set_ylabel(f"Среднее {labels['ranks_short_label']} по центрам")
+    ax.set_ylabel(f"Среднее {_metric_value_short_label(labels)} по центрам")
     ax.set_title("Значение метрики по направлениям (X→Y и Y→X)")
     ax.grid(True, alpha=0.3, axis="y")
     if np.any(finite_metric):
-        ax.errorbar(
-            x[finite_metric],
-            rank_means_arr[finite_metric],
-            yerr=rank_stds_arr[finite_metric],
-            fmt="o-",
-            color="steelblue",
-            ecolor="lightsteelblue",
-            elinewidth=1.2,
-            capsize=3,
-            markersize=4,
-            linewidth=1.5,
-            label=f"mean({labels['ranks_short_label']}) ± std",
-        )
+        for is_forward, color, ecolor, marker, name in [
+            (True, "steelblue", "lightsteelblue", "o", "прямое направление"),
+            (False, "darkorange", "moccasin", "s", "обратное направление"),
+        ]:
+            mask = finite_metric & (direction_is_forward_arr == is_forward)
+            if not np.any(mask):
+                continue
+            ax.errorbar(
+                x[mask],
+                rank_means_arr[mask],
+                yerr=rank_stds_arr[mask],
+                fmt=f"{marker}-",
+                color=color,
+                ecolor=ecolor,
+                elinewidth=1.2,
+                capsize=3,
+                markersize=4,
+                linewidth=1.5,
+                label=f"{name}: mean({_metric_value_short_label(labels)}) ± std",
+            )
         finite_upper = rank_means_arr[finite_metric] + np.nan_to_num(
             rank_stds_arr[finite_metric], nan=0.0
         )
@@ -1346,14 +1419,14 @@ def _plot_aggregated(
     ax = axes[1, 1]
     finite_margin = np.isfinite(margin_means)
     finite_points = np.isfinite(point_count_means)
-    finite_rank = np.isfinite(rank_means)
+    finite_rank = np.isfinite(rank_reference_means)
     if np.any(finite_margin) or np.any(finite_points):
         x2 = np.arange(len(direction_labels))
-        bars2 = ax.bar(x2, margin_means, color="seagreen", alpha=0.8, label="mean(N_sys - rank)")
+        bars2 = ax.bar(x2, margin_means, color="seagreen", alpha=0.8, label=f"mean(N_sys - {rank_ref_label})")
         ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
         ax.set_xticks(x2)
         ax.set_xticklabels(direction_labels, rotation=45, ha="right", fontsize=7)
-        ax.set_ylabel("Средний запас N_sys - rank")
+        ax.set_ylabel(f"Средний запас N_sys - {rank_ref_label}")
         ax.set_title(
             "Определённость локальной системы по направлениям\n"
             "(N_sys > rank: переопределена, N_sys <= rank: недоопределена/на границе)"
@@ -1375,11 +1448,11 @@ def _plot_aggregated(
         if np.any(finite_rank):
             ax2.plot(
                 x2,
-                rank_means,
+                rank_reference_means,
                 "o-.",
                 color="navy",
                 markersize=4,
-                label="mean(rank)",
+                label=f"mean({rank_ref_label})",
             )
         ax2.set_ylabel("Среднее значение")
         lines1, lbls1 = ax.get_legend_handles_labels()
@@ -1445,11 +1518,11 @@ def _plot_aggregated(
             rank_diff_arr,
             color="steelblue",
             alpha=0.8,
-            label=f"|Δ mean({labels['ranks_short_label']})|",
+            label=f"|Δ mean({_metric_value_short_label(labels)})|",
         )
         diff_ax.set_xticks(x_diff)
         diff_ax.set_xticklabels(pair_labels, rotation=45, ha="right", fontsize=7)
-        diff_ax.set_ylabel(f"|Δ mean({labels['ranks_short_label']})|")
+        diff_ax.set_ylabel(f"|Δ mean({_metric_value_short_label(labels)})|")
         diff_ax.set_title(
             "Разница между прямым и обратным отображением по парам моделей"
         )
@@ -1466,9 +1539,9 @@ def _plot_aggregated(
             color="darkorange",
             markersize=4,
             linewidth=1.3,
-            label="|Δ mean(residual)|",
+            label=f"|Δ mean({labels['residual_short_label']})|",
         )
-        diff_ax2.set_ylabel("|Δ mean(residual)|")
+        diff_ax2.set_ylabel(f"|Δ mean({labels['residual_short_label']})|")
 
         lines1, lbls1 = diff_ax.get_legend_handles_labels()
         lines2, lbls2 = diff_ax2.get_legend_handles_labels()
@@ -1564,6 +1637,9 @@ def _save_report(
     normalized_flags = []
     for mi, mj in sorted(directions):
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
+        rank_ref, rank_ref_label = _get_direction_rank_reference(
+            artifacts, mi, mj, ranks
+        )
         extra_data = _get_direction_extra_data(artifacts, mi, mj)
         local_id_data = _get_direction_local_id_data(
             local_id_artifacts or {}, mi, mj
@@ -1575,8 +1651,8 @@ def _save_report(
             work_res, is_normalized = _normalize_residuals(res, extra_data)
         s = _compute_direction_stats(sv, work_res, ranks)
         extra = _compute_extra_stats(_get_direction_extra_data(artifacts, mi, mj))
-        det = _compute_determinedness_stats(ranks, extra_data)
-        lid = _compute_local_id_stats(ranks, extra_data, local_id_data)
+        det = _compute_determinedness_stats(rank_ref, extra_data)
+        lid = _compute_local_id_stats(rank_ref, extra_data, local_id_data)
         all_rank_stds.append(s["rank_std"])
         normalized_flags.append(is_normalized)
         direction_str = f"{mi}→{mj}"
@@ -1605,8 +1681,9 @@ def _save_report(
         res_short = _normalized_residual_short_label(bool(all(normalized_flags)))
 
     lines.append("--- Статистика по направлениям ---")
+    metric_short = _metric_value_short_label(labels)
     header = (
-        f"{'Направление':<35} {'Ранг(mean)':<12} {'Ранг(std)':<12} "
+        f"{'Направление':<35} {f'{metric_short}(mean)':<12} {f'{metric_short}(std)':<12} "
         f"{f'{res_short}(mean)':<14} {f'{res_short}(std)':<14} {'Выр-х,%':<10}"
     )
     lines.append(header)
@@ -1640,7 +1717,7 @@ def _save_report(
         )
     lines.append("")
     lines.append(
-        f"Средняя std ранга по всем направлениям: {np.mean(all_rank_stds):.4f}"
+        f"Средняя std значения метрики по всем направлениям: {np.mean(all_rank_stds):.4f}"
     )
     lines.append("")
 
@@ -1661,8 +1738,8 @@ def _save_report(
     if have_extra:
         lines.append("--- Дополнительные артефакты новых методов ---")
         extra_header = (
-            f"{'Направление':<35} {'ID_x':<10} {'ID_y':<10} {'r-minID':<10} "
-            f"{'N-ID':<10} {'N_sys(mean)':<12} {'N-rank':<12} "
+            f"{'Направление':<35} {'ID_x':<10} {'ID_y':<10} {f'{rank_ref_label}-ID':<10} "
+            f"{'N-ID':<10} {'N_sys(mean)':<12} {f'N-{rank_ref_label}':<12} "
             f"{'Overdet,%':<12} {'Nhood(mean)':<12} {'Dist(mean)':<12} "
             f"{'Sigma(mean)':<12} {'Eps(mean)':<12} {'Inlier(mean)':<12}"
         )
@@ -1777,24 +1854,24 @@ def _plot_summary(
         fontsize=13,
     )
 
-    # --- 1. Стабильность ранга: среднее std по направлениям ---
+    # --- 1. Стабильность значения метрики: среднее std по направлениям ---
     ax = axes[0]
     mean_rank_stds = [float(np.mean(d["rank_stds"])) for d in metrics_data]
     mean_rank_means = [float(np.mean(d["rank_means"])) for d in metrics_data]
     bars = ax.bar(
-        x, mean_rank_stds, color="steelblue", alpha=0.8, label="mean(std ранга)"
+        x, mean_rank_stds, color="steelblue", alpha=0.8, label="mean(std значения)"
     )
-    # Поверх баров — среднее значение ранга как точки.
+    # Поверх баров — среднее значение метрики как точки.
     ax2 = ax.twinx()
     ax2.plot(
-        x, mean_rank_means, "D--", color="darkred", markersize=6, label="mean(ранг)"
+        x, mean_rank_means, "D--", color="darkred", markersize=6, label="mean(value)"
     )
-    ax2.set_ylabel("Среднее значение ранга", color="darkred")
+    ax2.set_ylabel("Среднее значение метрики", color="darkred")
     ax2.tick_params(axis="y", labelcolor="darkred")
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Среднее std ранга по направлениям")
-    ax.set_title("Стабильность ранга отображения M\n(чем меньше std — тем стабильнее)")
+    ax.set_ylabel("Среднее std значения метрики по направлениям")
+    ax.set_title("Стабильность значения метрики\n(чем меньше std — тем стабильнее)")
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, mean_rank_stds):
         ax.text(
@@ -1818,9 +1895,15 @@ def _plot_summary(
         bool(d.get("residuals_normalized", False)) for d in metrics_data
     )
     if all_relative_residuals:
-        res_summary_label = metrics_data[0].get("labels", _FALLBACK_LABELS)[
-            "residual_summary_label"
-        ]
+        residual_labels = {
+            d.get("labels", _FALLBACK_LABELS)["residual_summary_label"]
+            for d in metrics_data
+        }
+        res_summary_label = (
+            next(iter(residual_labels))
+            if len(residual_labels) == 1
+            else "Средняя относительная ошибка (формула зависит от метрики/геометрии)"
+        )
     else:
         res_summary_label = _summary_residual_axis_label(all_residuals_normalized)
     bars = ax.bar(
@@ -1862,12 +1945,24 @@ def _plot_summary(
     ax = axes[2]
     mean_margins = [_safe_mean(d["determined_margin_means"]) for d in metrics_data]
     mean_point_counts = [_safe_mean(d["system_point_means"]) for d in metrics_data]
-    mean_rank_values = [_safe_mean(d["rank_means"]) for d in metrics_data]
-    bars = ax.bar(x, mean_margins, color="seagreen", alpha=0.8, label="mean(N_sys - rank)")
+    rank_reference_labels = {
+        str(d.get("rank_reference_label", _metric_value_short_label(d.get("labels", _FALLBACK_LABELS))))
+        for d in metrics_data
+    }
+    rank_reference_label = (
+        next(iter(rank_reference_labels))
+        if len(rank_reference_labels) == 1
+        else "rank reference"
+    )
+    mean_rank_values = [
+        _safe_mean(d.get("rank_reference_means", d.get("rank_means")))
+        for d in metrics_data
+    ]
+    bars = ax.bar(x, mean_margins, color="seagreen", alpha=0.8, label=f"mean(N_sys - {rank_reference_label})")
     ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
     ax.set_xticks(x)
     ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Средний запас N_sys - rank")
+    ax.set_ylabel(f"Средний запас N_sys - {rank_reference_label}")
     ax.set_title(
         "Определённость локальной системы\n"
         "(N_sys > rank: переопределена, N_sys <= rank: недоопределена/на границе)"
@@ -1894,7 +1989,7 @@ def _plot_summary(
             "o-.",
             color="navy",
             markersize=5,
-            label="mean(rank)",
+            label=f"mean({rank_reference_label})",
         )
     ax2.set_ylabel("Среднее значение")
     for bar, val in zip(bars, mean_margins):
@@ -1965,7 +2060,7 @@ def _plot_summary(
             patch.set_alpha(0.85)
         ax.set_xticks(metric_value_positions)
         ax.set_xticklabels(metric_value_labels, rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("Ранкми по направлению для данного центра")
+        ax.set_ylabel("Значение метрики по направлению для данного центра")
         ax.set_title(
             "Распределение значений метрики по центрам и направлениям\n"
             "(boxplot по всем центрам, X→Y и Y→X)"
@@ -2014,7 +2109,19 @@ def _plot_summary_local_id(
     mean_id_x = [_safe_mean(d.get("local_id_x_means")) for d in metrics_data]
     mean_id_y = [_safe_mean(d.get("local_id_y_means")) for d in metrics_data]
     mean_id_min = [_safe_mean(d.get("local_id_min_means")) for d in metrics_data]
-    mean_rank = [_safe_mean(d.get("rank_means")) for d in metrics_data]
+    rank_reference_labels = {
+        str(d.get("rank_reference_label", _metric_value_short_label(d.get("labels", _FALLBACK_LABELS))))
+        for d in metrics_data
+    }
+    rank_reference_label = (
+        next(iter(rank_reference_labels))
+        if len(rank_reference_labels) == 1
+        else "rank reference"
+    )
+    mean_rank = [
+        _safe_mean(d.get("rank_reference_means", d.get("rank_means")))
+        for d in metrics_data
+    ]
     mean_rank_gap = [
         _safe_mean(d.get("rank_minus_id_min_means")) for d in metrics_data
     ]
@@ -2034,11 +2141,11 @@ def _plot_summary_local_id(
         alpha=0.8,
         label="mean(min(ID_x, ID_y))",
     )
-    ax.plot(x, mean_rank, "D--", color="darkred", markersize=6, label="mean(rank)")
+    ax.plot(x, mean_rank, "D--", color="darkred", markersize=6, label=f"mean({rank_reference_label})")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Среднее значение")
-    ax.set_title("Локальная размерность и ранг")
+    ax.set_title(f"Локальная размерность и {rank_reference_label}")
     ax.grid(True, alpha=0.3, axis="y")
     ax.legend(fontsize=8, loc="upper left")
 
@@ -2047,8 +2154,8 @@ def _plot_summary_local_id(
     ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("mean(rank - min(ID))")
-    ax.set_title("Насколько ранг превышает локальную размерность")
+    ax.set_ylabel(f"mean({rank_reference_label} - min(ID))")
+    ax.set_title(f"Насколько {rank_reference_label} превышает локальную размерность")
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, mean_rank_gap):
         if np.isfinite(val):
@@ -2100,6 +2207,8 @@ def _collect_metric_data(
     Собирает сводные данные по одной метрике для последующей передачи в _plot_summary.
     """
     rank_means, rank_stds = [], []
+    rank_reference_means = []
+    rank_reference_label = _hard_rank_short_label()
     res_means, res_stds = [], []
     system_point_means, determined_margin_means, overdetermined_fracs = [], [], []
     all_metric_values = []
@@ -2114,6 +2223,9 @@ def _collect_metric_data(
 
     for mi, mj in directions:
         sv, res, ranks = _get_direction_data(artifacts, mi, mj)
+        rank_ref, rank_reference_label = _get_direction_rank_reference(
+            artifacts, mi, mj, ranks
+        )
         extra = _get_direction_extra_data(artifacts, mi, mj)
         local_id = _get_direction_local_id_data(local_id_artifacts or {}, mi, mj)
         if _direction_uses_relative_residuals(artifacts, mi, mj):
@@ -2124,11 +2236,12 @@ def _collect_metric_data(
             work_res, is_normalized = _normalize_residuals(res, extra)
             is_relative = False
         s = _compute_direction_stats(sv, work_res, ranks, threshold=threshold)
-        det_stats = _compute_determinedness_stats(ranks, extra)
-        lid_stats = _compute_local_id_stats(ranks, extra, local_id)
+        det_stats = _compute_determinedness_stats(rank_ref, extra)
+        lid_stats = _compute_local_id_stats(rank_ref, extra, local_id)
         all_metric_values.extend(np.asarray(ranks, dtype=np.float64).reshape(-1).tolist())
         rank_means.append(s["rank_mean"])
         rank_stds.append(s["rank_std"])
+        rank_reference_means.append(_safe_mean(rank_ref))
         res_means.append(s["residual_mean"])
         res_stds.append(s["residual_std"])
         system_point_means.append(det_stats["point_count_mean"])
@@ -2166,6 +2279,8 @@ def _collect_metric_data(
         "metric_name": metric_name,
         "rank_means": np.array(rank_means),
         "rank_stds": np.array(rank_stds),
+        "rank_reference_means": np.array(rank_reference_means),
+        "rank_reference_label": rank_reference_label,
         "all_metric_values": np.array(all_metric_values, dtype=np.float64),
         "res_means": np.array(res_means),
         "res_stds": np.array(res_stds),
