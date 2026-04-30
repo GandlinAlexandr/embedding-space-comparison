@@ -30,12 +30,16 @@ run_diagnose_local_map.py
   # Сводный график по всем метрикам сразу:
   python -m scripts.run_diagnose_local_map \\
       --artifacts_dir metric_matrices/ \\
-      --out_dir diagnostics/
+      --out_dir diagnostics/ \\
+      --downstream_json data/downstream/food101_mlp.json \\
+      --downstream_task food101_mlp
 
   # Агрегированная диагностика по одной метрике:
   python -m scripts.run_diagnose_local_map \\
       --artifacts_path metric_matrices/directed_k10_artifacts.npz \\
-      --out_dir diagnostics/
+      --out_dir diagnostics/ \\
+      --downstream_json data/downstream/food101_mlp.json \\
+      --downstream_task food101_mlp
 
   # Детально по одной паре:
   python -m scripts.run_diagnose_local_map \\
@@ -47,6 +51,7 @@ run_diagnose_local_map.py
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from dataclasses import dataclass
@@ -113,6 +118,43 @@ def _save_figure_variants(
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         saved_paths.append(save_path)
     return saved_paths
+
+
+def _model_family(model_name: str) -> str:
+    name = str(model_name).lower()
+    if name.startswith("wide_resnet") or name.startswith("resnet"):
+        return "resnet"
+    if name.startswith("vit"):
+        return "vit"
+    if name.startswith("vgg"):
+        return "vgg"
+    if name.startswith("densenet"):
+        return "densenet"
+    if name.startswith("mobilenet"):
+        return "mobilenet"
+    return "other"
+
+
+def _rankdata(values: Iterable[float]) -> np.ndarray:
+    arr = np.asarray(list(values), dtype=np.float64)
+    order = np.argsort(arr)
+    ranks = np.empty(arr.size, dtype=np.float64)
+    i = 0
+    while i < arr.size:
+        j = i + 1
+        while j < arr.size and arr[order[j]] == arr[order[i]]:
+            j += 1
+        ranks[order[i:j]] = (i + j - 1) / 2.0 + 1.0
+        i = j
+    return ranks
+
+
+def _safe_corr(x: Iterable[float], y: Iterable[float]) -> float:
+    xa = np.asarray(list(x), dtype=np.float64)
+    ya = np.asarray(list(y), dtype=np.float64)
+    if xa.size < 2 or np.std(xa) == 0.0 or np.std(ya) == 0.0:
+        return float("nan")
+    return float(np.corrcoef(xa, ya)[0, 1])
 
 
 def _load_downstream_scores(path: str, task_name: str = "") -> Dict[str, float]:
@@ -1217,6 +1259,7 @@ def _plot_aggregated(
     directions: List[Tuple[str, str]],
     both_deg_stats: Dict,
     plots_dir: str,
+    reports_dir: str,
     metric_name: str,
     threshold: float = DEGENERATE_MAP_THRESHOLD_DEFAULT,
     metric_spec_str: str = "",
@@ -1605,6 +1648,347 @@ def _plot_aggregated(
     plt.close(fig)
     for save_path in saved_paths:
         print(f"  Сохранён агрегированный график: {save_path}")
+
+    _save_pair_contribution_diagnostics(
+        directions=directions,
+        direction_stats=direction_stats,
+        downstream_scores=downstream_scores,
+        reports_dir=reports_dir,
+        plots_dir=plots_dir,
+        metric_name=metric_name,
+        plots_exts=plots_exts,
+    )
+
+
+def _evaluate_pair_rows(
+    rows: List[Dict[str, object]],
+    signal_key: str = "signal_raw",
+    correct_key: str = "raw_correct",
+) -> Dict[str, float]:
+    if not rows:
+        return {
+            "n_pairs": 0,
+            "raw_cr": float("nan"),
+            "cr_adj": float("nan"),
+            "pearson": float("nan"),
+            "spearman": float("nan"),
+        }
+    signals = [float(r[signal_key]) for r in rows]
+    deltas = [float(r["delta_acc"]) for r in rows]
+    raw_ok = [bool(r[correct_key]) for r in rows]
+    raw_cr = float(np.mean(raw_ok))
+    return {
+        "n_pairs": len(rows),
+        "raw_cr": raw_cr,
+        "cr_adj": max(raw_cr, 1.0 - raw_cr),
+        "pearson": _safe_corr(signals, deltas),
+        "spearman": _safe_corr(_rankdata(signals), _rankdata(deltas)),
+    }
+
+
+def _evaluate_abs_pair_rows(rows: List[Dict[str, object]]) -> Dict[str, float]:
+    if not rows:
+        return {
+            "n_pairs": 0,
+            "pearson": float("nan"),
+            "spearman": float("nan"),
+        }
+    signals = [abs(float(r["signal_raw"])) for r in rows]
+    deltas = [abs(float(r["delta_acc"])) for r in rows]
+    return {
+        "n_pairs": len(rows),
+        "pearson": _safe_corr(signals, deltas),
+        "spearman": _safe_corr(_rankdata(signals), _rankdata(deltas)),
+    }
+
+
+def _save_pair_contribution_diagnostics(
+    directions: List[Tuple[str, str]],
+    direction_stats: Dict[Tuple[str, str], Dict[str, float]],
+    downstream_scores: Optional[Dict[str, float]],
+    reports_dir: str,
+    plots_dir: str,
+    metric_name: str,
+    plots_exts: Iterable[str] = ("png",),
+    top_n: int = 20,
+) -> None:
+    """
+    Универсальная pair-contribution диагностика для directed map-артефактов.
+
+    Для unordered пары A/B строим signal для ordered A->B так же, как в
+    сохранённой antisym-матрице метрики:
+        signal_raw(A->B) = mean(metric A->B) - mean(metric B->A)
+
+    Это делает сигнал антисимметричным для любой локальной map-метрики и позволяет
+    сравнить его со signed downstream delta: acc[B] - acc[A].
+    """
+    if not downstream_scores:
+        return
+
+    seen_pairs = set()
+    rows: List[Dict[str, object]] = []
+    for mi, mj in sorted(directions):
+        if mi == mj:
+            continue
+        pair_key = tuple(sorted((mi, mj)))
+        if pair_key in seen_pairs:
+            continue
+        if (mj, mi) not in direction_stats:
+            continue
+        if mi not in downstream_scores or mj not in downstream_scores:
+            continue
+        seen_pairs.add(pair_key)
+
+        s_ij = float(direction_stats[(mi, mj)]["rank_mean"])
+        s_ji = float(direction_stats[(mj, mi)]["rank_mean"])
+        signal_ij = s_ij - s_ji
+        delta_ij = float(downstream_scores[mj] - downstream_scores[mi])
+        fam_i = _model_family(mi)
+        fam_j = _model_family(mj)
+        family_block = "-".join(sorted((fam_i, fam_j)))
+
+        for a, b, signal, delta, metric_ab, metric_ba, fam_a, fam_b in [
+            (mi, mj, signal_ij, delta_ij, s_ij, s_ji, fam_i, fam_j),
+            (mj, mi, -signal_ij, -delta_ij, s_ji, s_ij, fam_j, fam_i),
+        ]:
+            raw_correct = (signal >= 0.0 and delta >= 0.0) or (
+                signal <= 0.0 and delta <= 0.0
+            )
+            rows.append(
+                {
+                    "model_a": a,
+                    "model_b": b,
+                    "family_a": fam_a,
+                    "family_b": fam_b,
+                    "family_block": family_block,
+                    "metric_a_to_b": metric_ab,
+                    "metric_b_to_a": metric_ba,
+                    "signal_raw": signal,
+                    "delta_acc": delta,
+                    "abs_delta_acc": abs(delta),
+                    "raw_correct": raw_correct,
+                }
+            )
+
+    if not rows:
+        print("  [INFO] Pair contributions: нет пар с downstream scores.")
+        return
+
+    raw_overall = _evaluate_pair_rows(rows)
+    orientation_mult = 1.0 if raw_overall["raw_cr"] >= 0.5 else -1.0
+    for row in rows:
+        raw_signal = float(row["signal_raw"])
+        delta = float(row["delta_acc"])
+        flipped_signal = -raw_signal
+        plot_signal = orientation_mult * raw_signal
+        flipped_correct = (flipped_signal >= 0.0 and delta >= 0.0) or (
+            flipped_signal <= 0.0 and delta <= 0.0
+        )
+        plot_correct = (plot_signal >= 0.0 and delta >= 0.0) or (
+            plot_signal <= 0.0 and delta <= 0.0
+        )
+        row["signal_plot"] = plot_signal
+        row["signal_flipped"] = flipped_signal
+        row["abs_signal"] = abs(raw_signal)
+        row["abs_delta_acc"] = abs(delta)
+        row["flipped_correct"] = flipped_correct
+        row["plot_correct"] = plot_correct
+
+    csv_path = os.path.join(reports_dir, f"{metric_name}_pair_contributions.csv")
+    fieldnames = [
+        "model_a",
+        "model_b",
+        "family_a",
+        "family_b",
+        "family_block",
+        "metric_a_to_b",
+        "metric_b_to_a",
+        "signal_raw",
+        "signal_plot",
+        "signal_flipped",
+        "abs_signal",
+        "delta_acc",
+        "abs_delta_acc",
+        "raw_correct",
+        "flipped_correct",
+        "plot_correct",
+    ]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row[k] for k in fieldnames})
+    print(f"  Сохранена таблица вкладов пар: {csv_path}")
+
+    display_overall = _evaluate_pair_rows(
+        rows, signal_key="signal_plot", correct_key="plot_correct"
+    )
+
+    family_blocks = sorted({str(r["family_block"]) for r in rows})
+    family_stats: Dict[str, Dict[str, float]] = {}
+    for block in family_blocks:
+        block_rows = [r for r in rows if r["family_block"] == block]
+        family_stats[block] = _evaluate_pair_rows(
+            block_rows, signal_key="signal_plot", correct_key="plot_correct"
+        )
+
+    models = sorted({str(r["model_a"]) for r in rows})
+    leave_out_stats: List[Tuple[str, Dict[str, float]]] = [("all", display_overall)]
+    groups = {
+        "no_vit": [m for m in models if _model_family(m) != "vit"],
+        "vit_only": [m for m in models if _model_family(m) == "vit"],
+        "no_swag": [m for m in models if "swag" not in m.lower()],
+        "no_resnet": [m for m in models if _model_family(m) != "resnet"],
+        "no_vgg": [m for m in models if _model_family(m) != "vgg"],
+    }
+    for name, keep_models in groups.items():
+        keep = set(keep_models)
+        group_rows = [
+            r for r in rows if r["model_a"] in keep and r["model_b"] in keep
+        ]
+        if group_rows:
+            leave_out_stats.append((
+                name,
+                _evaluate_pair_rows(
+                    group_rows,
+                    signal_key="signal_plot",
+                    correct_key="plot_correct",
+                ),
+            ))
+
+    top_bad = sorted(
+        [r for r in rows if not bool(r["plot_correct"])],
+        key=lambda r: float(r["abs_delta_acc"]),
+        reverse=True,
+    )[:top_n]
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    score_note = (
+        f"доля верных пар={display_overall['raw_cr']:.3f}; "
+        f"связь с Δacc={display_overall['spearman']:+.3f}"
+    )
+    fig.suptitle(
+        f"Какие пары моделей дают ошибки ранжирования\n"
+        f"Метрика: {short_metric_name(metric_name)} | "
+        f"{score_note}",
+        fontsize=13,
+    )
+    fig.text(
+        0.5,
+        0.925,
+        "Ось Y автоматически приведена: выше 0 = метрика считает B лучше A",
+        ha="center",
+        va="center",
+        fontsize=10,
+    )
+
+    ax = axes[0, 0]
+    colors = {
+        "resnet-resnet": "tab:blue",
+        "resnet-vit": "tab:orange",
+        "resnet-vgg": "tab:green",
+        "vgg-vit": "tab:purple",
+        "vgg-vgg": "tab:brown",
+        "vit-vit": "tab:red",
+    }
+    for block in family_blocks:
+        block_rows = [r for r in rows if r["family_block"] == block]
+        ok = np.asarray([bool(r["plot_correct"]) for r in block_rows], dtype=bool)
+        x = np.asarray([float(r["delta_acc"]) for r in block_rows])
+        y = np.asarray([float(r["signal_plot"]) for r in block_rows])
+        color = colors.get(block, "0.45")
+        if np.any(ok):
+            ax.scatter(
+                x[ok],
+                y[ok],
+                s=24,
+                alpha=0.65,
+                color=color,
+                label=block,
+            )
+        if np.any(~ok):
+            ax.scatter(
+                x[~ok],
+                y[~ok],
+                s=46,
+                alpha=0.95,
+                facecolors="none",
+                edgecolors="crimson",
+                linewidths=1.4,
+            )
+    ax.axhline(0.0, color="black", linewidth=0.9)
+    ax.axvline(0.0, color="black", linewidth=0.9)
+    ax.set_xlabel("Δacc = acc[B] - acc[A]")
+    ax.set_ylabel("Предсказание метрики: выше 0 значит B лучше A")
+    ax.set_title("Каждая точка = сравнение A→B; красный контур = неверная пара")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+
+    ax = axes[0, 1]
+    if top_bad:
+        labels_bad = [
+            f"{r['model_a']}→{r['model_b']}"[:42]
+            for r in reversed(top_bad)
+        ]
+        vals_bad = [float(r["abs_delta_acc"]) for r in reversed(top_bad)]
+        ax.barh(np.arange(len(vals_bad)), vals_bad, color="crimson", alpha=0.8)
+        ax.set_yticks(np.arange(len(vals_bad)))
+        ax.set_yticklabels(labels_bad, fontsize=8)
+        ax.set_xlabel("|Δacc|")
+        ax.set_title(f"{len(top_bad)} крупнейших ошибок по разнице качества")
+        ax.grid(True, alpha=0.3, axis="x")
+    else:
+        ax.text(0.5, 0.5, "Ошибочных пар нет", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Top ошибок")
+
+    ax = axes[1, 0]
+    fam_labels = list(family_stats.keys())
+    fam_vals = [family_stats[k]["raw_cr"] for k in fam_labels]
+    fam_pairs = [family_stats[k]["n_pairs"] for k in fam_labels]
+    bars = ax.bar(np.arange(len(fam_labels)), fam_vals, color="steelblue", alpha=0.85)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xticks(np.arange(len(fam_labels)))
+    ax.set_xticklabels(fam_labels, rotation=35, ha="right")
+    ax.set_ylabel("Доля верных пар")
+    ax.set_title("Где метрика чаще ошибается: блоки семейств")
+    ax.grid(True, alpha=0.3, axis="y")
+    for bar, val, n_pairs in zip(bars, fam_vals, fam_pairs):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            min(0.98, val + 0.025),
+            f"{val:.2f}\nN={int(n_pairs)}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    ax = axes[1, 1]
+    lo_labels = [x[0] for x in leave_out_stats]
+    lo_vals = [x[1]["raw_cr"] for x in leave_out_stats]
+    lo_spearman = [x[1]["spearman"] for x in leave_out_stats]
+    bars = ax.bar(np.arange(len(lo_labels)), lo_vals, color="darkseagreen", alpha=0.9)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xticks(np.arange(len(lo_labels)))
+    ax.set_xticklabels(lo_labels, rotation=35, ha="right")
+    ax.set_ylabel("Доля верных пар")
+    ax.set_title("Что меняется, если смотреть поднаборы моделей")
+    ax.grid(True, alpha=0.3, axis="y")
+    for bar, val, sp in zip(bars, lo_vals, lo_spearman):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            min(0.98, val + 0.025),
+            f"{val:.2f}\nρ={sp:+.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.9))
+    fpath = os.path.join(plots_dir, f"{metric_name}_pair_contributions.png")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
+    plt.close(fig)
+    for save_path in saved_paths:
+        print(f"  Сохранён график вкладов пар: {save_path}")
 
 
 # ============================================================
@@ -2428,6 +2812,7 @@ def _run_single_metric(
         directions,
         both_deg_stats,
         plots_dir,
+        reports_dir,
         metric_name,
         threshold=threshold,
         metric_spec_str=metric_spec_str,
@@ -2513,6 +2898,24 @@ def main():
         help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
     )
     parser.add_argument(
+        "--downstream_json",
+        type=str,
+        default="",
+        help=(
+            "Опциональный JSON с downstream score для subplot |Δ accuracy|. "
+            "Если не задан, график accuracy не строится."
+        ),
+    )
+    parser.add_argument(
+        "--downstream_task",
+        type=str,
+        default="",
+        help=(
+            "Имя задачи внутри downstream JSON вида {model: {task: score}}. "
+            "Если не задано и у модели ровно одна задача, она выбирается автоматически."
+        ),
+    )
+    parser.add_argument(
         "--model_a",
         type=str,
         default="",
@@ -2537,8 +2940,8 @@ def main():
     args = parser.parse_args()
     args.plots_ext = parse_plots_exts(args.plots_ext)
     downstream_scores = _load_downstream_scores(
-        os.path.join("data", "downstream", "cifar10_linear_probe.json"),
-        task_name="cifar10_linear_probe",
+        args.downstream_json,
+        task_name=args.downstream_task,
     )
 
     if not args.artifacts_dir and not args.artifacts_path:
@@ -2548,6 +2951,14 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"Порог вырожденности: {args.degenerate_threshold:.2e}")
+    if downstream_scores:
+        print(
+            "Downstream scores: "
+            f"{args.downstream_json}"
+            + (f" (task={args.downstream_task})" if args.downstream_task else "")
+        )
+    else:
+        print("Downstream scores: не заданы, subplot |Δ accuracy| будет пропущен.")
 
     # ============================================================
     # Режим 1: сводный — обходим все *_artifacts.npz в папке

@@ -81,7 +81,7 @@ def pretty_metric_name(name: str) -> str:
 
 
 def load_json(path: Path):
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -256,11 +256,28 @@ def load_single_metric_scalar(path: Path) -> float:
     raise ValueError(f"Неподдерживаемый формат single-metric файла: {path}")
 
 
+def resolve_single_metrics_values_dir(single_metrics_dir: Path) -> Path:
+    canonical = single_metrics_dir / "metrics"
+    if canonical.is_dir():
+        return canonical
+    return single_metrics_dir
+
+
 def collect_single_metric_values(
     single_metrics_dir: Path,
 ) -> Dict[str, Dict[str, float]]:
     """
-    Ожидается структура:
+    Поддерживается canonical структура:
+        single_metrics/<dataset_key>/
+            metrics/
+                stable_rank/
+                    resnet18.json
+                    resnet50.json
+                    ...
+            artifacts/
+                resnet18.npz
+
+    И legacy структура:
         single_metrics/
             stable_rank/
                 resnet18.json
@@ -274,13 +291,15 @@ def collect_single_metric_values(
             f"Папка single_metrics_dir не найдена: {single_metrics_dir}"
         )
 
+    values_dir = resolve_single_metrics_values_dir(single_metrics_dir)
     result: Dict[str, Dict[str, float]] = {}
 
-    metric_dirs = sorted([p for p in single_metrics_dir.iterdir() if p.is_dir()])
+    metric_dirs = sorted([p for p in values_dir.iterdir() if p.is_dir()])
     if not metric_dirs:
         raise ValueError(
-            f"В {single_metrics_dir} не найдено поддиректорий метрик. "
-            f"Ожидалась структура single_metrics/<metric_name>/<model>.json"
+            f"В {values_dir} не найдено поддиректорий метрик. "
+            f"Ожидалась структура <dataset>/metrics/<metric_name>/<model>.json "
+            f"или legacy single_metrics/<metric_name>/<model>.json"
         )
 
     for metric_dir in metric_dirs:
@@ -297,7 +316,7 @@ def collect_single_metric_values(
 
     if not result:
         raise ValueError(
-            f"Не удалось загрузить ни одной single-метрики из {single_metrics_dir}"
+            f"Не удалось загрузить ни одной single-метрики из {values_dir}"
         )
 
     return result
@@ -1454,7 +1473,10 @@ def parse_args() -> argparse.Namespace:
         "--single_metrics_dir",
         type=Path,
         default=None,
-        help="Папка single_metrics/<metric>/<model>.json",
+        help=(
+            "Папка canonical data/single_metrics/<dataset_key> "
+            "или legacy single_metrics/<metric>/<model>.json"
+        ),
     )
     parser.add_argument(
         "--pairwise_metrics_dir",
