@@ -698,7 +698,7 @@ def main():
         if not args.metrics_dir:
             args.metrics_dir = os.path.join(args.experiment_dir, "metric_matrices")
         if not args.out_csv:
-            # Пытаемся получить стабильное имя из downstream_json (например, cifar10_linear_probe.json -> cifar10_eval.csv)
+            # Пытаемся получить стабильное имя из downstream_json (например, cifar10_mlp.json -> cifar10_eval.csv)
             stem = os.path.splitext(os.path.basename(args.downstream_json))[0]
             dataset = stem.split("_")[0] if stem else "eval"
             args.out_csv = os.path.join(

@@ -523,12 +523,18 @@ def main():
             raise ValueError("Нужно указать либо --out_json, либо --experiment_dir.")
         dstdir = os.path.join(args.experiment_dir, "downstream")
         os.makedirs(dstdir, exist_ok=True)
-        # Идентификатор набора данных с наилучшими усилиями для имени файла
-        if args.embeddings_dir:
-            ds = os.path.basename(os.path.normpath(args.embeddings_dir))
-        else:
-            ds = os.path.basename(os.path.normpath(args.train_embeddings_dir))
-        args.out_json = os.path.join(dstdir, f"{ds}_linear_probe.json")
+        ds = _resolve_dataset_name(
+            args.dataset,
+            args.embeddings_dir,
+            args.train_embeddings_dir,
+            args.test_embeddings_dir,
+        )
+        if not ds:
+            raise ValueError(
+                "Не удалось вывести имя датасета для out_json. "
+                "Укажи --dataset или --out_json явно."
+            )
+        args.out_json = os.path.join(dstdir, f"{ds}_mlp.json")
 
     os.makedirs(os.path.dirname(args.out_json), exist_ok=True)
     if os.path.exists(args.out_json) and not args.overwrite:
