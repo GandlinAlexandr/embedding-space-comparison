@@ -3433,6 +3433,7 @@ def main():
 
     chosen_specs: List[Tuple[str, Dict[str, Any], MetricSpec]] = []
     shared_neighbor_groups: Dict[NeighborCacheKey, List[str]] = {}
+    neighbor_cache_key_by_metric: Dict[str, NeighborCacheKey] = {}
     for name in chosen:
         cfg = cfgs[name]
         spec = _infer_metric_spec(
@@ -3453,12 +3454,54 @@ def main():
         key = _neighbor_cache_key_for_spec(spec)
         shared_neighbor_groups.setdefault(key, []).append(name)
 
+    # Several metrics can use the same neighbor search result even if their
+    # requested k-sets differ. For example, adaptive_k5_10_20_40_80 contains
+    # the neighbor lists needed by lin_k5/lin_k10/... . Build one superset
+    # cache per compatible neighborhood plan and let individual specs slice it.
+    neighbor_cache_supersets: Dict[
+        Tuple[int, Optional[int], float],
+        set[int],
+    ] = {}
+    for _name, _cfg, _spec in chosen_specs:
+        _key = _neighbor_cache_key_for_spec(_spec)
+        _group_key = (
+            int(_key.n_centers),
+            _key.percentile,
+            float(_key.eps_scale),
+        )
+        neighbor_cache_supersets.setdefault(_group_key, set()).update(_key.ks)
+
+    for _name, _cfg, _spec in chosen_specs:
+        _key = _neighbor_cache_key_for_spec(_spec)
+        _group_key = (
+            int(_key.n_centers),
+            _key.percentile,
+            float(_key.eps_scale),
+        )
+        neighbor_cache_key_by_metric[_name] = NeighborCacheKey(
+            n_centers=int(_key.n_centers),
+            ks=tuple(sorted(neighbor_cache_supersets[_group_key])),
+            percentile=_key.percentile,
+            eps_scale=float(_key.eps_scale),
+        )
+
+    shared_neighbor_groups_effective: Dict[NeighborCacheKey, List[str]] = {}
+    for _name, _cfg, _spec in chosen_specs:
+        shared_neighbor_groups_effective.setdefault(
+            neighbor_cache_key_by_metric[_name],
+            [],
+        ).append(_name)
+
     print(f"\nБудет вычислено {len(chosen)} конфигураций метрик:")
     for name in chosen:
         print(f"  - {name}")
     print(
-        f"\nГрупп общих neighbor-cache: {len(shared_neighbor_groups)} "
+        f"\nГрупп точных neighbor-cache: {len(shared_neighbor_groups)} "
         f"(на {len(chosen_specs)} конфигураций)"
+    )
+    print(
+        f"Групп эффективных neighbor-cache после объединения k: "
+        f"{len(shared_neighbor_groups_effective)}"
     )
 
     # Загружаем все эмбеддинги в память один раз.
@@ -3545,7 +3588,10 @@ def main():
 
         # Создаём "главные" кэши на основе нормализованного X (zscore) и повторно используем индексы для всех пар.
         # Для повышения скорости: кэш для каждой модели i использует X_i для соседей (направленных).
-        cache_key = _neighbor_cache_key_for_spec(spec)
+        cache_key = neighbor_cache_key_by_metric.get(
+            name,
+            _neighbor_cache_key_for_spec(spec),
+        )
 
         def get_cache_for_model_i(model_i: str) -> NeighborCache:
             store_key = (model_i, cache_key)
