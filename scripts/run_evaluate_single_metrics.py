@@ -37,6 +37,60 @@ def save_csv(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
+def build_summary_csv(results: list[dict[str, Any]]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    by_metric: dict[str, list[dict[str, Any]]] = {}
+
+    for row in results:
+        by_metric.setdefault(str(row["metric_name"]), []).append(row)
+
+    for metric_name, metric_rows in sorted(by_metric.items()):
+        mean_rows = [r for r in metric_rows if str(r.get("task")) == "__mean__"]
+        if not mean_rows:
+            continue
+
+        mean_row = mean_rows[0]
+        task_rows = [r for r in metric_rows if str(r.get("task")) != "__mean__"]
+        rows.append(
+            {
+                "metric_file": metric_name,
+                "pair_agg": "single_diff",
+                "is_paired": False,
+                "is_symmetric": mean_row["protocol"] == "abs",
+                "pairs_total": mean_row["n_pairs"],
+                "tasks": len(task_rows),
+                "spearman_mean": mean_row["spearman"],
+                "pearson_mean": mean_row["pearson"],
+                "kendall_mean": mean_row["kendall"],
+                "correct_ratio_mean": mean_row.get("correct_ratio_mean", float("nan")),
+                "correct_ratio_flip_mean": mean_row.get(
+                    "correct_ratio_flip_mean", float("nan")
+                ),
+                "correct_ratio_adjusted_mean": mean_row.get(
+                    "correct_ratio_adjusted_mean", float("nan")
+                ),
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "metric_file",
+            "pair_agg",
+            "is_paired",
+            "is_symmetric",
+            "pairs_total",
+            "tasks",
+            "spearman_mean",
+            "pearson_mean",
+            "kendall_mean",
+            "correct_ratio_mean",
+            "correct_ratio_flip_mean",
+            "correct_ratio_adjusted_mean",
+        ],
+    )
+
+
 def parse_plots_exts(raw: str) -> list[str]:
     items = [part.strip().lower() for part in raw.split(",") if part.strip()]
     if not items:
@@ -599,7 +653,10 @@ def parse_args() -> argparse.Namespace:
         "--out_csv",
         type=Path,
         required=True,
-        help="Путь к итоговому CSV с корреляциями.",
+        help=(
+            "Путь к итоговому CSV с корреляциями. Формат совпадает с "
+            "run_evaluate_metrics.py: одна строка на метрику, агрегаты по задачам."
+        ),
     )
     parser.add_argument(
         "--out_pairs_dir",
@@ -717,7 +774,7 @@ def main() -> None:
                 f"n_pairs={row['n_pairs']}"
             )
 
-    df_results = pd.DataFrame(all_results)
+    df_results = build_summary_csv(all_results)
     save_csv(df_results, out_csv)
 
     print("\n============================================================")
