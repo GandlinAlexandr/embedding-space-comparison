@@ -10,6 +10,17 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover
+    plt = None
+
+
+VALID_PLOT_EXTS = ("png", "pdf", "svg")
+
 
 # ============================================================
 # Вспомогательные функции
@@ -17,13 +28,88 @@ from scipy.stats import kendalltau, pearsonr, spearmanr
 
 
 def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
 def save_csv(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def build_summary_csv(results: list[dict[str, Any]]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    by_metric: dict[str, list[dict[str, Any]]] = {}
+
+    for row in results:
+        by_metric.setdefault(str(row["metric_name"]), []).append(row)
+
+    for metric_name, metric_rows in sorted(by_metric.items()):
+        mean_rows = [r for r in metric_rows if str(r.get("task")) == "__mean__"]
+        if not mean_rows:
+            continue
+
+        mean_row = mean_rows[0]
+        task_rows = [r for r in metric_rows if str(r.get("task")) != "__mean__"]
+        rows.append(
+            {
+                "metric_file": metric_name,
+                "pair_agg": "single_diff",
+                "is_paired": False,
+                "is_symmetric": mean_row["protocol"] == "abs",
+                "pairs_total": mean_row["n_pairs"],
+                "tasks": len(task_rows),
+                "spearman_mean": mean_row["spearman"],
+                "pearson_mean": mean_row["pearson"],
+                "kendall_mean": mean_row["kendall"],
+                "correct_ratio_mean": mean_row.get("correct_ratio_mean", float("nan")),
+                "correct_ratio_flip_mean": mean_row.get(
+                    "correct_ratio_flip_mean", float("nan")
+                ),
+                "correct_ratio_adjusted_mean": mean_row.get(
+                    "correct_ratio_adjusted_mean", float("nan")
+                ),
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "metric_file",
+            "pair_agg",
+            "is_paired",
+            "is_symmetric",
+            "pairs_total",
+            "tasks",
+            "spearman_mean",
+            "pearson_mean",
+            "kendall_mean",
+            "correct_ratio_mean",
+            "correct_ratio_flip_mean",
+            "correct_ratio_adjusted_mean",
+        ],
+    )
+
+
+def parse_plots_exts(raw: str) -> list[str]:
+    items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not items:
+        raise ValueError("`--plots_ext` должен содержать хотя бы одно расширение.")
+
+    invalid = [ext for ext in items if ext not in VALID_PLOT_EXTS]
+    if invalid:
+        raise ValueError(
+            f"Неподдерживаемые расширения графиков: {invalid}. "
+            f"Допустимые: {list(VALID_PLOT_EXTS)}"
+        )
+
+    unique: list[str] = []
+    seen = set()
+    for ext in items:
+        if ext not in seen:
+            unique.append(ext)
+            seen.add(ext)
+    return unique
 
 
 def safe_float(x: Any) -> float:
@@ -72,14 +158,46 @@ def compute_correlations(x: np.ndarray, y: np.ndarray) -> dict[str, float]:
     }
 
 
+def correct_ranking_ratio(
+    metric_vals: np.ndarray,
+    delta_vals: np.ndarray,
+    boundary: float = 0.0,
+) -> float:
+    m = np.asarray(metric_vals, dtype=np.float64)
+    d = np.asarray(delta_vals, dtype=np.float64)
+    mask = np.isfinite(m) & np.isfinite(d)
+    m = m[mask]
+    d = d[mask]
+    if m.size == 0:
+        return float("nan")
+
+    ok = ((m >= boundary) & (d >= 0.0)) | ((m <= boundary) & (d <= 0.0))
+    return float(np.mean(ok))
+
+
+def adjust_single_correct_ratio(cr: float) -> float:
+    if np.isnan(cr):
+        return cr
+    return max(cr, 1.0 - cr)
+
+
 # ============================================================
 # Загрузка single metrics
-# Формат: <single_metrics_dir>/<metric_name>/<model>.json
+# Canonical формат: <single_metrics_dir>/metrics/<metric_name>/<model>.json
+# Legacy формат:    <single_metrics_dir>/<metric_name>/<model>.json
 # ============================================================
+
+
+def resolve_metrics_dir(single_metrics_dir: Path) -> Path:
+    canonical = single_metrics_dir / "metrics"
+    if canonical.is_dir():
+        return canonical
+    return single_metrics_dir
 
 
 def discover_metric_dirs(single_metrics_dir: Path) -> list[Path]:
-    return sorted([p for p in single_metrics_dir.iterdir() if p.is_dir()])
+    metrics_dir = resolve_metrics_dir(single_metrics_dir)
+    return sorted([p for p in metrics_dir.iterdir() if p.is_dir()])
 
 
 def load_single_metric_scores(metric_dir: Path) -> tuple[str, dict[str, float], bool]:
@@ -249,15 +367,22 @@ def evaluate_pairs_dataframe(df_pairs: pd.DataFrame, protocol: str) -> dict[str,
         x = df_pairs["delta_metric_signed"].to_numpy(dtype=np.float64)
         y = df_pairs["delta_score_signed"].to_numpy(dtype=np.float64)
         target_name = "delta_signed"
+        cr = correct_ranking_ratio(x, y, boundary=0.0)
+        cr_flip = adjust_single_correct_ratio(cr)
+        cr_adjusted = cr_flip
     elif protocol == "abs":
         x = df_pairs["delta_metric_abs"].to_numpy(dtype=np.float64)
         y = df_pairs["delta_score_abs"].to_numpy(dtype=np.float64)
         target_name = "delta_abs"
+        cr = cr_flip = cr_adjusted = float("nan")
     else:
         raise ValueError(f"Неизвестный protocol: {protocol}")
 
     corr = compute_correlations(x, y)
     corr["target"] = target_name
+    corr["correct_ratio"] = cr
+    corr["correct_ratio_flip_invariant"] = cr_flip
+    corr["correct_ratio_adjusted_like_last_year"] = cr_adjusted
     return corr
 
 
@@ -268,10 +393,15 @@ def evaluate_single_metric(
     downstream: dict[str, dict[str, float]],
     protocol: str,
     out_pairs_dir: Path | None = None,
+    plots_dir: Path | None = None,
+    plots_mode: str = "none",
+    plots_exts: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     aligned_scores = align_scores(scores, higher_is_better)
     common_models = intersect_models(aligned_scores, downstream)
     common_tasks = intersect_tasks(common_models, downstream)
+    if plots_exts is None:
+        plots_exts = ["png"]
 
     results: list[dict[str, Any]] = []
     export_frames: list[pd.DataFrame] = []
@@ -301,6 +431,11 @@ def evaluate_single_metric(
                 "spearman": corr["spearman"],
                 "pearson": corr["pearson"],
                 "kendall": corr["kendall"],
+                "correct_ratio": corr["correct_ratio"],
+                "correct_ratio_flip_invariant": corr["correct_ratio_flip_invariant"],
+                "correct_ratio_adjusted_like_last_year": corr[
+                    "correct_ratio_adjusted_like_last_year"
+                ],
             }
         )
 
@@ -319,6 +454,18 @@ def evaluate_single_metric(
             "spearman": mean_ignore_nan([float(r["spearman"]) for r in rows_protocol]),
             "pearson": mean_ignore_nan([float(r["pearson"]) for r in rows_protocol]),
             "kendall": mean_ignore_nan([float(r["kendall"]) for r in rows_protocol]),
+            "correct_ratio_mean": mean_ignore_nan(
+                [float(r["correct_ratio"]) for r in rows_protocol]
+            ),
+            "correct_ratio_flip_mean": mean_ignore_nan(
+                [float(r["correct_ratio_flip_invariant"]) for r in rows_protocol]
+            ),
+            "correct_ratio_adjusted_mean": mean_ignore_nan(
+                [
+                    float(r["correct_ratio_adjusted_like_last_year"])
+                    for r in rows_protocol
+                ]
+            ),
         }
     )
 
@@ -327,7 +474,155 @@ def evaluate_single_metric(
         df_export = pd.concat(export_frames, axis=0, ignore_index=True)
         save_csv(df_export, out_pairs_dir / f"{metric_name}_pairs.csv")
 
+    maybe_make_plots(
+        metric_name=metric_name,
+        aligned_scores=aligned_scores,
+        downstream=downstream,
+        common_models=common_models,
+        common_tasks=common_tasks,
+        protocol=protocol,
+        plots_dir=plots_dir,
+        plots_mode=plots_mode,
+        plots_exts=plots_exts,
+    )
+
     return results
+
+
+# ============================================================
+# Plotting
+# ============================================================
+
+
+def safe_filename(s: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in str(s))
+
+
+def pairs_xy_and_info(df_pairs: pd.DataFrame, protocol: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    if protocol == "signed":
+        x = df_pairs["delta_metric_signed"].to_numpy(dtype=np.float64)
+        y = df_pairs["delta_score_signed"].to_numpy(dtype=np.float64)
+        target_name = "delta_signed"
+    elif protocol == "abs":
+        x = df_pairs["delta_metric_abs"].to_numpy(dtype=np.float64)
+        y = df_pairs["delta_score_abs"].to_numpy(dtype=np.float64)
+        target_name = "delta_abs"
+    else:
+        raise ValueError(f"Неизвестный protocol: {protocol}")
+
+    corr = compute_correlations(x, y)
+    if protocol == "signed":
+        cr = correct_ranking_ratio(x, y, boundary=0.0)
+        cr_adj = adjust_single_correct_ratio(cr)
+    else:
+        cr = cr_adj = float("nan")
+
+    return x, y, {
+        "target": target_name,
+        "n_pairs": corr["n_pairs_used"],
+        "spearman": corr["spearman"],
+        "pearson": corr["pearson"],
+        "kendall": corr["kendall"],
+        "correct_ratio": cr,
+        "correct_ratio_adjusted": cr_adj,
+    }
+
+
+def plot_scatter(
+    x: np.ndarray,
+    y: np.ndarray,
+    title: str,
+    out_path: Path,
+    subtitle: str,
+    plots_exts: list[str],
+) -> None:
+    if plt is None:
+        raise RuntimeError("matplotlib недоступен; сохранить графики нельзя")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig = plt.figure(figsize=(8, 6), dpi=150)
+    ax = fig.add_subplot(111)
+    ax.scatter(x, y, s=18)
+    ax.axvline(0.0)
+    ax.axhline(0.0)
+    ax.set_title(title)
+    ax.set_xlabel("single metric diff")
+    ax.set_ylabel("target")
+    fig.text(0.01, 0.01, subtitle, fontsize=9)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+
+    base = out_path.with_suffix("")
+    for ext in plots_exts:
+        fig.savefig(base.with_suffix(f".{ext}"))
+    plt.close(fig)
+
+
+def maybe_make_plots(
+    metric_name: str,
+    aligned_scores: dict[str, float],
+    downstream: dict[str, dict[str, float]],
+    common_models: list[str],
+    common_tasks: list[str],
+    protocol: str,
+    plots_dir: Path | None,
+    plots_mode: str,
+    plots_exts: list[str],
+) -> None:
+    if plots_dir is None or plots_mode == "none":
+        return
+    if plt is None:
+        raise RuntimeError("matplotlib недоступен; сохранить графики нельзя")
+
+    def subtitle(info: dict[str, Any]) -> str:
+        return (
+            f"spearman={info['spearman']:.3f}, pearson={info['pearson']:.3f}, "
+            f"kendall={info['kendall']:.3f}, cr={info['correct_ratio']:.3f}, "
+            f"cr_adj={info['correct_ratio_adjusted']:.3f} | "
+            f"pairs={info['n_pairs']} | protocol={protocol}"
+        )
+
+    if plots_mode in {"all", "alltasks"}:
+        frames = [
+            build_pairs_for_task(
+                metric_name=metric_name,
+                aligned_scores=aligned_scores,
+                downstream=downstream,
+                common_models=common_models,
+                task_name=task_name,
+            )
+            for task_name in common_tasks
+        ]
+        if frames:
+            df_all = pd.concat(frames, axis=0, ignore_index=True)
+            x, y, info = pairs_xy_and_info(df_all, protocol=protocol)
+            plot_scatter(
+                x=x,
+                y=y,
+                title=f"{metric_name} | ALL TASKS | single_{protocol}",
+                out_path=plots_dir / f"{safe_filename(metric_name)}__ALLTASKS.png",
+                subtitle=subtitle(info),
+                plots_exts=plots_exts,
+            )
+
+    if plots_mode in {"all", "tasks"} and len(common_tasks) > 1:
+        for task_name in common_tasks:
+            df_task = build_pairs_for_task(
+                metric_name=metric_name,
+                aligned_scores=aligned_scores,
+                downstream=downstream,
+                common_models=common_models,
+                task_name=task_name,
+            )
+            x, y, info = pairs_xy_and_info(df_task, protocol=protocol)
+            plot_scatter(
+                x=x,
+                y=y,
+                title=f"{metric_name} | task={task_name} | single_{protocol}",
+                out_path=plots_dir
+                / f"{safe_filename(metric_name)}__task_{safe_filename(task_name)}.png",
+                subtitle=subtitle(info),
+                plots_exts=plots_exts,
+            )
 
 
 # ============================================================
@@ -343,7 +638,10 @@ def parse_args() -> argparse.Namespace:
         "--single_metrics_dir",
         type=Path,
         required=True,
-        help="Папка с single-metrics в формате <metric>/<model>.json.",
+        help=(
+            "Папка с single-metrics. Поддерживает canonical "
+            "<dataset>/metrics/<metric>/<model>.json и legacy <metric>/<model>.json."
+        ),
     )
     parser.add_argument(
         "--downstream_json",
@@ -355,13 +653,38 @@ def parse_args() -> argparse.Namespace:
         "--out_csv",
         type=Path,
         required=True,
-        help="Путь к итоговому CSV с корреляциями.",
+        help=(
+            "Путь к итоговому CSV с корреляциями. Формат совпадает с "
+            "run_evaluate_metrics.py: одна строка на метрику, агрегаты по задачам."
+        ),
     )
     parser.add_argument(
         "--out_pairs_dir",
         type=Path,
         default=None,
         help="Необязательная папка для сохранения попарных таблиц.",
+    )
+    parser.add_argument(
+        "--plots_dir",
+        type=Path,
+        default=None,
+        help="Необязательная папка для scatter-графиков single metric diff vs target.",
+    )
+    parser.add_argument(
+        "--plots_mode",
+        type=str,
+        choices=["none", "all", "alltasks", "tasks"],
+        default="none",
+        help=(
+            "Какие scatter-графики строить: none, all, alltasks или tasks. "
+            "Работает только если задан --plots_dir."
+        ),
+    )
+    parser.add_argument(
+        "--plots_ext",
+        type=str,
+        default="png",
+        help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
     )
     parser.add_argument(
         "--protocol",
@@ -389,6 +712,9 @@ def main() -> None:
     downstream_json: Path = args.downstream_json
     out_csv: Path = args.out_csv
     out_pairs_dir: Path | None = args.out_pairs_dir
+    plots_dir: Path | None = args.plots_dir
+    plots_mode: str = args.plots_mode
+    plots_exts = parse_plots_exts(args.plots_ext)
     protocol: str = args.protocol
 
     if not single_metrics_dir.exists():
@@ -411,6 +737,7 @@ def main() -> None:
     print("ОЦЕНКА ОДИНОЧНЫХ МЕТРИК")
     print("============================================================")
     print(f"Папка single-metrics : {single_metrics_dir}")
+    print(f"Папка значений       : {resolve_metrics_dir(single_metrics_dir)}")
     print(f"Файл downstream      : {downstream_json}")
     print(f"Найдено метрик       : {len(metric_dirs)}")
     print(f"Найдено моделей down : {len(downstream)}")
@@ -429,6 +756,9 @@ def main() -> None:
             downstream=downstream,
             protocol=protocol,
             out_pairs_dir=out_pairs_dir,
+            plots_dir=plots_dir,
+            plots_mode=plots_mode,
+            plots_exts=plots_exts,
         )
         all_results.extend(metric_results)
 
@@ -440,10 +770,11 @@ def main() -> None:
                 f"spearman={row['spearman']:.4f} "
                 f"pearson={row['pearson']:.4f} "
                 f"kendall={row['kendall']:.4f} "
+                f"cr_adj={row['correct_ratio_adjusted_mean']:.4f} "
                 f"n_pairs={row['n_pairs']}"
             )
 
-    df_results = pd.DataFrame(all_results)
+    df_results = build_summary_csv(all_results)
     save_csv(df_results, out_csv)
 
     print("\n============================================================")
@@ -452,6 +783,8 @@ def main() -> None:
     print(f"Результаты сохранены в: {out_csv}")
     if out_pairs_dir is not None:
         print(f"Попарные таблицы      : {out_pairs_dir}")
+    if plots_dir is not None and plots_mode != "none":
+        print(f"Scatter-графики       : {plots_dir}")
     print("============================================================")
 
 

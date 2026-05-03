@@ -88,8 +88,8 @@ A) Пример пошагового запуска и оценки основн
       --train_embeddings_dir .\data\embeddings\cifar10_train `
       --test_embeddings_dir .\data\embeddings\cifar10_test `
       --data_root .\data `
-      --out_json .\data\downstream\cifar10_linear_probe.json `
-      --task_name cifar10_linear_probe
+      --out_json .\data\downstream\cifar10_mlp.json `
+      --task_name cifar10_mlp
    ```
    Итог: Для эмбеддингов каждой модели обучается простой downstream-классификатор на train-части и оценивается на test-части. На выходе получается JSON-файл с итоговыми downstream-результатами моделей, который служит опорным сигналом качества представлений и затем используется для оценки того, насколько хорошо парные и одиночные метрики согласуются с реальной разницей в качестве моделей.
 
@@ -124,7 +124,7 @@ A) Пример пошагового запуска и оценки основн
    ```powershell
     python -m scripts.run_evaluate_metrics `
       --metrics_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\metric_matrices\cifar10_test `
-      --downstream_json .\data\experiments\exp01_antisym_cifar10_09-03-2026\downstream\cifar10_linear_probe.json `
+      --downstream_json .\data\downstream\cifar10_mlp.json `
       --out_csv .\data\experiments\exp01_antisym_cifar10_09-03-2026\reports\cifar10_eval_signed.csv `
       --eval_protocol delta_signed `
       --plots_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\plots\cifar10_test_signed `
@@ -136,7 +136,7 @@ A) Пример пошагового запуска и оценки основн
    ```powershell
     python -m scripts.run_evaluate_metrics `
       --metrics_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\metric_matrices\cifar10_test `
-      --downstream_json .\data\experiments\exp02_sym_cifar10_10-03-2026\downstream\cifar10_linear_probe.json `
+      --downstream_json .\data\downstream\cifar10_mlp.json `
       --out_csv .\data\experiments\exp02_sym_cifar10_10-03-2026\reports\cifar10_eval.csv `
       --eval_protocol abs `
       --plots_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\plots\cifar10_test_signed `
@@ -225,7 +225,9 @@ C) Далее прадставлен пример расчёта "одиночн
    ```powershell
     python -m scripts.run_compute_single_metrics `
       --embeddings_dir .\data\embeddings\cifar10_test `
-      --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\single_metrics
+      --dataset_key cifar10_test `
+      --out_root .\data\single_metrics `
+      --device auto
    ```
    Итог: Для эмбеддингов каждой модели вычисляются одиночные метрики качества представлений, то есть такие характеристики, которые оценивают каждое пространство эмбеддингов само по себе, без попарного сравнения с другими моделями. На выходе получается набор файлов со значениями этих метрик для всех моделей.
 
@@ -234,18 +236,20 @@ C) Далее прадставлен пример расчёта "одиночн
    а. по протоколу `signed`
    ```powershell
     python -m scripts.run_evaluate_single_metrics `
-      --single_metrics_dir .\data\experiments\exp03_single_cifar10_11-03-2026\single_metrics `
-      --downstream_json .\data\downstream\cifar10_linear_probe.json `
+      --single_metrics_dir .\data\single_metrics\cifar10_test `
+      --downstream_json .\data\downstream\cifar10_mlp.json `
       --out_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_signed.csv `
       --out_pairs_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_pairs_signed `
+      --plots_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_scatter_signed `
+      --plots_mode alltasks `
       --protocol signed
    ```
    
    b. по протоколу `abs`
    ```powershell
     python -m scripts.run_evaluate_single_metrics `
-      --single_metrics_dir .\data\experiments\exp03_single_cifar10_11-03-2026\single_metrics `
-      --downstream_json .\data\downstream\cifar10_linear_probe.json `
+      --single_metrics_dir .\data\single_metrics\cifar10_test `
+      --downstream_json .\data\downstream\cifar10_mlp.json `
       --out_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_abs.csv `
       --out_pairs_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_pairs_abs `
       --protocol abs
@@ -255,8 +259,19 @@ C) Далее прадставлен пример расчёта "одиночн
    На выходе получаются:
    * итоговая таблица качества одиночных метрик;
    * вспомогательные попарные таблицы, используемые для дальнейшей визуализации и анализа.
+   Для `signed` в итоговой таблице также сохраняется доля правильного ранжирования (`correct_ratio_*`), а при указании `--plots_dir` строятся scatter-графики `u(e_i)-u(e_j)` против `Δacc`.
 
-3. Графики для "одиночных" метрик:
+3. Итоговый диагностический график для "одиночных" метрик:
+   ```powershell
+   python -m scripts.plot_single_metric_diagnostics `
+      --single_eval_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_signed.csv `
+      --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\single_metric_diagnostics `
+      --dataset cifar10 `
+      --protocol signed `
+      --title "single-diff"
+   ```
+
+4. Графики для сравнения "одиночных" и попарных метрик:
 
    а. по протоколу `signed`
    ```powershell
@@ -298,8 +313,8 @@ D) Ниже указаны команды для графиков, сравни�
    а. по протоколу `signed`
    ```powershell
    python -m scripts.plot_pairwise_error_heatmaps `
-      --downstream_json .\data\downstream\cifar10_linear_probe.json `
-      --single_metrics_dir .\data\experiments\exp03_single_cifar10_11-03-2026\single_metrics `
+      --downstream_json .\data\downstream\cifar10_mlp.json `
+      --single_metrics_dir .\data\single_metrics\cifar10_test `
       --family_map_json .\data\experiments\model_families.json `
       --out_dir .\data\experiments\exp04_heatmap_13-03-2026\reports\family_corr_signed `
       --pairwise_metrics_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\metric_matrices\cifar10_test `
@@ -313,8 +328,8 @@ D) Ниже указаны команды для графиков, сравни�
    b. по протоколу `abs`
    ```powershell
    python -m scripts.plot_pairwise_error_heatmaps `
-      --downstream_json .\data\downstream\cifar10_linear_probe.json `
-      --single_metrics_dir .\data\experiments\exp03_single_cifar10_11-03-2026\single_metrics `
+      --downstream_json .\data\downstream\cifar10_mlp.json `
+      --single_metrics_dir .\data\single_metrics\cifar10_test `
       --family_map_json .\data\experiments\model_families.json `
       --out_dir .\data\experiments\exp04_heatmap_13-03-2026\reports\family_corr_abs `
       --pairwise_metrics_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\metric_matrices\cifar10_test `
