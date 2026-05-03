@@ -71,6 +71,8 @@ def _load_labels_file(path: str) -> np.ndarray:
 def _list_models(embeddings_dir: str) -> Dict[str, str]:
     files = {}
     for fn in os.listdir(embeddings_dir):
+        if os.path.splitext(fn)[0] in {"labels", "targets", "subset_indices"}:
+            continue
         if fn.endswith(".npy") or fn.endswith(".npz"):
             name = os.path.splitext(fn)[0]
             files[name] = os.path.join(embeddings_dir, fn)
@@ -150,6 +152,10 @@ def _resolve_labels_holdout(
     if labels_path:
         return _load_labels_file(labels_path)
 
+    local_labels_path = os.path.join(embeddings_dir, "labels.npy")
+    if os.path.exists(local_labels_path):
+        return _load_labels_file(local_labels_path)
+
     if not dataset_name or not data_root:
         raise ValueError(
             "Если --labels_path не задан, нужно указать --dataset и --data_root "
@@ -178,6 +184,19 @@ def _resolve_labels_train_test(
     if labels_path:
         y = _load_labels_file(labels_path)
         return y, y
+
+    train_labels_path = (
+        os.path.join(train_embeddings_dir, "labels.npy")
+        if train_embeddings_dir is not None
+        else ""
+    )
+    test_labels_path = (
+        os.path.join(test_embeddings_dir, "labels.npy")
+        if test_embeddings_dir is not None
+        else ""
+    )
+    if train_labels_path and test_labels_path and os.path.exists(train_labels_path) and os.path.exists(test_labels_path):
+        return _load_labels_file(train_labels_path), _load_labels_file(test_labels_path)
 
     if not dataset_name or not data_root:
         raise ValueError(

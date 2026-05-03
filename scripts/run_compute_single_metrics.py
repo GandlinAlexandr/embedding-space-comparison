@@ -12,6 +12,7 @@ import numpy as np
 
 
 DEFAULT_SINGLE_METRICS_ROOT = Path("data") / "single_metrics"
+DEFAULT_EMBEDDINGS_ROOT = Path("data") / "embeddings"
 
 
 # ============================================================
@@ -19,6 +20,13 @@ DEFAULT_SINGLE_METRICS_ROOT = Path("data") / "single_metrics"
 # ============================================================
 
 SUPPORTED_EXTENSIONS = {".npy", ".npz", ".pt", ".pth"}
+NON_MODEL_STEMS = {
+    "subset_indices",
+    "labels",
+    "targets",
+    "embeddings_manifest",
+    "subset_manifest",
+}
 
 
 def _maybe_import_torch():
@@ -75,6 +83,36 @@ def slugify_dataset_key(raw: str) -> str:
 
 def infer_dataset_key(embeddings_dir: Path) -> str:
     return slugify_dataset_key(embeddings_dir.name)
+
+
+def infer_embeddings_dir(dataset_key: str) -> Path:
+    return DEFAULT_EMBEDDINGS_ROOT / slugify_dataset_key(dataset_key)
+
+
+def sampled_dataset_key(
+    dataset_key: str,
+    sample_size: int,
+    sample_seed: int,
+    sample_strategy: str = "stratified",
+) -> str:
+    key = f"{slugify_dataset_key(dataset_key)}_s{int(sample_size)}_seed{int(sample_seed)}"
+    if str(sample_strategy):
+        key = f"{key}_{sample_strategy}"
+    return key
+
+
+def infer_sampled_embeddings_dir(
+    dataset_key: str,
+    sample_size: int,
+    sample_seed: int,
+    sample_strategy: str = "stratified",
+) -> Path:
+    return DEFAULT_EMBEDDINGS_ROOT / "samples" / sampled_dataset_key(
+        dataset_key,
+        sample_size,
+        sample_seed,
+        sample_strategy,
+    )
 
 
 def covariance_eigenvalues(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -184,6 +222,7 @@ def discover_embedding_files(embeddings_dir: Path) -> list[Path]:
         Path(os.path.join(embeddings_dir, fn))
         for fn in sorted(os.listdir(embeddings_dir))
         if Path(fn).suffix.lower() in SUPPORTED_EXTENSIONS
+        and Path(fn).stem not in NON_MODEL_STEMS
     ]
 
     if files:
@@ -750,7 +789,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embeddings_dir",
         type=Path,
-        required=True,
+        default=None,
         help="Папка с файлами эмбеддингов моделей (.npy/.npz/.pt/.pth).",
     )
     parser.add_argument(
@@ -771,6 +810,14 @@ def parse_args() -> argparse.Namespace:
             "Если не задано, берётся имя папки --embeddings_dir."
         ),
     )
+    parser.add_argument(
+        "--sample_size",
+        type=int,
+        default=0,
+        help="Если >0, читать embeddings из data/embeddings/samples/<dataset_key>_sN_seedS_<sample_strategy>.",
+    )
+    parser.add_argument("--sample_seed", type=int, default=42)
+    parser.add_argument("--sample_strategy", choices=["stratified", "random"], default="stratified")
     parser.add_argument(
         "--out_dir",
         type=Path,
@@ -827,6 +874,25 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    if args.embeddings_dir is None:
+        if not args.dataset_key:
+            raise ValueError("Нужно указать либо --embeddings_dir, либо --dataset_key.")
+        if int(args.sample_size) > 0:
+            args.embeddings_dir = infer_sampled_embeddings_dir(
+                args.dataset_key,
+                int(args.sample_size),
+                int(args.sample_seed),
+                str(args.sample_strategy),
+            )
+            args.dataset_key = sampled_dataset_key(
+                args.dataset_key,
+                int(args.sample_size),
+                int(args.sample_seed),
+                str(args.sample_strategy),
+            )
+        else:
+            args.embeddings_dir = infer_embeddings_dir(args.dataset_key)
 
     embeddings_dir: Path = args.embeddings_dir
     metric_names: list[str] = args.metrics

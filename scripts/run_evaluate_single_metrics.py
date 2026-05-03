@@ -112,6 +112,32 @@ def parse_plots_exts(raw: str) -> list[str]:
     return unique
 
 
+def _dataset_base_from_key(dataset_key: str) -> str:
+    key = str(dataset_key)
+    for split in ("_test", "_train", "_val", "_valid"):
+        pos = key.find(split)
+        if pos >= 0:
+            return key[:pos]
+    return key
+
+
+def _infer_downstream_json(dataset_key: str) -> Path:
+    dataset = _dataset_base_from_key(dataset_key)
+    candidates = [
+        Path("data") / "downstream" / f"{dataset_key}_mlp.json",
+        Path("data") / "downstream" / f"{dataset_key}_linear_probe.json",
+        Path("data") / "downstream" / f"{dataset}_mlp.json",
+        Path("data") / "downstream" / f"{dataset}_linear_probe.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        "Не удалось автоматически найти downstream JSON. Проверены: "
+        + ", ".join(str(p) for p in candidates)
+    )
+
+
 def safe_float(x: Any) -> float:
     value = float(x)
     if not np.isfinite(value):
@@ -637,22 +663,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--single_metrics_dir",
         type=Path,
-        required=True,
+        default=None,
         help=(
             "Папка с single-metrics. Поддерживает canonical "
             "<dataset>/metrics/<metric>/<model>.json и legacy <metric>/<model>.json."
         ),
     )
     parser.add_argument(
+        "--dataset_key",
+        type=str,
+        default="",
+        help="Имя датасета/сплита, например food101_test. Автоматически задает стандартные пути.",
+    )
+    parser.add_argument(
+        "--single_metrics_root",
+        type=Path,
+        default=Path("data") / "single_metrics",
+        help="Корень single metrics store для режима --dataset_key.",
+    )
+    parser.add_argument(
+        "--experiment_dir",
+        type=Path,
+        default=None,
+        help="Если задано, out_csv/out_pairs_dir/plots_dir выводятся стандартно из experiment_dir.",
+    )
+    parser.add_argument(
         "--downstream_json",
         type=Path,
-        required=True,
+        default=None,
         help="JSON-файл с downstream-оценками в формате model -> task -> score.",
     )
     parser.add_argument(
         "--out_csv",
         type=Path,
-        required=True,
+        default=None,
         help=(
             "Путь к итоговому CSV с корреляциями. Формат совпадает с "
             "run_evaluate_metrics.py: одна строка на метрику, агрегаты по задачам."
@@ -707,6 +751,38 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    dataset_key = str(args.dataset_key).strip()
+    if args.single_metrics_dir is None:
+        if not dataset_key:
+            raise ValueError("Нужно указать либо --single_metrics_dir, либо --dataset_key.")
+        args.single_metrics_dir = args.single_metrics_root / dataset_key
+    if args.downstream_json is None:
+        if not dataset_key:
+            dataset_key = args.single_metrics_dir.name
+        args.downstream_json = _infer_downstream_json(dataset_key)
+    if args.experiment_dir is not None:
+        dataset_base = _dataset_base_from_key(dataset_key or args.single_metrics_dir.name)
+        if args.out_csv is None:
+            args.out_csv = (
+                args.experiment_dir
+                / "reports"
+                / f"{dataset_base}_single_metric_eval_signed.csv"
+            )
+        if args.out_pairs_dir is None:
+            args.out_pairs_dir = (
+                args.experiment_dir
+                / "reports"
+                / f"{dataset_base}_single_metric_pairs_signed"
+            )
+        if args.plots_dir is None:
+            args.plots_dir = (
+                args.experiment_dir
+                / "plots"
+                / f"{dataset_base}_single_metric_scatter_signed"
+            )
+    if args.out_csv is None:
+        raise ValueError("Нужно указать либо --out_csv, либо --experiment_dir.")
 
     single_metrics_dir: Path = args.single_metrics_dir
     downstream_json: Path = args.downstream_json

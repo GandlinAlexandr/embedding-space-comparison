@@ -13,8 +13,9 @@ data/embeddings/{...}/{model_name}.npy
 from __future__ import annotations
 
 import argparse
+import json
 import os
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -25,6 +26,7 @@ from datasets.io import (
     build_dataset,
     build_loader,
     default_transform_imagenet224,
+    load_labels,
 )  # вынесено в отдельный пакет datasets/
 from model_zoo.registry import (
     get_model,
@@ -32,7 +34,62 @@ from model_zoo.registry import (
 )  # вынесено в отдельный пакет model_zoo/
 
 
-def _subset_indices(n: int, num_samples: int, strategy: str, seed: int) -> np.ndarray:
+def _stratified_subset_indices(
+    labels: np.ndarray,
+    num_samples: int,
+    seed: int,
+) -> np.ndarray:
+    rng = np.random.RandomState(seed)
+    y = np.asarray(labels).reshape(-1)
+    n = int(y.size)
+    if num_samples <= 0 or num_samples >= n:
+        return np.arange(n, dtype=np.int64)
+
+    classes, counts = np.unique(y, return_counts=True)
+    n_classes = int(classes.size)
+    if num_samples < n_classes:
+        raise ValueError(
+            f"Для stratified sample_size={num_samples} меньше числа классов={n_classes}."
+        )
+
+    exact = counts.astype(np.float64) * (float(num_samples) / float(n))
+    quotas = np.floor(exact).astype(np.int64)
+    quotas = np.maximum(quotas, 1)
+    quotas = np.minimum(quotas, counts)
+
+    while int(np.sum(quotas)) > num_samples:
+        removable = np.where(quotas > 1)[0]
+        if removable.size == 0:
+            raise ValueError("Не удалось построить stratified подвыборку с заданным sample_size.")
+        frac = exact[removable] - np.floor(exact[removable])
+        cls_pos = removable[int(np.argmin(frac))]
+        quotas[cls_pos] -= 1
+
+    while int(np.sum(quotas)) < num_samples:
+        room = np.where(quotas < counts)[0]
+        if room.size == 0:
+            break
+        deficit = exact[room] - quotas[room].astype(np.float64)
+        cls_pos = room[int(np.argmax(deficit))]
+        quotas[cls_pos] += 1
+
+    selected: List[np.ndarray] = []
+    for cls, q in zip(classes, quotas):
+        cls_idx = np.where(y == cls)[0]
+        chosen = rng.choice(cls_idx, size=int(q), replace=False)
+        selected.append(chosen.astype(np.int64))
+    idx = np.concatenate(selected)
+    idx.sort()
+    return idx.astype(np.int64)
+
+
+def _subset_indices(
+    n: int,
+    num_samples: int,
+    strategy: str,
+    seed: int,
+    labels: Optional[np.ndarray] = None,
+) -> np.ndarray:
     rng = np.random.RandomState(seed)
 
     if num_samples <= 0 or num_samples >= n:
@@ -43,7 +100,44 @@ def _subset_indices(n: int, num_samples: int, strategy: str, seed: int) -> np.nd
         idx.sort()
         return idx.astype(np.int64)
 
+    if strategy == "stratified":
+        if labels is None:
+            raise ValueError("Для subset_strategy=stratified нужны labels.")
+        return _stratified_subset_indices(labels, num_samples, seed)
+
     raise ValueError(f"Неизвестная стратегия подвыборки: {strategy}")
+
+
+def _dataset_key(dataset: str, split: str) -> str:
+    return f"{dataset}_{split}"
+
+
+def _sampled_dataset_key(
+    dataset: str,
+    split: str,
+    num_samples: int,
+    seed: int,
+    strategy: str,
+) -> str:
+    key = f"{_dataset_key(dataset, split)}_s{int(num_samples)}_seed{int(seed)}"
+    if str(strategy) != "random":
+        key = f"{key}_{strategy}"
+    return key
+
+
+def _resolve_output_dir(args: argparse.Namespace) -> str:
+    if args.output_dir:
+        return args.output_dir
+    if int(args.num_samples) > 0:
+        key = _sampled_dataset_key(
+            args.dataset,
+            args.split,
+            args.num_samples,
+            args.seed,
+            args.subset_strategy,
+        )
+        return os.path.join("data", "embeddings", "samples", key)
+    return os.path.join("data", "embeddings", _dataset_key(args.dataset, args.split))
 
 
 def extract_embeddings_from_model(
@@ -72,7 +166,15 @@ def main():
     parser.add_argument("--dataset", type=str, default="cifar10")
     parser.add_argument("--split", type=str, default="test", help="train|val|test|trainval")
     parser.add_argument("--data_root", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="",
+        help=(
+            "Куда сохранять embeddings. Если пусто: full -> data/embeddings/<dataset>_<split>, "
+            "sampled -> data/embeddings/samples/<dataset>_<split>_sN_seedS_<strategy>."
+        ),
+    )
 
     # ВАЖНО:
     # - теперь vgg16 по умолчанию означает vgg16_conv512 (см. model_zoo.registry)
@@ -99,13 +201,23 @@ def main():
         help="Необязательный размер подвыборки (0 = использовать весь сплит).",
     )
     parser.add_argument(
+        "--sample_size",
+        type=int,
+        default=None,
+        help="Alias для --num_samples.",
+    )
+    parser.add_argument(
         "--subset_strategy",
         type=str,
-        default="random",
-        help="Стратегия подвыборки (по умолчанию: random).",
+        choices=["random", "stratified"],
+        default="stratified",
+        help="Стратегия подвыборки: stratified или random.",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if args.sample_size is not None:
+        args.num_samples = int(args.sample_size)
+    args.output_dir = _resolve_output_dir(args)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -114,16 +226,32 @@ def main():
 
     base_dataset = build_dataset(args.dataset, args.data_root, split=args.split)
 
+    base_labels = load_labels(args.dataset, args.data_root, args.split).astype(np.int64)
+    if int(base_labels.shape[0]) != int(len(base_dataset)):
+        raise RuntimeError(
+            f"Длина labels ({base_labels.shape[0]}) не совпадает с датасетом ({len(base_dataset)})."
+        )
+
     # Необязательная подвыборка
     subset_indices = _subset_indices(
-        len(base_dataset), args.num_samples, args.subset_strategy, args.seed
+        len(base_dataset),
+        args.num_samples,
+        args.subset_strategy,
+        args.seed,
+        labels=base_labels,
     )
+    subset_labels = np.asarray(base_labels[subset_indices], dtype=np.int64)
     if len(subset_indices) != len(base_dataset):
-
-        # Исправление: сохраняем индексы, чтобы downstream мог взять те же объекты
         idx_path = os.path.join(args.output_dir, "subset_indices.npy")
+        labels_path = os.path.join(args.output_dir, "labels.npy")
         np.save(idx_path, np.asarray(subset_indices, dtype=np.int64))
+        np.save(labels_path, subset_labels)
+        classes, counts = np.unique(subset_labels, return_counts=True)
+        class_counts = {str(int(c)): int(n) for c, n in zip(classes, counts)}
+        with open(os.path.join(args.output_dir, "class_counts.json"), "w", encoding="utf-8") as f:
+            json.dump(class_counts, f, ensure_ascii=False, indent=2)
         print(f"Сохранены индексы подвыборки: {idx_path}")
+        print(f"Сохранены метки подвыборки: {labels_path}")
     else:
         print(f"Используется полный сплит: {args.split} (n={len(base_dataset)})")
 
@@ -159,6 +287,44 @@ def main():
         embs = extract_embeddings_from_model(model, loader, device=device)
         np.save(out_path, embs.astype(np.float32))
         print(f"Сохранено: {out_path} | shape={embs.shape}")
+
+    manifest = {
+        "schema_version": 1,
+        "kind": "extracted_embeddings",
+        "dataset": args.dataset,
+        "split": args.split,
+        "dataset_key": (
+            _sampled_dataset_key(
+                args.dataset,
+                args.split,
+                args.num_samples,
+                args.seed,
+                args.subset_strategy,
+            )
+            if int(args.num_samples) > 0 and int(args.num_samples) < len(base_dataset)
+            else _dataset_key(args.dataset, args.split)
+        ),
+        "sampled": bool(int(args.num_samples) > 0 and int(args.num_samples) < len(base_dataset)),
+        "sample_size": int(len(subset_indices)),
+        "full_size": int(len(base_dataset)),
+        "seed": int(args.seed),
+        "subset_strategy": str(args.subset_strategy),
+        "class_counts": {str(int(c)): int(n) for c, n in zip(*np.unique(subset_labels, return_counts=True))},
+        "subset_indices_path": (
+            os.path.abspath(os.path.join(args.output_dir, "subset_indices.npy"))
+            if len(subset_indices) != len(base_dataset)
+            else ""
+        ),
+        "labels_path": (
+            os.path.abspath(os.path.join(args.output_dir, "labels.npy"))
+            if len(subset_indices) != len(base_dataset)
+            else ""
+        ),
+        "models": model_names,
+        "output_dir": os.path.abspath(args.output_dir),
+    }
+    with open(os.path.join(args.output_dir, "embeddings_manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

@@ -803,6 +803,7 @@ def _fit_local_linear_map_ransac(
 @dataclass
 class LocalSolveResult:
     rank_value: float  # значение агрегированного ранга (rankme или hard_rank)
+    local_map: np.ndarray
     singular_values: np.ndarray
     raw_residual: float
     relative_residual: float
@@ -942,6 +943,7 @@ def _solve_local_linear_map_and_rank(
 
     return LocalSolveResult(
         rank_value=rank_value,
+        local_map=M,
         singular_values=s,
         raw_residual=raw_residual,
         relative_residual=relative_residual,
