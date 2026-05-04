@@ -573,7 +573,26 @@ def main() -> None:
         action="store_true",
         help="Also store model_i -> model_i directions. Pairwise metrics do not need this.",
     )
+    parser.add_argument(
+        "--source_shard_index",
+        type=int,
+        default=0,
+        help="Index of the source-model shard to compute. Default 0 keeps the full old behavior.",
+    )
+    parser.add_argument(
+        "--source_shard_count",
+        type=int,
+        default=1,
+        help="Number of source-model shards. Default 1 keeps the full old behavior.",
+    )
     args = parser.parse_args()
+    if int(args.source_shard_count) < 1:
+        raise ValueError("--source_shard_count должен быть >= 1")
+    if not (0 <= int(args.source_shard_index) < int(args.source_shard_count)):
+        raise ValueError(
+            "--source_shard_index должен быть в диапазоне "
+            "[0, --source_shard_count)"
+        )
 
     k_list = _parse_k_list(args.k_list)
     if not _neighborhood_specs(args, k_list):
@@ -670,11 +689,24 @@ def main() -> None:
         return cache_by_model[model_name]
 
     print(f"Local map store: {store_dir}")
-    print(f"Models: {len(model_names)} | directed pairs: {len(model_names) * (len(model_names) - 1)}")
+    source_model_names = model_names[
+        int(args.source_shard_index) :: int(args.source_shard_count)
+    ]
+    full_directed_pairs = len(model_names) * (len(model_names) - 1)
+    shard_directed_pairs = len(source_model_names) * (
+        len(model_names) - (0 if args.include_self else 1)
+    )
+    print(f"Models: {len(model_names)} | directed pairs: {full_directed_pairs}")
+    print(
+        "Source shard: "
+        f"{args.source_shard_index}/{args.source_shard_count} | "
+        f"source models: {len(source_model_names)} | "
+        f"shard directed pairs: {shard_directed_pairs}"
+    )
     print(f"k candidates: {k_list} | n_centers={args.n_centers}")
     print(f"geometry={legacy._LOCAL_GEOMETRY_MODE} | backend={legacy._COMPUTE_BACKEND.name}")
 
-    for model_i in tqdm(model_names, desc="model_i"):
+    for model_i in tqdm(source_model_names, desc="model_i"):
         Xn = legacy._get_precomputed_zscore(model_i, embeddings[model_i])
         cache_i = cache_for(model_i)
         for model_j in model_names:
