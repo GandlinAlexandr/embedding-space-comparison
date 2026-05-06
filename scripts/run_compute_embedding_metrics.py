@@ -239,6 +239,9 @@ def _list_models(embeddings_dir: str) -> Tuple[List[str], Dict[str, str]]:
     """
     files = []
     for fn in os.listdir(embeddings_dir):
+        stem = os.path.splitext(fn)[0]
+        if stem in {"labels", "targets", "subset_indices"}:
+            continue
         if fn.endswith(".npy") or fn.endswith(".npz"):
             files.append(fn)
 
@@ -1134,7 +1137,6 @@ class MetricSpec:
     weak_spectrum_count: int = 5
     exclude_center_from_fit: bool = False
     adaptive_selection: str = "center_prediction_error"
-    adaptive_selection_centering: str = "neighbors_mean"
 
 
 def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> MetricSpec:
@@ -1189,7 +1191,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     weak_spectrum_count = 5
     exclude_center_from_fit = False
     adaptive_selection = "center_prediction_error"
-    adaptive_selection_centering = "neighbors_mean"
     local_id_estimator = "MLE"
     local_id_n_neighbors = 100
     if isinstance(meta, dict):
@@ -1238,9 +1239,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             meta.get("exclude_center_from_fit", exclude_center_from_fit)
         )
         adaptive_selection = str(meta.get("adaptive_selection", adaptive_selection))
-        adaptive_selection_centering = str(
-            meta.get("adaptive_selection_centering", adaptive_selection_centering)
-        )
         local_id_estimator = str(
             meta.get("estimator", meta.get("local_id_estimator", local_id_estimator))
         )
@@ -1300,7 +1298,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 weak_spectrum_count=weak_spectrum_count,
                 exclude_center_from_fit=True,
                 adaptive_selection=adaptive_selection,
-                adaptive_selection_centering=adaptive_selection_centering,
             )
 
         if variant in {"linear_knn", "linear_knn_antisym", "linear_knn_sym"}:
@@ -1459,7 +1456,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             weak_spectrum_count=int(m.group(2)),
             exclude_center_from_fit=True,
             adaptive_selection=adaptive_selection,
-            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"adaptive_tail_k([0-9_]+)_q(\d+)(_antisym|_sym)?", lower)
@@ -1477,7 +1473,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             weak_spectrum_count=int(m.group(2)),
             exclude_center_from_fit=True,
             adaptive_selection=adaptive_selection,
-            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"adaptive_k([0-9_]+)(_antisym|_sym)?", lower)
@@ -1495,7 +1490,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             weak_spectrum_count=weak_spectrum_count,
             exclude_center_from_fit=True,
             adaptive_selection=adaptive_selection,
-            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"lin_eps_(\d+)(_antisym|_sym)?", lower)
@@ -2301,19 +2295,10 @@ def _metric_directed_for_pair(
         Y_center_work = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
 
         if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
-            if spec.adaptive_selection_centering == "neighbors_mean":
-                x0 = Xc_work.mean(axis=0, keepdims=True)
-                y0 = Yc_work.mean(axis=0, keepdims=True)
-            elif spec.adaptive_selection_centering == "center":
-                x0 = X_center_work
-                y0 = Y_center_work
-            else:
-                raise ValueError(
-                    "Неизвестный adaptive_selection_centering: "
-                    f"{spec.adaptive_selection_centering}"
-                )
-            M = _fit_local_linear_map(Xc_work - x0, Yc_work - y0)
-            y_pred = (X_center_work - x0) @ M + y0
+            x_ref = Xc_work.mean(axis=0, keepdims=True)
+            y_ref = Yc_work.mean(axis=0, keepdims=True)
+            M = _fit_local_linear_map(Xc_work - x_ref, Yc_work - y_ref)
+            y_pred = (X_center_work - x_ref) @ M + y_ref
         else:
             M = _fit_local_linear_map(Xc_work, Yc_work)
             y_pred = X_center_work @ M
@@ -2377,21 +2362,12 @@ def _metric_directed_for_pair(
             Yk = _to_backend_tensor(Yn[idx], dtype=torch.float64)
 
             if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
-                if spec.adaptive_selection_centering == "neighbors_mean":
-                    x0 = Xk.mean(dim=1, keepdim=True)
-                    y0 = Yk.mean(dim=1, keepdim=True)
-                elif spec.adaptive_selection_centering == "center":
-                    x0 = X_center_t[:, None, :]
-                    y0 = Y_center_t[:, None, :]
-                else:
-                    raise ValueError(
-                        "Неизвестный adaptive_selection_centering: "
-                        f"{spec.adaptive_selection_centering}"
-                    )
-                A = Xk - x0
-                B = Yk - y0
+                x_ref = Xk.mean(dim=1, keepdim=True)
+                y_ref = Yk.mean(dim=1, keepdim=True)
+                A = Xk - x_ref
+                B = Yk - y_ref
                 M = _solve_batched_lstsq_torch(A, B)
-                y_pred = torch.bmm((X_center_t[:, None, :] - x0), M).squeeze(1) + y0.squeeze(1)
+                y_pred = torch.bmm((X_center_t[:, None, :] - x_ref), M).squeeze(1) + y_ref.squeeze(1)
             else:
                 M = _solve_batched_lstsq_torch(Xk, Yk)
                 y_pred = torch.bmm(X_center_t[:, None, :], M).squeeze(1)
@@ -2913,7 +2889,6 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
         "weak_spectrum_count": spec.weak_spectrum_count,
         "exclude_center_from_fit": _exclude_center_from_fit_for_spec(spec),
         "adaptive_selection": spec.adaptive_selection,
-        "adaptive_selection_centering": spec.adaptive_selection_centering,
         "preferred_rank_field": "metric_ranks",
         "legacy_rank_field": "ranks",
         "ranks_axis_label": ranks_axis_label,
@@ -3158,8 +3133,6 @@ def _ensure_meta_compatible(meta_old: Dict[str, Any], new_spec: MetricSpec) -> N
             new_spec_cmp.pop("exclude_center_from_fit", None)
         if isinstance(old_spec_cmp, dict) and "adaptive_selection" not in old_spec_cmp:
             new_spec_cmp.pop("adaptive_selection", None)
-        if isinstance(old_spec_cmp, dict) and "adaptive_selection_centering" not in old_spec_cmp:
-            new_spec_cmp.pop("adaptive_selection_centering", None)
         if old_spec_cmp != new_spec_cmp:
             raise RuntimeError(
                 "Инкрементальный режим: у существующего файла метрики другой metric_spec.\n"

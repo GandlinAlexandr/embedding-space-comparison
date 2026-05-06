@@ -247,7 +247,6 @@ def _adaptive_knn(
             "n_centers": _N_CENTERS,
             "exclude_center_from_fit": True,
             "adaptive_selection": "center_prediction_error",
-            "adaptive_selection_centering": "neighbors_mean",
         },
     }
 
@@ -277,7 +276,6 @@ def _adaptive_weak_knn(
             "weak_spectrum_count": weak_spectrum_count,
             "exclude_center_from_fit": True,
             "adaptive_selection": "center_prediction_error",
-            "adaptive_selection_centering": "neighbors_mean",
         },
     }
 
@@ -307,7 +305,6 @@ def _adaptive_tail_knn(
             "weak_spectrum_count": weak_spectrum_count,
             "exclude_center_from_fit": True,
             "adaptive_selection": "center_prediction_error",
-            "adaptive_selection_centering": "neighbors_mean",
         },
     }
 

@@ -29,6 +29,17 @@ def _is_all_nan(series: pd.Series) -> bool:
     return bool(np.all(np.isnan(s.to_numpy())))
 
 
+def _display_protocol(raw: str) -> str:
+    value = str(raw).strip()
+    labels = {
+        "delta_signed": "Δacc",
+        "signed": "Δacc",
+        "delta_abs": "|Δacc|",
+        "abs": "|Δacc|",
+    }
+    return labels.get(value, value)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -90,7 +101,7 @@ def main():
     y = np.arange(len(metrics))
 
     # ---- Заголовок
-    title_parts = [str(args.dataset).upper(), str(args.protocol)]
+    title_parts = [str(args.dataset).upper(), _display_protocol(args.protocol)]
     if args.title.strip():
         title_parts.append(args.title.strip())
     title_text = " | ".join(title_parts)

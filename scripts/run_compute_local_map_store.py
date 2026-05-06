@@ -21,6 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from tqdm import tqdm
 
+from configs.benchmark_configs import VKR_2024_2025_MODEL_NAMES
+from configs.text_benchmark_configs import (
+    TEXT_EMBEDDING_CPU_MODEL_IDS,
+    TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+    TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+)
 import scripts.run_compute_embedding_metrics as legacy
 
 
@@ -49,6 +55,20 @@ def _parse_k_list(raw: str) -> Tuple[int, ...]:
 
 def _parse_csv_names(raw: str) -> List[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
+
+
+def _parse_model_names(raw: str) -> List[str]:
+    names = _parse_csv_names(raw)
+    aliases = {
+        "primary": VKR_2024_2025_MODEL_NAMES,
+        "cpu": TEXT_EMBEDDING_CPU_MODEL_IDS,
+        "snowflake": TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+        "text20": TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+    }
+    out: List[str] = []
+    for name in names:
+        out.extend(aliases.get(name, [name]))
+    return list(dict.fromkeys(out))
 
 
 def _json_hash(payload: Dict[str, Any]) -> str:
@@ -100,7 +120,7 @@ def _load_embeddings(
     model_names, model_to_path = legacy._list_models(embeddings_dir)
     model_names = [m for m in model_names if m not in NON_MODEL_STEMS]
     model_to_path = {m: p for m, p in model_to_path.items() if m not in NON_MODEL_STEMS}
-    requested = _parse_csv_names(models_raw)
+    requested = _parse_model_names(models_raw)
     if requested:
         missing = [m for m in requested if m not in model_to_path]
         if missing:
@@ -188,7 +208,7 @@ def _build_store_spec(args: argparse.Namespace, k_list: Tuple[int, ...]) -> Dict
         "sample_seed": int(args.sample_seed),
         "sample_strategy": str(args.sample_strategy),
         "embeddings_dir": str(Path(args.embeddings_dir).resolve()),
-        "models": _parse_csv_names(args.models),
+        "models": _parse_model_names(args.models),
         "seed": int(args.seed),
         "n_centers": int(args.n_centers),
         "k_list": list(k_list),
@@ -198,7 +218,6 @@ def _build_store_spec(args: argparse.Namespace, k_list: Tuple[int, ...]) -> Dict
         "neighborhood_specs": neighborhood_specs,
         "local_geometry_mode": str(args.local_geometry_mode),
         "adaptive_selection": "center_prediction_error",
-        "adaptive_selection_centering": str(args.adaptive_selection_centering),
         "solver": str(args.solver),
         "ransac_n_iter": int(args.ransac_n_iter),
         "ransac_sample_frac": float(args.ransac_sample_frac),
@@ -226,7 +245,6 @@ def _center_prediction_error(
     Yc: np.ndarray,
     X_center: np.ndarray,
     Y_center: np.ndarray,
-    adaptive_selection_centering: str,
 ) -> float:
     if Xc.shape[0] < 2:
         return float("inf")
@@ -236,19 +254,10 @@ def _center_prediction_error(
     Y_center_work = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
 
     if legacy._LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
-        if adaptive_selection_centering == "neighbors_mean":
-            x0 = Xc_work.mean(axis=0, keepdims=True)
-            y0 = Yc_work.mean(axis=0, keepdims=True)
-        elif adaptive_selection_centering == "center":
-            x0 = X_center_work
-            y0 = Y_center_work
-        else:
-            raise ValueError(
-                "Неизвестный adaptive_selection_centering: "
-                f"{adaptive_selection_centering}"
-            )
-        M = legacy._fit_local_linear_map(Xc_work - x0, Yc_work - y0)
-        y_pred = (X_center_work - x0) @ M + y0
+        x_ref = Xc_work.mean(axis=0, keepdims=True)
+        y_ref = Yc_work.mean(axis=0, keepdims=True)
+        M = legacy._fit_local_linear_map(Xc_work - x_ref, Yc_work - y_ref)
+        y_pred = (X_center_work - x_ref) @ M + y_ref
     else:
         M = legacy._fit_local_linear_map(Xc_work, Yc_work)
         y_pred = X_center_work @ M
@@ -369,7 +378,6 @@ def _compute_direction_store(
                 Yc,
                 X_center=Xn[int(center_idx)],
                 Y_center=Yn[int(center_idx)],
-                adaptive_selection_centering=str(args.adaptive_selection_centering),
             )
             solved = legacy._solve_local_linear_map_and_rank(
                 Xc,
@@ -518,7 +526,6 @@ def _compute_direction_store(
             "local_geometry_mode": legacy._LOCAL_GEOMETRY_MODE,
             "exclude_center_from_fit": bool(args.exclude_center_from_fit),
             "adaptive_selection": "center_prediction_error",
-            "adaptive_selection_centering": str(args.adaptive_selection_centering),
             "solver": str(args.solver),
         },
     }
@@ -554,7 +561,6 @@ def main() -> None:
         choices=list(legacy._LOCAL_GEOMETRY_MODE_CHOICES),
         default="centered_offsets_v2",
     )
-    parser.add_argument("--adaptive_selection_centering", default="neighbors_mean")
     parser.add_argument("--solver", choices=["lstsq", "ransac"], default="lstsq")
     parser.add_argument("--ransac_n_iter", type=int, default=48)
     parser.add_argument("--ransac_sample_frac", type=float, default=0.5)

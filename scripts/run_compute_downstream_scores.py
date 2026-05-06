@@ -15,6 +15,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from datasets.io import load_labels
+from configs.text_benchmark_configs import (
+    TEXT_EMBEDDING_MODEL_BY_ID,
+    TEXT_EMBEDDING_MODEL_IDS,
+    TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+)
 
 
 def _set_determinism(seed: int) -> None:
@@ -79,6 +84,24 @@ def _list_models(embeddings_dir: str) -> Dict[str, str]:
     if not files:
         raise RuntimeError(f"В папке нет эмбеддингов: {embeddings_dir}")
     return files
+
+
+def _parse_model_filter(raw: Optional[str]) -> Optional[list[str]]:
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    if raw == "text20":
+        return list(TEXT_EMBEDDING_TEXT20_MODEL_IDS)
+    if raw == "primary":
+        return list(TEXT_EMBEDDING_MODEL_IDS)
+    names = [x.strip() for x in raw.split(",") if x.strip()]
+    unknown = [x for x in names if x not in TEXT_EMBEDDING_MODEL_BY_ID]
+    if unknown:
+        raise ValueError(
+            f"Unknown text model ids in --models: {unknown}. "
+            f"Available: {TEXT_EMBEDDING_MODEL_IDS}"
+        )
+    return names
 
 
 def _infer_dataset_name_from_path(path: Optional[str]) -> Optional[str]:
@@ -534,8 +557,18 @@ def main():
         default=None,
         help="Необязательная метка для логов; на вычисления не влияет.",
     )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default="",
+        help=(
+            "Необязательный фильтр моделей: comma-separated model ids или alias text20. "
+            "Если пусто, используются все общие embedding-файлы."
+        ),
+    )
 
     args = parser.parse_args()
+    requested_models = _parse_model_filter(args.models)
 
     if not args.out_json:
         if not args.experiment_dir:
@@ -588,6 +621,14 @@ def main():
         test_models = _list_models(args.test_embeddings_dir)
 
         common = sorted(set(train_models.keys()) & set(test_models.keys()))
+        if requested_models is not None:
+            missing = [m for m in requested_models if m not in common]
+            if missing:
+                raise RuntimeError(
+                    f"--models содержит модели без train/test эмбеддингов: {missing}. "
+                    f"Доступные общие модели: {common}"
+                )
+            common = [m for m in requested_models if m in set(common)]
         if not common:
             raise RuntimeError(
                 "Нет общих моделей между train_embeddings_dir и test_embeddings_dir."
@@ -635,6 +676,14 @@ def main():
 
     else:
         models = _list_models(args.embeddings_dir)
+        if requested_models is not None:
+            missing = [m for m in requested_models if m not in models]
+            if missing:
+                raise RuntimeError(
+                    f"--models содержит модели без эмбеддингов: {missing}. "
+                    f"Доступные модели: {sorted(models.keys())}"
+                )
+            models = {m: models[m] for m in requested_models}
 
         y = _resolve_labels_holdout(
             labels_path=args.labels_path,

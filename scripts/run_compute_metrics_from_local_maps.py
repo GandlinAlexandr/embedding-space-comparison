@@ -20,6 +20,12 @@ from typing import Any, Dict, Iterable, List, Tuple
 import numpy as np
 from tqdm import tqdm
 
+from configs.benchmark_configs import VKR_2024_2025_MODEL_NAMES
+from configs.text_benchmark_configs import (
+    TEXT_EMBEDDING_CPU_MODEL_IDS,
+    TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+    TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+)
 import scripts.run_compute_embedding_metrics as legacy
 import scripts.run_compute_single_metrics as single_metrics
 
@@ -32,9 +38,70 @@ NON_MODEL_STEMS = {
     "subset_manifest",
 }
 
+LOCAL_MAP_AGGREGATIONS_ALL = (
+    "rankme",
+    "stable_rank",
+    "nesum",
+    "pseudo_condition_number",
+    "alpha_req",
+    "spectral_entropy",
+    "hard_rank",
+    "tail_spectrum_log_ratio",
+)
+LOCAL_MAP_BASELINE_COMPATIBLE_AGGREGATIONS = (
+    "rankme",
+    "stable_rank",
+    "nesum",
+    "pseudo_condition_number",
+    "alpha_req",
+)
+
 
 def _parse_csv(raw: str) -> List[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
+
+
+def _parse_model_names(raw: str) -> List[str]:
+    names = _parse_csv(raw)
+    aliases = {
+        "primary": VKR_2024_2025_MODEL_NAMES,
+        "cpu": TEXT_EMBEDDING_CPU_MODEL_IDS,
+        "snowflake": TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+        "text20": TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+    }
+    out: List[str] = []
+    for name in names:
+        out.extend(aliases.get(name, [name]))
+    return list(dict.fromkeys(out))
+
+
+def _parse_single_metric_names(raw: str) -> List[str]:
+    names = _parse_csv(raw)
+    if any(name.lower() == "all" for name in names):
+        return sorted(single_metrics.METRICS.keys())
+    missing = [name for name in names if name not in single_metrics.METRICS]
+    if missing:
+        raise ValueError(
+            f"--single_metrics: неизвестные baseline-метрики: {missing}. "
+            f"Доступные: {sorted(single_metrics.METRICS.keys())} или all"
+        )
+    return list(dict.fromkeys(names))
+
+
+def _parse_aggregation_names(raw: str) -> List[str]:
+    names = _parse_csv(raw)
+    if any(name.lower() == "baseline_compatible" for name in names):
+        return list(LOCAL_MAP_BASELINE_COMPATIBLE_AGGREGATIONS)
+    if any(name.lower() == "all" for name in names):
+        return list(LOCAL_MAP_AGGREGATIONS_ALL)
+    missing = [name for name in names if name not in LOCAL_MAP_AGGREGATIONS_ALL]
+    if missing:
+        raise ValueError(
+            f"--aggregations: неизвестные агрегаторы: {missing}. "
+            "Доступные: "
+            f"{list(LOCAL_MAP_AGGREGATIONS_ALL)}, baseline_compatible или all"
+        )
+    return list(dict.fromkeys(names))
 
 
 def _parse_csv_ints(raw: str) -> List[int]:
@@ -52,7 +119,7 @@ def _load_model_names(maps_dir: Path, models_raw: str) -> List[str]:
         manifest = _load_json(maps_dir / "manifest.json")
         names = manifest["model_names"]
     names = [str(x) for x in names]
-    requested = _parse_csv(models_raw)
+    requested = _parse_model_names(models_raw)
     if requested:
         missing = [m for m in requested if m not in names]
         if missing:
@@ -427,6 +494,7 @@ def _ensure_single_metric_values(
     dataset_key: str,
     model_names: List[str],
     metric_names: List[str],
+    models_raw: str,
 ) -> None:
     missing = []
     for metric_name in metric_names:
@@ -444,6 +512,8 @@ def _ensure_single_metric_values(
         "--metrics",
         *metric_names,
     ]
+    if models_raw:
+        cmd.extend(["--models", str(models_raw)])
     print("\nSingle-baseline values missing; computing them:")
     print(" ".join(cmd))
     subprocess.run(cmd, check=True)
@@ -496,29 +566,6 @@ def _single_baseline_matrix(
     return matrix
 
 
-def _stable_rank_from_singular_values(s: np.ndarray) -> float:
-    arr = np.asarray(s, dtype=np.float64).reshape(-1)
-    arr = arr[np.isfinite(arr)]
-    if arr.size == 0:
-        return float("nan")
-    sq = np.square(np.abs(arr))
-    mx = float(np.max(sq))
-    if mx <= 0.0:
-        return 0.0
-    return float(np.sum(sq) / mx)
-
-
-def _nesum_from_singular_values(s: np.ndarray) -> float:
-    arr = np.asarray(s, dtype=np.float64).reshape(-1)
-    arr = np.abs(arr[np.isfinite(arr)])
-    if arr.size == 0:
-        return float("nan")
-    mx = float(np.max(arr))
-    if mx <= 0.0:
-        return 0.0
-    return float(np.sum(arr) / mx)
-
-
 def _spectral_entropy_from_singular_values(s: np.ndarray) -> float:
     arr = np.asarray(s, dtype=np.float64).reshape(-1)
     arr = np.abs(arr[np.isfinite(arr)])
@@ -538,9 +585,13 @@ def _aggregate_singular_values(
     if aggregation == "rankme":
         return legacy.rankme(s)
     if aggregation == "stable_rank":
-        return _stable_rank_from_singular_values(s)
+        return single_metrics.stable_rank_from_singular_values(s)
     if aggregation == "nesum":
-        return _nesum_from_singular_values(s)
+        return single_metrics.nesum_from_singular_values(s)
+    if aggregation == "pseudo_condition_number":
+        return single_metrics.pseudo_condition_number_from_singular_values(s)
+    if aggregation == "alpha_req":
+        return single_metrics.alpha_req_from_singular_values(s)
     if aggregation == "spectral_entropy":
         return _spectral_entropy_from_singular_values(s)
     if aggregation == "hard_rank":
@@ -1090,9 +1141,29 @@ def main() -> None:
         help="k для fixed_k. Если пусто, берутся все k из store.",
     )
     parser.add_argument(
+        "--k_list",
+        default="",
+        help=(
+            "k-кандидаты, которые должны быть в store. Удобно для adaptive-only "
+            "запуска без selector fixed_k."
+        ),
+    )
+    parser.add_argument(
         "--aggregations",
         default="rankme",
-        help="rankme,stable_rank,nesum,spectral_entropy,hard_rank,tail_spectrum_log_ratio",
+        help=(
+            "rankme,stable_rank,nesum,pseudo_condition_number,alpha_req,"
+            "spectral_entropy,hard_rank,tail_spectrum_log_ratio; "
+            "baseline_compatible; или all"
+        ),
+    )
+    parser.add_argument(
+        "--single_metrics",
+        default="",
+        help=(
+            "Single-baseline метрики через запятую или all. "
+            "Будут посчитаны в этом же запуске и попадут в те же CSV/графики."
+        ),
     )
     parser.add_argument(
         "--pair_agg",
@@ -1130,9 +1201,10 @@ def main() -> None:
         ) = _requested_from_include(args.include)
         args.pair_agg = pair_agg_from_include
 
-    requested = requested_from_include
+    single_metrics_requested = _parse_single_metric_names(args.single_metrics)
+    requested = list(requested_from_include)
     needs_maps = True
-    if requested:
+    if requested_from_include:
         needs_maps = any(selector != "single_baseline" for _, _, selector, _, _ in requested)
 
     if not args.dataset_key:
@@ -1154,7 +1226,7 @@ def main() -> None:
     else:
         dataset_key = ""
 
-    requested_models = _parse_csv(args.models)
+    requested_models = _parse_model_names(args.models)
     maps_dirs_by_key: Dict[str, Path] = {}
     effective_maps_root = (
         str(Path(args.maps_root) / "samples")
@@ -1165,7 +1237,11 @@ def main() -> None:
         if not dataset_key:
             raise ValueError("Нужно указать либо --maps_dir, либо --dataset_key.")
         if not required_ks_from_include and not required_store_keys_from_include:
-            required_ks_from_include = _parse_csv_ints(args.fixed_ks) if args.fixed_ks else []
+            required_ks_from_include = (
+                _parse_csv_ints(args.fixed_ks)
+                if args.fixed_ks
+                else _parse_csv_ints(args.k_list)
+            )
         if not required_ks_from_include and not required_store_keys_from_include:
             raise ValueError(
                 "Для автопоиска store укажи --include или --fixed_ks, чтобы понять нужные окрестности."
@@ -1250,16 +1326,20 @@ def main() -> None:
                 sorted(maps_dirs_by_key.keys()),
             )
         k_list = _available_k_list(probe) if "k_candidates" in probe else []
-        fixed_ks = _parse_csv_ints(args.fixed_ks) if args.fixed_ks else k_list
+        fixed_ks = (
+            _parse_csv_ints(args.fixed_ks)
+            if args.fixed_ks
+            else (_parse_csv_ints(args.k_list) if args.k_list else k_list)
+        )
         missing_k = [k for k in fixed_ks if k not in k_list]
         if missing_k:
             raise ValueError(f"fixed_ks отсутствуют в store: {missing_k}. Доступные: {k_list}")
 
     selectors = _parse_csv(args.selectors)
-    aggregations = _parse_csv(args.aggregations)
+    aggregations = _parse_aggregation_names(args.aggregations)
     legacy._save_model_list(str(out_dir), model_names)
 
-    if not requested:
+    if not requested_from_include:
         requested = list(
             _iter_requested_metrics(
                 selectors=selectors,
@@ -1269,6 +1349,10 @@ def main() -> None:
                 k_list=k_list,
             )
         )
+    requested.extend(
+        (f"single_{metric_name}", None, "single_baseline", metric_name, "")
+        for metric_name in single_metrics_requested
+    )
     single_metric_names = sorted({aggregation for _, _, selector, aggregation, _ in requested if selector == "single_baseline"})
     if single_metric_names:
         if sampled:
@@ -1294,11 +1378,18 @@ def main() -> None:
                     "--metrics",
                     *single_metric_names,
                 ]
+                if args.models:
+                    cmd.extend(["--models", str(args.models)])
                 print("\nSingle-baseline values missing; computing sampled values:")
                 print(" ".join(cmd))
                 subprocess.run(cmd, check=True)
         else:
-            _ensure_single_metric_values(dataset_key, model_names, single_metric_names)
+            _ensure_single_metric_values(
+                dataset_key,
+                model_names,
+                single_metric_names,
+                str(args.models),
+            )
 
     print(f"Maps dir: {maps_dir if maps_dir is not None else '<not used>'}")
     print(f"Out dir : {out_dir}")
@@ -1529,7 +1620,7 @@ def main() -> None:
                 "--out_dir",
                 str(args.summary_plots_dir),
                 "--dataset",
-                dataset_key,
+                dataset_base,
                 "--protocol",
                 str(args.eval_protocol),
                 "--out_name",

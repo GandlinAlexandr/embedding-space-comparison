@@ -10,6 +10,13 @@ from typing import Any, Callable
 
 import numpy as np
 
+from configs.benchmark_configs import VKR_2024_2025_MODEL_NAMES
+from configs.text_benchmark_configs import (
+    TEXT_EMBEDDING_CPU_MODEL_IDS,
+    TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+    TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+)
+
 
 DEFAULT_SINGLE_METRICS_ROOT = Path("data") / "single_metrics"
 DEFAULT_EMBEDDINGS_ROOT = Path("data") / "embeddings"
@@ -243,8 +250,106 @@ def discover_embedding_files(embeddings_dir: Path) -> list[Path]:
     )
 
 
+def parse_model_names(raw: str) -> list[str]:
+    names = [part.strip() for part in str(raw).split(",") if part.strip()]
+    aliases = {
+        "primary": VKR_2024_2025_MODEL_NAMES,
+        "cpu": TEXT_EMBEDDING_CPU_MODEL_IDS,
+        "snowflake": TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+        "text20": TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+    }
+    out: list[str] = []
+    for name in names:
+        out.extend(aliases.get(name, [name]))
+    return list(dict.fromkeys(out))
+
+
 def infer_model_name(path: Path) -> str:
     return path.stem
+
+
+def singular_values_clean(s: np.ndarray, epsilon: float = 1e-12) -> np.ndarray:
+    arr = np.asarray(s, dtype=np.float64).reshape(-1)
+    arr = np.abs(arr[np.isfinite(arr)])
+    return arr[arr > epsilon]
+
+
+def stable_rank_from_singular_values(s: np.ndarray, epsilon: float = 1e-12) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    if arr.size == 0:
+        return 0.0
+    sq = np.square(arr)
+    max_sq = float(np.max(sq))
+    if max_sq <= epsilon:
+        return 0.0
+    return float(np.sum(sq) / max_sq)
+
+
+def pseudo_condition_number_from_singular_values(
+    s: np.ndarray,
+    epsilon: float = 1e-12,
+) -> float:
+    arr = singular_values_clean(s, epsilon=epsilon)
+    if arr.size == 0:
+        return float("inf")
+    return float(np.max(arr) / np.min(arr))
+
+
+def rankme_from_singular_values(
+    s: np.ndarray,
+    epsilon: float = 1e-12,
+    normalize: bool = False,
+    normalizer: int | None = None,
+) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    if arr.size == 0:
+        return 0.0
+    total = float(np.sum(arr))
+    if total <= epsilon:
+        return 0.0
+    p = arr / total
+    p = p[p > 0.0]
+    value = float(np.exp(-float(np.sum(p * np.log(p)))))
+    if normalize:
+        value /= float(normalizer or arr.size)
+    return value
+
+
+def nesum_from_covariance_eigenvalues(
+    eigvals: np.ndarray,
+    epsilon: float = 1e-12,
+) -> float:
+    arr = np.asarray(eigvals, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    arr = arr[arr > epsilon]
+    if arr.size == 0:
+        return 0.0
+    return float(np.sum(arr) / float(np.max(arr)))
+
+
+def nesum_from_singular_values(s: np.ndarray, epsilon: float = 1e-12) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    return nesum_from_covariance_eigenvalues(np.square(arr), epsilon=epsilon)
+
+
+def alpha_req_from_covariance_eigenvalues(
+    eigvals: np.ndarray,
+    epsilon: float = 1e-12,
+) -> float:
+    arr = np.asarray(eigvals, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    arr = arr[arr > epsilon]
+    if arr.size < 2:
+        return 0.0
+    arr = np.sort(arr)[::-1]
+    ranks = np.arange(1, arr.size + 1, dtype=np.float64)
+    slope, _ = np.polyfit(np.log(ranks), np.log(np.maximum(arr, epsilon)), deg=1)
+    return -float(slope)
+
+
+def alpha_req_from_singular_values(s: np.ndarray, epsilon: float = 1e-12) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    return alpha_req_from_covariance_eigenvalues(np.square(arr), epsilon=epsilon)
 
 
 # ============================================================
@@ -850,6 +955,12 @@ def parse_args() -> argparse.Namespace:
         help="Список метрик для вычисления.",
     )
     parser.add_argument(
+        "--models",
+        type=str,
+        default="",
+        help="Модели через запятую или alias primary/cpu/snowflake/text20.",
+    )
+    parser.add_argument(
         "--center",
         action="store_true",
         help="Центрировать эмбеддинги перед вычислением метрик.",
@@ -904,6 +1015,16 @@ def main() -> None:
         )
 
     files = discover_embedding_files(embeddings_dir)
+    requested_models = parse_model_names(args.models)
+    if requested_models:
+        by_model = {infer_model_name(path): path for path in files}
+        missing = [name for name in requested_models if name not in by_model]
+        if missing:
+            raise ValueError(
+                f"--models отсутствуют в embeddings_dir: {missing}. "
+                f"Доступные: {sorted(by_model.keys())}"
+            )
+        files = [by_model[name] for name in requested_models]
     dataset_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
