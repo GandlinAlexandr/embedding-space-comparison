@@ -157,6 +157,18 @@ def _neighborhood_specs(args: argparse.Namespace, k_list: Tuple[int, ...]) -> Li
         {"key": f"k{k}", "kind": "knn", "k": int(k), "solver": str(args.solver)}
         for k in k_list
     ]
+    for k in _parse_csv_ints(args.rff_k_list):
+        specs.append(
+            {
+                "key": f"rff_k{k}",
+                "kind": "rff_knn",
+                "k": int(k),
+                "solver": str(args.solver),
+                "n_features": int(args.rff_n_features),
+                "gamma": float(args.rff_gamma),
+                "rff_seed": int(args.rff_seed),
+            }
+        )
     for p in _parse_csv_ints(args.eps_percentiles):
         specs.append(
             {
@@ -212,6 +224,10 @@ def _build_store_spec(args: argparse.Namespace, k_list: Tuple[int, ...]) -> Dict
         "seed": int(args.seed),
         "n_centers": int(args.n_centers),
         "k_list": list(k_list),
+        "rff_k_list": list(_parse_csv_ints(args.rff_k_list)),
+        "rff_n_features": int(args.rff_n_features),
+        "rff_gamma": float(args.rff_gamma),
+        "rff_seed": int(args.rff_seed),
         "eps_percentiles": list(_parse_csv_ints(args.eps_percentiles)),
         "weighted_eps_percentiles": list(_parse_csv_ints(args.weighted_eps_percentiles)),
         "ransac_weighted_eps_percentiles": list(_parse_csv_ints(args.ransac_weighted_eps_percentiles)),
@@ -311,11 +327,15 @@ def _save_pair_store(
         arrays[f"{prefix}/relative_residuals"] = row["relative_residuals"]
         arrays[f"{prefix}/neighbor_indices"] = row["neighbor_indices"]
         arrays[f"{prefix}/neighbor_distances"] = row["neighbor_distances"]
-        arrays[f"{prefix}/neighbor_sizes"] = row["neighbor_sizes"]
-        arrays[f"{prefix}/sample_weights"] = row["sample_weights"]
+        if "neighbor_sizes" in row:
+            arrays[f"{prefix}/neighbor_sizes"] = row["neighbor_sizes"]
+        if "sample_weights" in row:
+            arrays[f"{prefix}/sample_weights"] = row["sample_weights"]
         arrays[f"{prefix}/inlier_masks"] = row["inlier_masks"]
-        arrays[f"{prefix}/sigma_values"] = row["sigma_values"]
-        arrays[f"{prefix}/eps_values"] = row["eps_values"]
+        if "sigma_values" in row:
+            arrays[f"{prefix}/sigma_values"] = row["sigma_values"]
+        if "eps_values" in row:
+            arrays[f"{prefix}/eps_values"] = row["eps_values"]
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **arrays)
 
@@ -325,6 +345,7 @@ def _compute_direction_store(
     Xn: np.ndarray,
     Yn: np.ndarray,
     cache_x: legacy.NeighborCache,
+    extra_knn_specs: Dict[str, Tuple[np.ndarray, np.ndarray, legacy.NeighborCache, int]],
     k_list: Tuple[int, ...],
     args: argparse.Namespace,
     model_i: str,
@@ -513,6 +534,77 @@ def _compute_direction_store(
         if maps is not None:
             payload["maps"] = np.stack(maps, axis=0)
         payload_by_spec[key] = payload
+    for key, (Xn_extra, Yn_extra, cache_extra, k_extra) in extra_knn_specs.items():
+        maps: Optional[List[np.ndarray]] = [] if args.store_maps else None
+        singular_values: List[np.ndarray] = []
+        metric_rankme: List[float] = []
+        residuals: List[float] = []
+        relative_residuals: List[float] = []
+        neighbor_indices: List[np.ndarray] = []
+        neighbor_distances: List[np.ndarray] = []
+        inlier_masks: List[np.ndarray] = []
+
+        lookup_k = int(k_extra) + 1 if args.exclude_center_from_fit else int(k_extra)
+        nn = cache_extra.knn[lookup_k]
+        nn_dist = cache_extra.knn_distances[lookup_k]
+
+        for center_idx, idxs_raw, dists_raw in zip(center_indices, nn, nn_dist):
+            idxs = np.asarray(idxs_raw, dtype=np.int32)
+            dists = np.asarray(dists_raw, dtype=np.float32)
+            if args.exclude_center_from_fit:
+                idxs, dists = legacy._exclude_center_from_indices(
+                    int(center_idx), idxs, dists, k=int(k_extra)
+                )
+            if idxs.size < 2:
+                if maps is not None:
+                    maps.append(
+                        np.zeros(
+                            (Xn_extra.shape[1], Yn_extra.shape[1]),
+                            dtype=args.map_dtype,
+                        )
+                    )
+                singular_values.append(np.zeros((0,), dtype=np.float64))
+                metric_rankme.append(float("nan"))
+                residuals.append(float("nan"))
+                relative_residuals.append(float("nan"))
+                neighbor_indices.append(idxs)
+                neighbor_distances.append(dists)
+                inlier_masks.append(np.zeros((idxs.size,), dtype=bool))
+                continue
+
+            solved = legacy._solve_local_linear_map_and_rank(
+                Xn_extra[idxs],
+                Yn_extra[idxs],
+                X_center=Xn_extra[int(center_idx)],
+                Y_center=Yn_extra[int(center_idx)],
+                solver=str(args.solver),
+                rng=rng,
+                rank_aggregation="rankme",
+                hard_rank_threshold=1e-2,
+                weak_spectrum_count=5,
+            )
+            if maps is not None:
+                maps.append(np.asarray(solved.local_map, dtype=args.map_dtype))
+            singular_values.append(np.asarray(solved.singular_values, dtype=np.float64))
+            metric_rankme.append(float(solved.rank_value))
+            residuals.append(float(solved.raw_residual))
+            relative_residuals.append(float(solved.relative_residual))
+            neighbor_indices.append(idxs)
+            neighbor_distances.append(dists)
+            inlier_masks.append(np.asarray(solved.inlier_mask, dtype=bool))
+
+        payload = {
+            "singular_values": np.stack(singular_values, axis=0),
+            "metric_rankme": np.asarray(metric_rankme, dtype=np.float64),
+            "residuals": np.asarray(residuals, dtype=np.float32),
+            "relative_residuals": np.asarray(relative_residuals, dtype=np.float32),
+            "neighbor_indices": np.stack(neighbor_indices, axis=0).astype(np.int32),
+            "neighbor_distances": np.stack(neighbor_distances, axis=0).astype(np.float32),
+            "inlier_masks": np.stack(inlier_masks, axis=0).astype(bool),
+        }
+        if maps is not None:
+            payload["maps"] = np.stack(maps, axis=0)
+        payload_by_spec[key] = payload
     return {
         "center_indices": center_indices,
         "payload_by_k": payload_by_k,
@@ -550,6 +642,10 @@ def main() -> None:
     parser.add_argument("--sample_strategy", choices=["stratified", "random"], default="stratified")
     parser.add_argument("--models", default="")
     parser.add_argument("--k_list", default="")
+    parser.add_argument("--rff_k_list", default="")
+    parser.add_argument("--rff_n_features", type=int, default=256)
+    parser.add_argument("--rff_gamma", type=float, default=1.0)
+    parser.add_argument("--rff_seed", type=int, default=42)
     parser.add_argument("--eps_percentiles", default="")
     parser.add_argument("--weighted_eps_percentiles", default="")
     parser.add_argument("--ransac_weighted_eps_percentiles", default="")
@@ -657,6 +753,7 @@ def main() -> None:
     percentile_values += list(_parse_csv_ints(args.weighted_eps_percentiles))
     percentile_values += list(_parse_csv_ints(args.ransac_weighted_eps_percentiles))
     percentile_values = sorted(set(percentile_values))
+    rff_k_list = tuple(_parse_csv_ints(args.rff_k_list))
 
     cache_key = legacy.NeighborCacheKey(
         n_centers=int(args.n_centers),
@@ -665,6 +762,8 @@ def main() -> None:
         eps_scale=float(args.weighted_eps_scale),
     )
     cache_by_model: Dict[str, legacy.NeighborCache] = {}
+    rff_features_by_model: Dict[str, np.ndarray] = {}
+    rff_cache_by_model: Dict[str, legacy.NeighborCache] = {}
 
     def cache_for(model_name: str) -> legacy.NeighborCache:
         if model_name not in cache_by_model:
@@ -694,6 +793,39 @@ def main() -> None:
             cache_by_model[model_name] = cache
         return cache_by_model[model_name]
 
+    def rff_features_for(model_name: str) -> np.ndarray:
+        if model_name not in rff_features_by_model:
+            rff_features_by_model[model_name] = legacy._rff_features(
+                legacy._get_precomputed_zscore(model_name, embeddings[model_name]),
+                n_features=int(args.rff_n_features),
+                gamma=float(args.rff_gamma),
+                seed=int(args.rff_seed),
+            )
+        return rff_features_by_model[model_name]
+
+    def rff_cache_for(
+        model_name: str,
+        center_indices: np.ndarray,
+    ) -> legacy.NeighborCache:
+        if model_name not in rff_cache_by_model:
+            rff_ks = tuple(
+                int(k) + 1 if args.exclude_center_from_fit else int(k)
+                for k in rff_k_list
+            )
+            rff_cache_by_model[model_name] = legacy._build_neighbor_cache_from_key(
+                rff_features_for(model_name),
+                legacy.NeighborCacheKey(
+                    n_centers=int(args.n_centers),
+                    ks=rff_ks,
+                    percentile=None,
+                    eps_scale=float(args.weighted_eps_scale),
+                ),
+                seed=int(args.seed),
+                center_indices=center_indices,
+                X_norm=rff_features_for(model_name),
+            )
+        return rff_cache_by_model[model_name]
+
     print(f"Local map store: {store_dir}")
     source_model_names = model_names[
         int(args.source_shard_index) :: int(args.source_shard_count)
@@ -710,11 +842,19 @@ def main() -> None:
         f"shard directed pairs: {shard_directed_pairs}"
     )
     print(f"k candidates: {k_list} | n_centers={args.n_centers}")
+    if rff_k_list:
+        print(
+            "rff candidates: "
+            f"{rff_k_list} | n_features={args.rff_n_features} | "
+            f"gamma={args.rff_gamma} | seed={args.rff_seed}"
+        )
     print(f"geometry={legacy._LOCAL_GEOMETRY_MODE} | backend={legacy._COMPUTE_BACKEND.name}")
 
     for model_i in tqdm(source_model_names, desc="model_i"):
         Xn = legacy._get_precomputed_zscore(model_i, embeddings[model_i])
         cache_i = cache_for(model_i)
+        Xn_rff = rff_features_for(model_i) if rff_k_list else np.empty((0, 0), dtype=np.float32)
+        cache_i_rff = rff_cache_for(model_i, cache_i.center_indices) if rff_k_list else None
         for model_j in model_names:
             if model_i == model_j and not args.include_self:
                 continue
@@ -722,10 +862,18 @@ def main() -> None:
             if args.incremental and out_path.exists():
                 continue
             Yn = legacy._get_precomputed_zscore(model_j, embeddings[model_j])
+            extra_knn_specs = {}
+            if rff_k_list and cache_i_rff is not None:
+                Yn_rff = rff_features_for(model_j)
+                extra_knn_specs = {
+                    f"rff_k{int(k)}": (Xn_rff, Yn_rff, cache_i_rff, int(k))
+                    for k in rff_k_list
+                }
             direction = _compute_direction_store(
                 Xn=Xn,
                 Yn=Yn,
                 cache_x=cache_i,
+                extra_knn_specs=extra_knn_specs,
                 k_list=k_list,
                 args=args,
                 model_i=model_i,

@@ -244,6 +244,12 @@ def _parse_include_metric(
         key = f"w_eps_p{p}_ransac" if is_ransac else f"w_eps_p{p}"
         return name, None, "fixed_store_key", aggregation, [], key
 
+    m = re.fullmatch(r"rff_k(\d+)(?:_(.+))?", stem)
+    if m:
+        k = int(m.group(1))
+        aggregation = m.group(2) or "rankme"
+        return name, None, "fixed_store_key", aggregation, [], f"rff_k{k}"
+
     m = re.fullmatch(r"adaptive_k([0-9_]+)(?:_(.+))?", stem)
     if m:
         k_list = [int(x) for x in m.group(1).split("_") if x]
