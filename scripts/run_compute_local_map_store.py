@@ -152,6 +152,12 @@ def _object_array(items: List[np.ndarray]) -> np.ndarray:
     return arr
 
 
+def _singular_values_array(items: List[np.ndarray], dim: int) -> np.ndarray:
+    if items:
+        return np.stack(items, axis=0)
+    return np.empty((0, int(dim)), dtype=np.float64)
+
+
 def _neighborhood_specs(args: argparse.Namespace, k_list: Tuple[int, ...]) -> List[Dict[str, Any]]:
     specs: List[Dict[str, Any]] = [
         {"key": f"k{k}", "kind": "knn", "k": int(k), "solver": str(args.solver)}
@@ -381,15 +387,6 @@ def _compute_direction_store(
                     int(center_idx), idxs, dists, k=int(k)
                 )
             if idxs.size < 2:
-                if maps is not None:
-                    maps.append(np.zeros((Xn.shape[1], Yn.shape[1]), dtype=args.map_dtype))
-                singular_values.append(np.zeros((0,), dtype=np.float64))
-                metric_rankme.append(float("nan"))
-                residuals.append(float("nan"))
-                relative_residuals.append(float("nan"))
-                neighbor_indices.append(idxs)
-                neighbor_distances.append(dists)
-                inlier_masks.append(np.zeros((idxs.size,), dtype=bool))
                 continue
 
             Xc = Xn[idxs]
@@ -422,7 +419,10 @@ def _compute_direction_store(
             inlier_masks.append(np.asarray(solved.inlier_mask, dtype=bool))
 
         payload = {
-            "singular_values": np.stack(singular_values, axis=0),
+            "singular_values": _singular_values_array(
+                singular_values,
+                dim=min(Xn.shape[1], Yn.shape[1]),
+            ),
             "metric_rankme": np.asarray(metric_rankme, dtype=np.float64),
             "residuals": np.asarray(residuals, dtype=np.float32),
             "relative_residuals": np.asarray(relative_residuals, dtype=np.float32),
@@ -468,19 +468,6 @@ def _compute_direction_store(
             idxs = np.asarray(idxs_raw, dtype=np.int32).reshape(-1)
             dists = np.asarray(dists_raw, dtype=np.float32).reshape(-1)
             if idxs.size < 2:
-                if maps is not None:
-                    maps.append(np.zeros((Xn.shape[1], Yn.shape[1]), dtype=args.map_dtype))
-                singular_values.append(np.zeros((0,), dtype=np.float64))
-                metric_rankme.append(float("nan"))
-                residuals.append(float("nan"))
-                relative_residuals.append(float("nan"))
-                neighbor_indices.append(idxs)
-                neighbor_distances.append(dists)
-                neighbor_sizes.append(int(idxs.size))
-                sample_weights_list.append(np.ones((idxs.size,), dtype=np.float32))
-                inlier_masks.append(np.zeros((idxs.size,), dtype=bool))
-                sigma_values.append(sigma_val)
-                eps_values.append(eps_val)
                 continue
             weights = None
             if spec.get("weighting") == "gaussian":
@@ -519,7 +506,10 @@ def _compute_direction_store(
             sigma_values.append(sigma_val)
             eps_values.append(eps_val)
         payload = {
-            "singular_values": np.stack(singular_values, axis=0),
+            "singular_values": _singular_values_array(
+                singular_values,
+                dim=min(Xn.shape[1], Yn.shape[1]),
+            ),
             "metric_rankme": np.asarray(metric_rankme, dtype=np.float64),
             "residuals": np.asarray(residuals, dtype=np.float32),
             "relative_residuals": np.asarray(relative_residuals, dtype=np.float32),
@@ -556,20 +546,6 @@ def _compute_direction_store(
                     int(center_idx), idxs, dists, k=int(k_extra)
                 )
             if idxs.size < 2:
-                if maps is not None:
-                    maps.append(
-                        np.zeros(
-                            (Xn_extra.shape[1], Yn_extra.shape[1]),
-                            dtype=args.map_dtype,
-                        )
-                    )
-                singular_values.append(np.zeros((0,), dtype=np.float64))
-                metric_rankme.append(float("nan"))
-                residuals.append(float("nan"))
-                relative_residuals.append(float("nan"))
-                neighbor_indices.append(idxs)
-                neighbor_distances.append(dists)
-                inlier_masks.append(np.zeros((idxs.size,), dtype=bool))
                 continue
 
             solved = legacy._solve_local_linear_map_and_rank(
@@ -594,7 +570,10 @@ def _compute_direction_store(
             inlier_masks.append(np.asarray(solved.inlier_mask, dtype=bool))
 
         payload = {
-            "singular_values": np.stack(singular_values, axis=0),
+            "singular_values": _singular_values_array(
+                singular_values,
+                dim=min(Xn_extra.shape[1], Yn_extra.shape[1]),
+            ),
             "metric_rankme": np.asarray(metric_rankme, dtype=np.float64),
             "residuals": np.asarray(residuals, dtype=np.float32),
             "relative_residuals": np.asarray(relative_residuals, dtype=np.float32),
