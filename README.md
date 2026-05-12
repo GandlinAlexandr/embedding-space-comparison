@@ -44,6 +44,7 @@
   * [![Pandas][Рandas.pydata.org]][Pandas-url]
   * [![Pytorch][Pytorch]][Pytorch-url]
   * [![scikit-learn][scikit-learn]][scikit-learn-url]
+  * [![SciPy][SciPy]][SciPy-url]
 
 
 <p align="right">(<a href="#readme-top">Вернуться к началу</a>)</p>
@@ -497,3 +498,6 @@
 
 [Pytorch-url]: https://pytorch.org/
 [Pytorch]: https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white
+
+[SciPy-url]: https://scipy.org/
+[SciPy]: https://img.shields.io/badge/SciPy-654FF0?logo=SciPy&logoColor=white&style=for-the-badge
