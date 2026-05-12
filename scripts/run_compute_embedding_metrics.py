@@ -1,69 +1,3 @@
-"""
-run_compute_embedding_metrics.py
-
-Считает embedding-метрики между всеми парами моделей на ОДНОМ и том же датасете эмбеддингов,
-и сохраняет результаты на диск.
-
-Поддерживаемый сценарий:
-- Есть папка embeddings_dir, в которой лежат файлы эмбеддингов для каждой модели.
-- Для каждой метрики (конфиг из metric_configs.py) считаем матрицу pairwise значений:
-    score[i, j] = metric(emb_i, emb_j)
-  где emb_i и emb_j — эмбеддинги одной и той же выборки объектов, но полученные разными моделями.
-
-ВАЖНО:
-- Здесь только: загрузка эмбеддингов, подвыборка, перебор пар, сохранение результатов.
-
-Форматы эмбеддингов:
-- .npy: ожидается массив (N, D)
-- .npz: пытаемся найти массив в ключах: "embeddings", "X", "arr_0"
-
-НОВОЕ (ИНКРЕМЕНТ):
-- Можно не пересчитывать всю матрицу при добавлении новых моделей.
-- Флаг --incremental:
-    * если файл метрики уже существует, мы расширяем матрицу (старый блок НЕ трогаем)
-      и досчитываем ТОЛЬКО пары с новыми моделями.
-    * если файл не существует — считаем как обычно.
-- Для antisym-метрик в файле хранится уже антисимметричная матрица A.
-  В incremental-режиме мы оставляем старый блок A_old как есть и досчитываем только новые пары,
-  заполняя A[i,j] = m(i->j) - m(j->i).
-- Для sym-метрик в файле хранится симметричная матрица sim.
-  В incremental-режиме мы оставляем старый блок как есть и досчитываем только новые пары,
-  заполняя sim[i,j] = 0.5*(m(i->j)+m(j->i)) и симметризуя.
-
-АГРЕГАЦИЯ РАНГА:
-- По умолчанию используется формула RankMe (энтропийная, из статьи):
-    rankme(s) = exp(-sum(p_k * log(p_k))), где p_k = s_k / sum(s)
-  Значение интерпретируется как "эффективное число измерений", от 1 до D.
-- Альтернатива: hard_rank — количество сингулярных значений выше абсолютного порога.
-  Значение интерпретируемо напрямую: "матрица M имеет ранг N".
-  Управляется через параметры rank_aggregation и hard_rank_threshold в конфиге метрики.
-- Старые .npz-файлы (посчитанные с rankme) при добавлении hard_rank-конфигов не затрагиваются:
-  новые конфиги записываются в отдельные файлы.
-
-АРТЕФАКТЫ:
-- Вместе с матрицей метрики всегда сохраняется файл
-  artifacts/{metric_name}_artifacts.npz внутри out_dir.
-- Артефакты содержат сырые данные по каждому центру для каждого направления (i->j):
-    singular_values: (n_centers, d) — сингулярные значения матрицы M
-    residuals:       (n_centers,)   — legacy-невязка ||(Xc-xc) @ M - (Yc-yc)||_F
-    ranks:           (n_centers,)   — legacy hard-rank по относительному порогу
-- Для новых конфигов и диагностики дополнительно сохраняются:
-    relative_residuals: (n_centers,) — относительная ошибка по локальным отклонениям Y - yc
-    metric_ranks:       (n_centers,) — ранг в той же агрегации, что и сама метрика
-- Для расширенной диагностики новых методов также сохраняются:
-    neighbor_sizes:  (n_centers,)   — сколько точек вошло в окрестность
-    neighbor_distances: object      — расстояния до точек окрестности по центрам
-    sigma_values:    (n_centers,)   — использованный sigma (если применимо)
-    eps_values:      (n_centers,)   — использованный eps (если применимо)
-    sample_weights:  object         — веса точек в окрестности (если применимо)
-    inlier_masks:    object         — mask инлайеров после robust-solver (если применимо)
-    inlier_counts:   (n_centers,)   — число инлайеров
-    inlier_fracs:    (n_centers,)   — доля инлайеров
-- Инкрементальность артефактов синхронна с инкрементальностью матрицы:
-  если пара уже посчитана (не NaN в матрице), артефакты для неё тоже уже есть.
-- Ключи в файле артефактов: "{model_i}_to_{model_j}/{поле}"
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -93,7 +27,7 @@ try:
 except ImportError:
     torch = None
 
-# ВАЖНО: запускаем как модуль: python -m scripts.run_compute_embedding_metrics
+# ВАЖНО: запускает как модуль: python -m scripts.run_compute_embedding_metrics
 from configs.metric_configs import get_embedding_metric_configs
 
 
@@ -141,7 +75,9 @@ def _to_backend_tensor(
     dtype: Optional["torch.dtype"] = None,
 ) -> "torch.Tensor":
     if torch is None:
-        raise RuntimeError("torch недоступен, backend tensor создать нельзя.")
+        raise RuntimeError(
+            "torch недоступен, тензор для вычислительного режима создать нельзя."
+        )
     arr = np.ascontiguousarray(np.asarray(x))
     return torch.as_tensor(arr, device=_COMPUTE_BACKEND.device, dtype=dtype)
 
@@ -239,6 +175,9 @@ def _list_models(embeddings_dir: str) -> Tuple[List[str], Dict[str, str]]:
     """
     files = []
     for fn in os.listdir(embeddings_dir):
+        stem = os.path.splitext(fn)[0]
+        if stem in {"labels", "targets", "subset_indices"}:
+            continue
         if fn.endswith(".npy") or fn.endswith(".npz"):
             files.append(fn)
 
@@ -335,7 +274,8 @@ def _parse_backend_list(raw: str) -> List[str]:
     invalid = [item for item in items if item not in allowed]
     if invalid:
         raise ValueError(
-            f"Неподдерживаемые backend'ы в benchmark: {invalid}. Допустимые: {sorted(allowed)}"
+            f"Неподдерживаемые вычислительные режимы в замере скорости: {invalid}. "
+            f"Допустимые: {sorted(allowed)}"
         )
     unique: List[str] = []
     seen = set()
@@ -400,11 +340,11 @@ def _run_backend_benchmarks(args: argparse.Namespace) -> None:
     benchmark_rows: List[Dict[str, Any]] = []
 
     print("\n" + "=" * 80)
-    print("BENCHMARK MODE")
+    print("РЕЖИМ ЗАМЕРА СКОРОСТИ")
     print("=" * 80)
-    print(f"Backends : {backends}")
-    print(f"Warmup   : {warmup}")
-    print(f"Repeats  : {repeats}")
+    print(f"Вычислительные режимы : {backends}")
+    print(f"Прогревочные прогоны  : {warmup}")
+    print(f"Измеряемые прогоны    : {repeats}")
     print("Замеряется полный wall-clock запуск этого же скрипта на выбранных конфигах.")
 
     for backend in backends:
@@ -429,13 +369,13 @@ def _run_backend_benchmarks(args: argparse.Namespace) -> None:
                 print(proc.stdout)
                 print(proc.stderr)
                 raise RuntimeError(
-                    f"Benchmark child-run завершился с ошибкой для backend={backend}"
+                    f"Дочерний запуск замера завершился с ошибкой для backend={backend}"
                 )
 
-            phase = "warmup" if run_idx < warmup else "measure"
+            phase = "прогрев" if run_idx < warmup else "измерение"
             print(
-                f"[benchmark] backend={backend} run={run_idx + 1}/{total_runs} "
-                f"phase={phase} elapsed={elapsed:.3f}s"
+                f"[замер] backend={backend} прогон={run_idx + 1}/{total_runs} "
+                f"фаза={phase} время={elapsed:.3f}s"
             )
             if run_idx >= warmup:
                 samples.append(float(elapsed))
@@ -460,10 +400,10 @@ def _run_backend_benchmarks(args: argparse.Namespace) -> None:
             if np.isfinite(base_mean) and np.isfinite(mean_val) and mean_val > 0:
                 row["speedup_vs_" + str(baseline["backend"])] = base_mean / mean_val
 
-    print("\nBenchmark summary:")
+    print("\nСводка замера скорости:")
     for row in benchmark_rows:
         line = (
-            f"  - {row['backend']}: mean={row['mean_sec']:.3f}s "
+            f"  - {row['backend']}: среднее={row['mean_sec']:.3f}s "
             f"std={row['std_sec']:.3f}s min={row['min_sec']:.3f}s max={row['max_sec']:.3f}s"
         )
         speedup_keys = [k for k in row.keys() if k.startswith("speedup_vs_")]
@@ -489,7 +429,7 @@ def _run_backend_benchmarks(args: argparse.Namespace) -> None:
             os.makedirs(out_parent, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"\nBenchmark JSON сохранён: {out_path}")
+        print(f"\nJSON замера скорости сохранён: {out_path}")
 
 
 # ============================================================
@@ -546,11 +486,11 @@ def _aggregate_rank(
     Выбирает способ агрегации ранга по сингулярным значениям матрицы M.
 
     rank_aggregation:
-      "rankme"    — энтропийная формула из статьи RankMe (значение от 1 до D,
+      "rankme"    - энтропийная формула из статьи RankMe (значение от 1 до D,
                     интерпретируется как "эффективное число измерений").
-      "hard_rank" — количество сингулярных значений выше порога hard_rank_threshold
+      "hard_rank" - количество сингулярных значений выше порога hard_rank_threshold
                     (значение целочисленное, напрямую интерпретируемо как ранг).
-      "tail_spectrum_log_ratio" — средний log-ratio q самых малых сингулярных
+      "tail_spectrum_log_ratio" - средний log-ratio q самых малых сингулярных
                     значений к медианному масштабу спектра.
     """
     if rank_aggregation == "hard_rank":
@@ -803,6 +743,7 @@ def _fit_local_linear_map_ransac(
 @dataclass
 class LocalSolveResult:
     rank_value: float  # значение агрегированного ранга (rankme или hard_rank)
+    local_map: np.ndarray
     singular_values: np.ndarray
     raw_residual: float
     relative_residual: float
@@ -922,7 +863,7 @@ def _solve_local_linear_map_and_rank(
         )
 
     # Legacy residual сохраняем в старом поле для обратной совместимости артефактов.
-    # Дополнительно считаем интерпретируемую относительную ошибку по локальным отклонениям Y.
+    # Дополнительно считает интерпретируемую относительную ошибку по локальным отклонениям Y.
     X_eval = Xc_work[inlier_mask]
     Y_eval = Yc_work[inlier_mask]
     if sample_weights is None:
@@ -942,6 +883,7 @@ def _solve_local_linear_map_and_rank(
 
     return LocalSolveResult(
         rank_value=rank_value,
+        local_map=M,
         singular_values=s,
         raw_residual=raw_residual,
         relative_residual=relative_residual,
@@ -1049,7 +991,9 @@ def _iter_metric_center_indices(
                 else spec.eps_percentile
             )
             assert percentile_key is not None
-            for center_idx, idxs in zip(cache.center_indices, cache.eps[percentile_key]):
+            for center_idx, idxs in zip(
+                cache.center_indices, cache.eps[percentile_key]
+            ):
                 if np.asarray(idxs).size < 2:
                     continue
                 yield int(center_idx)
@@ -1084,7 +1028,7 @@ class LocalIDArtifacts:
 
 
 # ============================================================
-# 2) Разбор конфигов (устойчивый к текущей схеме именования)
+# 2) Разбор конфигов
 # ============================================================
 
 
@@ -1132,7 +1076,6 @@ class MetricSpec:
     weak_spectrum_count: int = 5
     exclude_center_from_fit: bool = False
     adaptive_selection: str = "center_prediction_error"
-    adaptive_selection_centering: str = "neighbors_mean"
 
 
 def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> MetricSpec:
@@ -1173,7 +1116,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 except Exception:
                     pass
 
-    # Нестандартные параметры берём из meta, если они заданы.
+    # Нестандартные параметры берёт из meta, если они заданы.
     eps_scale = 1.0
     weighting = "uniform"
     solver = "lstsq"
@@ -1181,13 +1124,12 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
     ransac_sample_frac = 0.5
     ransac_min_inliers = 4
     ransac_threshold_scale = 2.5
-    # Параметры агрегации ранга (новые, с обратной совместимостью по умолчанию).
+    # Параметры агрегации ранга.
     rank_aggregation = "rankme"
     hard_rank_threshold = 1e-2
     weak_spectrum_count = 5
     exclude_center_from_fit = False
     adaptive_selection = "center_prediction_error"
-    adaptive_selection_centering = "neighbors_mean"
     local_id_estimator = "MLE"
     local_id_n_neighbors = 100
     if isinstance(meta, dict):
@@ -1208,9 +1150,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
         except Exception:
             pass
         try:
-            ransac_min_inliers = int(
-                meta.get("ransac_min_inliers", ransac_min_inliers)
-            )
+            ransac_min_inliers = int(meta.get("ransac_min_inliers", ransac_min_inliers))
         except Exception:
             pass
         try:
@@ -1236,9 +1176,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             meta.get("exclude_center_from_fit", exclude_center_from_fit)
         )
         adaptive_selection = str(meta.get("adaptive_selection", adaptive_selection))
-        adaptive_selection_centering = str(
-            meta.get("adaptive_selection_centering", adaptive_selection_centering)
-        )
         local_id_estimator = str(
             meta.get("estimator", meta.get("local_id_estimator", local_id_estimator))
         )
@@ -1252,7 +1189,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
         except Exception:
             pass
 
-    # Новый канонический путь: строим спецификацию из meta, а имя используем как label.
+    # строит спецификацию из meta, а имя используем как label.
     variant = str(meta.get("variant", "")) if isinstance(meta, dict) else ""
     if variant:
         if variant in {
@@ -1298,7 +1235,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 weak_spectrum_count=weak_spectrum_count,
                 exclude_center_from_fit=True,
                 adaptive_selection=adaptive_selection,
-                adaptive_selection_centering=adaptive_selection_centering,
             )
 
         if variant in {"linear_knn", "linear_knn_antisym", "linear_knn_sym"}:
@@ -1350,7 +1286,10 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
                 hard_rank_threshold=hard_rank_threshold,
             )
 
-        if variant in {"weighted_epsilon_ransac_antisym", "weighted_epsilon_ransac_sym"}:
+        if variant in {
+            "weighted_epsilon_ransac_antisym",
+            "weighted_epsilon_ransac_sym",
+        }:
             return MetricSpec(
                 name=name,
                 kind="linear_eps",
@@ -1457,7 +1396,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             weak_spectrum_count=int(m.group(2)),
             exclude_center_from_fit=True,
             adaptive_selection=adaptive_selection,
-            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"adaptive_tail_k([0-9_]+)_q(\d+)(_antisym|_sym)?", lower)
@@ -1475,7 +1413,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             weak_spectrum_count=int(m.group(2)),
             exclude_center_from_fit=True,
             adaptive_selection=adaptive_selection,
-            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"adaptive_k([0-9_]+)(_antisym|_sym)?", lower)
@@ -1493,7 +1430,6 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
             weak_spectrum_count=weak_spectrum_count,
             exclude_center_from_fit=True,
             adaptive_selection=adaptive_selection,
-            adaptive_selection_centering=adaptive_selection_centering,
         )
 
     m = re.fullmatch(r"lin_eps_(\d+)(_antisym|_sym)?", lower)
@@ -1615,9 +1551,7 @@ def _infer_metric_spec(name: str, cfg: Any, default_n_centers: int = 200) -> Met
         p = int(m.group(1))
         if isinstance(meta, dict):
             weighting = str(meta.get("weighting", "gaussian"))
-            solver = str(
-                meta.get("solver", "ransac" if "ransac" in lower else "lstsq")
-            )
+            solver = str(meta.get("solver", "ransac" if "ransac" in lower else "lstsq"))
             try:
                 eps_scale = float(meta.get("eps_scale", 3.0))
             except Exception:
@@ -2269,12 +2203,16 @@ def _metric_directed_for_pair(
         if sample_weights is None:
             artifacts.sample_weights.append(np.ones((Xc.shape[0],), dtype=np.float32))
         else:
-            artifacts.sample_weights.append(np.asarray(sample_weights, dtype=np.float32))
+            artifacts.sample_weights.append(
+                np.asarray(sample_weights, dtype=np.float32)
+            )
         artifacts.inlier_masks.append(np.asarray(inlier_mask, dtype=bool))
         inlier_count = int(np.sum(inlier_mask))
         artifacts.inlier_counts.append(inlier_count)
         artifacts.inlier_fracs.append(
-            float(inlier_count / len(inlier_mask)) if len(inlier_mask) > 0 else float("nan")
+            float(inlier_count / len(inlier_mask))
+            if len(inlier_mask) > 0
+            else float("nan")
         )
         artifacts.selected_ks.append(int(selected_k))
         if center_prediction_errors is None:
@@ -2299,19 +2237,10 @@ def _metric_directed_for_pair(
         Y_center_work = np.asarray(Y_center, dtype=np.float64).reshape(1, -1)
 
         if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
-            if spec.adaptive_selection_centering == "neighbors_mean":
-                x0 = Xc_work.mean(axis=0, keepdims=True)
-                y0 = Yc_work.mean(axis=0, keepdims=True)
-            elif spec.adaptive_selection_centering == "center":
-                x0 = X_center_work
-                y0 = Y_center_work
-            else:
-                raise ValueError(
-                    "Неизвестный adaptive_selection_centering: "
-                    f"{spec.adaptive_selection_centering}"
-                )
-            M = _fit_local_linear_map(Xc_work - x0, Yc_work - y0)
-            y_pred = (X_center_work - x0) @ M + y0
+            x_ref = Xc_work.mean(axis=0, keepdims=True)
+            y_ref = Yc_work.mean(axis=0, keepdims=True)
+            M = _fit_local_linear_map(Xc_work - x_ref, Yc_work - y_ref)
+            y_pred = (X_center_work - x_ref) @ M + y_ref
         else:
             M = _fit_local_linear_map(Xc_work, Yc_work)
             y_pred = X_center_work @ M
@@ -2375,21 +2304,14 @@ def _metric_directed_for_pair(
             Yk = _to_backend_tensor(Yn[idx], dtype=torch.float64)
 
             if _LOCAL_GEOMETRY_MODE in {"centered_offsets_v1", "centered_offsets_v2"}:
-                if spec.adaptive_selection_centering == "neighbors_mean":
-                    x0 = Xk.mean(dim=1, keepdim=True)
-                    y0 = Yk.mean(dim=1, keepdim=True)
-                elif spec.adaptive_selection_centering == "center":
-                    x0 = X_center_t[:, None, :]
-                    y0 = Y_center_t[:, None, :]
-                else:
-                    raise ValueError(
-                        "Неизвестный adaptive_selection_centering: "
-                        f"{spec.adaptive_selection_centering}"
-                    )
-                A = Xk - x0
-                B = Yk - y0
+                x_ref = Xk.mean(dim=1, keepdim=True)
+                y_ref = Yk.mean(dim=1, keepdim=True)
+                A = Xk - x_ref
+                B = Yk - y_ref
                 M = _solve_batched_lstsq_torch(A, B)
-                y_pred = torch.bmm((X_center_t[:, None, :] - x0), M).squeeze(1) + y0.squeeze(1)
+                y_pred = torch.bmm((X_center_t[:, None, :] - x_ref), M).squeeze(
+                    1
+                ) + y_ref.squeeze(1)
             else:
                 M = _solve_batched_lstsq_torch(Xk, Yk)
                 y_pred = torch.bmm(X_center_t[:, None, :], M).squeeze(1)
@@ -2452,7 +2374,9 @@ def _metric_directed_for_pair(
             else:
                 s_t = torch.linalg.svdvals(M)
                 if spec.rank_aggregation == "hard_rank":
-                    metric_t = torch.sum(s_t > float(spec.hard_rank_threshold), dim=1).to(torch.float64)
+                    metric_t = torch.sum(
+                        s_t > float(spec.hard_rank_threshold), dim=1
+                    ).to(torch.float64)
                 elif spec.rank_aggregation == "tail_spectrum_log_ratio":
                     metric_t = _tail_spectrum_log_ratio_from_torch_singular_values(
                         s_t,
@@ -2482,8 +2406,12 @@ def _metric_directed_for_pair(
                 hard_ranks_by_center[int(original_pos)] = hard_np[local_pos]
                 metric_ranks_by_center[int(original_pos)] = metric_np[local_pos]
                 vals_batched[int(original_pos)] = metric_np[local_pos]
-                neighbor_distances_by_center[int(original_pos)] = candidate_distances[k][int(original_pos)]
-                sample_weights_by_center[int(original_pos)] = np.ones((k,), dtype=np.float32)
+                neighbor_distances_by_center[int(original_pos)] = candidate_distances[
+                    k
+                ][int(original_pos)]
+                sample_weights_by_center[int(original_pos)] = np.ones(
+                    (k,), dtype=np.float32
+                )
                 inlier_masks_by_center[int(original_pos)] = np.ones((k,), dtype=bool)
                 inlier_counts_by_center[int(original_pos)] = int(k)
                 inlier_fracs_by_center[int(original_pos)] = 1.0
@@ -2495,7 +2423,9 @@ def _metric_directed_for_pair(
                 np.asarray(singular_values_by_center[center_pos], dtype=np.float64)
             )
             artifacts.residuals.append(float(residuals_by_center[center_pos]))
-            artifacts.relative_residuals.append(float(rel_residuals_by_center[center_pos]))
+            artifacts.relative_residuals.append(
+                float(rel_residuals_by_center[center_pos])
+            )
             artifacts.ranks.append(int(hard_ranks_by_center[center_pos]))
             artifacts.metric_ranks.append(float(metric_ranks_by_center[center_pos]))
             selected_k = int(selected_ks_np[center_pos])
@@ -2545,7 +2475,9 @@ def _metric_directed_for_pair(
     elif spec.kind == "adaptive_knn":
         assert spec.k_list is not None
         if spec.adaptive_selection != "center_prediction_error":
-            raise ValueError(f"Неизвестный adaptive_selection: {spec.adaptive_selection}")
+            raise ValueError(
+                f"Неизвестный adaptive_selection: {spec.adaptive_selection}"
+            )
         batched_vals = _try_accumulate_adaptive_knn_batched()
         if batched_vals is not None:
             vals.extend(batched_vals)
@@ -2626,7 +2558,7 @@ def _metric_directed_for_pair(
                     )
                 )
             per_scale.append(np.asarray(tmp, dtype=np.float32))
-        # Агрегируем масштабы.
+        # Агрегирует масштабы.
         stack = np.stack(per_scale, axis=0)  # (S, C)
         if spec.aggregator == "mean":
             vals = list(np.mean(stack, axis=0))
@@ -2836,9 +2768,7 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
     else:
         rank_agg = spec.rank_aggregation
         if rank_agg == "hard_rank":
-            ranks_axis_label = (
-                f"Ранг отображения M (кол-во сингулярных значений > {spec.hard_rank_threshold:.0e})"
-            )
+            ranks_axis_label = f"Ранг отображения M (кол-во сингулярных значений > {spec.hard_rank_threshold:.0e})"
             ranks_short_label = f"Hard rank (thr={spec.hard_rank_threshold:.0e})"
             ranks_description = (
                 f"Количество сингулярных значений матрицы M, превышающих порог "
@@ -2865,7 +2795,9 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
                 "так она напрямую измеряет слабый хвост спектра с нормировкой на локальный масштаб."
             )
         else:
-            ranks_axis_label = "Ранг отображения M (RankMe, эффективное число измерений)"
+            ranks_axis_label = (
+                "Ранг отображения M (RankMe, эффективное число измерений)"
+            )
             ranks_short_label = "RankMe"
             ranks_description = (
                 "Энтропийная оценка ранга (RankMe): exp(-sum(p_k * log(p_k))), "
@@ -2873,26 +2805,18 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
             )
 
         if _LOCAL_GEOMETRY_MODE == "absolute_coords_v0":
-            residual_axis_label = (
-                r"Относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
-            )
+            residual_axis_label = r"Относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
             residual_short_label = "Rel. residual"
-            residual_summary_label = (
-                r"Средняя относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
-            )
+            residual_summary_label = r"Средняя относительная ошибка ${\rm mean}|X_c M - Y_c| \,/\, ({\rm mean}|Y_c|)$"
             residual_description = (
                 "Относительная ошибка в legacy-геометрии без центрирования: "
                 "mean(|Xc @ M - Yc|) / mean(|Yc|). "
                 "Показывает, на сколько процентов линейное отображение искажает абсолютные координаты Y."
             )
         else:
-            residual_axis_label = (
-                r"Относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
-            )
+            residual_axis_label = r"Относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
             residual_short_label = "Rel. residual"
-            residual_summary_label = (
-                r"Средняя относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
-            )
+            residual_summary_label = r"Средняя относительная ошибка ${\rm mean}|(X_c-x_c) M - (Y_c-y_c)| \,/\, ({\rm mean}|Y_c-y_c|)$"
             residual_description = (
                 "Относительная ошибка по локальным приращениям Y: "
                 "mean(|(Xc - xc) @ M - (Yc - yc)|) / mean(|Yc - yc|). "
@@ -2911,7 +2835,6 @@ def _build_diagnostics_meta(spec: "MetricSpec") -> Dict[str, Any]:
         "weak_spectrum_count": spec.weak_spectrum_count,
         "exclude_center_from_fit": _exclude_center_from_fit_for_spec(spec),
         "adaptive_selection": spec.adaptive_selection,
-        "adaptive_selection_centering": spec.adaptive_selection_centering,
         "preferred_rank_field": "metric_ranks",
         "legacy_rank_field": "ranks",
         "ranks_axis_label": ranks_axis_label,
@@ -3018,7 +2941,7 @@ def _save_artifacts(
         return arr
 
     # Сингулярные значения и соседние расстояния могут иметь разную длину по центрам,
-    # поэтому храним их как object-массивы.
+    # поэтому хранит их как object-массивы.
     sv_array = _to_object_array(directed.singular_values)
     dist_array = _to_object_array(directed.neighbor_distances)
     weights_array = _to_object_array(directed.sample_weights)
@@ -3053,9 +2976,13 @@ def _save_artifacts(
     artifacts[f"{prefix}/selected_ks"] = np.array(directed.selected_ks, dtype=np.int32)
     artifacts[f"{prefix}/center_prediction_errors"] = center_errors_array
     if directed.local_id_x:
-        artifacts[f"{prefix}/local_id_x"] = np.array(directed.local_id_x, dtype=np.float32)
+        artifacts[f"{prefix}/local_id_x"] = np.array(
+            directed.local_id_x, dtype=np.float32
+        )
     if directed.local_id_y:
-        artifacts[f"{prefix}/local_id_y"] = np.array(directed.local_id_y, dtype=np.float32)
+        artifacts[f"{prefix}/local_id_y"] = np.array(
+            directed.local_id_y, dtype=np.float32
+        )
 
     # Записываем diagnostics_meta_json один раз при первом вызове (когда ключа ещё нет).
     # Содержит описание полей residuals и ranks: формулы, подписи осей, единицы измерения.
@@ -3093,7 +3020,8 @@ def _save_local_id_artifacts(
     )
     artifacts[f"{prefix}/center_indices"] = np.asarray(center_indices, dtype=np.int32)
     artifacts["local_id_meta_json"] = json.dumps(
-        _build_local_id_meta(estimator_name, n_neighbors, method=method), ensure_ascii=False
+        _build_local_id_meta(estimator_name, n_neighbors, method=method),
+        ensure_ascii=False,
     )
     np.savez_compressed(path, **artifacts)
 
@@ -3145,19 +3073,23 @@ def _ensure_meta_compatible(meta_old: Dict[str, Any], new_spec: MetricSpec) -> N
     if old_spec is not None:
         old_spec_cmp = dict(old_spec) if isinstance(old_spec, dict) else old_spec
         new_spec_cmp = asdict(new_spec)
-        if isinstance(old_spec_cmp, dict) and old_spec_cmp.get("kind") != "local_id_diff":
+        if (
+            isinstance(old_spec_cmp, dict)
+            and old_spec_cmp.get("kind") != "local_id_diff"
+        ):
             old_spec_cmp.pop("local_id_estimator", None)
             old_spec_cmp.pop("local_id_n_neighbors", None)
             new_spec_cmp.pop("local_id_estimator", None)
             new_spec_cmp.pop("local_id_n_neighbors", None)
         if isinstance(old_spec_cmp, dict) and "weak_spectrum_count" not in old_spec_cmp:
             new_spec_cmp.pop("weak_spectrum_count", None)
-        if isinstance(old_spec_cmp, dict) and "exclude_center_from_fit" not in old_spec_cmp:
+        if (
+            isinstance(old_spec_cmp, dict)
+            and "exclude_center_from_fit" not in old_spec_cmp
+        ):
             new_spec_cmp.pop("exclude_center_from_fit", None)
         if isinstance(old_spec_cmp, dict) and "adaptive_selection" not in old_spec_cmp:
             new_spec_cmp.pop("adaptive_selection", None)
-        if isinstance(old_spec_cmp, dict) and "adaptive_selection_centering" not in old_spec_cmp:
-            new_spec_cmp.pop("adaptive_selection_centering", None)
         if old_spec_cmp != new_spec_cmp:
             raise RuntimeError(
                 "Инкрементальный режим: у существующего файла метрики другой metric_spec.\n"
@@ -3241,7 +3173,7 @@ def main():
         choices=["auto", "cpu", "cuda"],
         default="auto",
         help=(
-            "Численный backend для тяжёлых операций. "
+            "Вычислительный режим для тяжёлых операций. "
             "auto: использовать CUDA при доступности, иначе CPU/NumPy; "
             "cpu: принудительно NumPy/Scipy; cuda: принудительно torch CUDA."
         ),
@@ -3251,28 +3183,28 @@ def main():
         type=str,
         default="",
         help=(
-            "Если задано, запускает benchmark-режим и сравнивает указанные backend'ы "
-            "через запятую, например: cpu,cuda. В этом режиме метрики считаются во "
-            "временные директории и затем удаляются."
+            "Если задано, запускает режим замера скорости и сравнивает указанные "
+            "вычислительные режимы через запятую, например: cpu,cuda. "
+            "В этом режиме метрики считаются во временные директории и затем удаляются."
         ),
     )
     parser.add_argument(
         "--benchmark_repeats",
         type=int,
         default=3,
-        help="Сколько измеряемых прогонов делать для каждого backend в benchmark-режиме.",
+        help="Сколько измеряемых прогонов делать для каждого режима в замере скорости.",
     )
     parser.add_argument(
         "--benchmark_warmup",
         type=int,
         default=1,
-        help="Сколько прогревочных прогонов делать перед измерениями в benchmark-режиме.",
+        help="Сколько прогревочных прогонов делать перед измерениями.",
     )
     parser.add_argument(
         "--benchmark_output_json",
         type=str,
         default="",
-        help="Необязательный путь для сохранения benchmark-сводки в JSON.",
+        help="Необязательный путь для сохранения сводки замера скорости в JSON.",
     )
     parser.add_argument(
         "--incremental",
@@ -3294,7 +3226,7 @@ def main():
         type=float,
         default=float("nan"),
         help=(
-            "Если задано и метрика использует hard-rank, переопределяет absolute threshold. "
+            "Если задано и метрика использует hard-rank, переопределяет абсолютный порог. "
             "При наличии сохранённых singular_values значение метрики будет переагрегировано "
             "без нового решения локальных задач."
         ),
@@ -3303,8 +3235,8 @@ def main():
         "--compute_local_id_diagnostics",
         action="store_true",
         help=(
-            "Если флаг задан, независимо оценивает локальную intrinsic dimension "
-            "в пространствах X и Y и сохраняет её в sidecar-файл для диагностики."
+            "Если флаг задан, независимо оценивает локальную внутреннюю размерность "
+            "в пространствах X и Y и сохраняет её в дополнительный файл для диагностики."
         ),
     )
     parser.add_argument(
@@ -3315,7 +3247,7 @@ def main():
         default=100,
         help=(
             "Число соседей для skdim.id.<Estimator>().fit_transform_pw(...) "
-            "при оценке local intrinsic dimension."
+            "при оценке локальной внутренней размерности."
         ),
     )
     parser.add_argument(
@@ -3340,7 +3272,7 @@ def main():
         "--disable_centering",
         action="store_true",
         help=(
-            "Удобный alias для legacy-режима без центрирования. "
+            "Удобный псевдоним для старого режима без центрирования. "
             "Эквивалентно --local_geometry_mode absolute_coords_v0."
         ),
     )
@@ -3402,7 +3334,7 @@ def main():
         print(f"  * {name}")
     print(f"\nРежим локальной геометрии: {_LOCAL_GEOMETRY_MODE}")
     print(
-        f"Численный backend: {_COMPUTE_BACKEND.name} | device={_COMPUTE_BACKEND.device}"
+        f"Вычислительный режим: {_COMPUTE_BACKEND.name} | устройство={_COMPUTE_BACKEND.device}"
     )
 
     cfgs = get_embedding_metric_configs()
@@ -3549,8 +3481,8 @@ def main():
 
     def get_local_id_features_for_model(model_name: str) -> np.ndarray:
         if model_name not in prepared_local_id_features_by_model:
-            prepared_local_id_features_by_model[model_name] = _prepare_features_for_local_id(
-                embeddings[model_name], spec=None
+            prepared_local_id_features_by_model[model_name] = (
+                _prepare_features_for_local_id(embeddings[model_name], spec=None)
             )
         return prepared_local_id_features_by_model[model_name]
 
@@ -3676,8 +3608,8 @@ def main():
         saved_artifacts = _load_artifacts(artifacts_path)
         if saved_artifacts and not _artifacts_match_current_geometry(saved_artifacts):
             print(
-                "[WARN] Найдены артефакты, посчитанные без текущего локального центрирования. "
-                "Они будут проигнорированы и перезаписаны."
+                "[ПРЕДУПРЕЖДЕНИЕ] Найдены артефакты, посчитанные без текущего "
+                "локального центрирования. Они будут проигнорированы и перезаписаны."
             )
             saved_artifacts = {}
 
@@ -3696,8 +3628,8 @@ def main():
             )
         ):
             print(
-                "[WARN] Найдены local-ID артефакты с несовместимой конфигурацией. "
-                "Они будут проигнорированы и перезаписаны."
+                "[ПРЕДУПРЕЖДЕНИЕ] Найдены local-ID артефакты с несовместимой "
+                "конфигурацией. Они будут проигнорированы и перезаписаны."
             )
             saved_local_id_artifacts = {}
 
@@ -3708,7 +3640,9 @@ def main():
         # - sym: out_matrix — симметричная sim
         # ============================================================
 
-        def _directed_metric(model_i: str, model_j: str) -> Tuple[float, Optional[DirectedArtifacts]]:
+        def _directed_metric(
+            model_i: str, model_j: str
+        ) -> Tuple[float, Optional[DirectedArtifacts]]:
             reused = _maybe_reaggregate_direction_from_artifacts(
                 saved_artifacts, model_i, model_j, spec
             )
@@ -3774,8 +3708,12 @@ def main():
                 local_id = LocalIDArtifacts(
                     intrinsic_dims_x=[float(v) for v in directed_artifacts.local_id_x],
                     intrinsic_dims_y=[float(v) for v in directed_artifacts.local_id_y],
-                    neighbor_sizes_x=[int(v) for v in directed_artifacts.neighbor_sizes],
-                    neighbor_sizes_y=[int(v) for v in directed_artifacts.neighbor_sizes],
+                    neighbor_sizes_x=[
+                        int(v) for v in directed_artifacts.neighbor_sizes
+                    ],
+                    neighbor_sizes_y=[
+                        int(v) for v in directed_artifacts.neighbor_sizes
+                    ],
                 )
                 _save_local_id_artifacts(
                     local_id_artifacts_path,
@@ -3802,18 +3740,22 @@ def main():
                     and neighbor_sizes_saved is not None
                 ):
                     local_id = LocalIDArtifacts(
-                        intrinsic_dims_x=np.asarray(
-                            local_id_x_saved, dtype=np.float32
-                        ).reshape(-1).tolist(),
-                        intrinsic_dims_y=np.asarray(
-                            local_id_y_saved, dtype=np.float32
-                        ).reshape(-1).tolist(),
+                        intrinsic_dims_x=np.asarray(local_id_x_saved, dtype=np.float32)
+                        .reshape(-1)
+                        .tolist(),
+                        intrinsic_dims_y=np.asarray(local_id_y_saved, dtype=np.float32)
+                        .reshape(-1)
+                        .tolist(),
                         neighbor_sizes_x=np.asarray(
                             neighbor_sizes_saved, dtype=np.int32
-                        ).reshape(-1).tolist(),
+                        )
+                        .reshape(-1)
+                        .tolist(),
                         neighbor_sizes_y=np.asarray(
                             neighbor_sizes_saved, dtype=np.int32
-                        ).reshape(-1).tolist(),
+                        )
+                        .reshape(-1)
+                        .tolist(),
                     )
                     _save_local_id_artifacts(
                         local_id_artifacts_path,
@@ -3903,11 +3845,21 @@ def main():
                     # Сохраняем артефакты для обоих направлений.
                     if artifacts_ij is not None:
                         _save_artifacts(
-                            artifacts_path, saved_artifacts, mi, mj, artifacts_ij, spec=spec
+                            artifacts_path,
+                            saved_artifacts,
+                            mi,
+                            mj,
+                            artifacts_ij,
+                            spec=spec,
                         )
                     if artifacts_ji is not None:
                         _save_artifacts(
-                            artifacts_path, saved_artifacts, mj, mi, artifacts_ji, spec=spec
+                            artifacts_path,
+                            saved_artifacts,
+                            mj,
+                            mi,
+                            artifacts_ji,
+                            spec=spec,
                         )
 
             # Обеспечивает точную антисимметрию и нулевую диагональ
@@ -3950,11 +3902,21 @@ def main():
                     # Сохраняем артефакты для обоих направлений.
                     if artifacts_ij is not None:
                         _save_artifacts(
-                            artifacts_path, saved_artifacts, mi, mj, artifacts_ij, spec=spec
+                            artifacts_path,
+                            saved_artifacts,
+                            mi,
+                            mj,
+                            artifacts_ij,
+                            spec=spec,
                         )
                     if artifacts_ji is not None:
                         _save_artifacts(
-                            artifacts_path, saved_artifacts, mj, mi, artifacts_ji, spec=spec
+                            artifacts_path,
+                            saved_artifacts,
+                            mj,
+                            mi,
+                            artifacts_ji,
+                            spec=spec,
                         )
 
             # Обеспечиваем симметрию и нулевую диагональ
@@ -3977,7 +3939,12 @@ def main():
                     # Сохраняем артефакты для направления i->j.
                     if artifacts_ij is not None:
                         _save_artifacts(
-                            artifacts_path, saved_artifacts, mi, mj, artifacts_ij, spec=spec
+                            artifacts_path,
+                            saved_artifacts,
+                            mi,
+                            mj,
+                            artifacts_ij,
+                            spec=spec,
                         )
 
         if args.compute_local_id_diagnostics:

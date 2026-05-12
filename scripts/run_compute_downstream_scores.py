@@ -15,6 +15,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from datasets.io import load_labels
+from configs.text_benchmark_configs import (
+    TEXT_EMBEDDING_MODEL_BY_ID,
+    TEXT_EMBEDDING_MODEL_IDS,
+    TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+)
 
 
 def _set_determinism(seed: int) -> None:
@@ -23,7 +28,7 @@ def _set_determinism(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    # Детерминизм порядка (cuDNN) без "строгого" режима, который требует CUBLAS_WORKSPACE_CONFIG.
+    # Детерминизм порядка
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
@@ -71,12 +76,32 @@ def _load_labels_file(path: str) -> np.ndarray:
 def _list_models(embeddings_dir: str) -> Dict[str, str]:
     files = {}
     for fn in os.listdir(embeddings_dir):
+        if os.path.splitext(fn)[0] in {"labels", "targets", "subset_indices"}:
+            continue
         if fn.endswith(".npy") or fn.endswith(".npz"):
             name = os.path.splitext(fn)[0]
             files[name] = os.path.join(embeddings_dir, fn)
     if not files:
         raise RuntimeError(f"В папке нет эмбеддингов: {embeddings_dir}")
     return files
+
+
+def _parse_model_filter(raw: Optional[str]) -> Optional[list[str]]:
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    if raw == "text20":
+        return list(TEXT_EMBEDDING_TEXT20_MODEL_IDS)
+    if raw == "primary":
+        return list(TEXT_EMBEDDING_MODEL_IDS)
+    names = [x.strip() for x in raw.split(",") if x.strip()]
+    unknown = [x for x in names if x not in TEXT_EMBEDDING_MODEL_BY_ID]
+    if unknown:
+        raise ValueError(
+            f"Неизвестные идентификаторы текстовых моделей в --models: {unknown}. "
+            f"Доступно: {TEXT_EMBEDDING_MODEL_IDS}"
+        )
+    return names
 
 
 def _infer_dataset_name_from_path(path: Optional[str]) -> Optional[str]:
@@ -142,13 +167,17 @@ def _resolve_labels_holdout(
 ) -> np.ndarray:
     """
     Метки для holdout-режима:
-    - если labels_path задан, грузим из файла;
-    - иначе пытаемся загрузить по (dataset_name, data_root, split), где split
+    - если labels_path задан, грузит из файла;
+    - иначе пытается загрузить по (dataset_name, data_root, split), где split
       выводится из имени папки embeddings_dir.
-      Если не удалось — считаем split='test' по умолчанию.
+      Если не удалось — считает split='test' по умолчанию.
     """
     if labels_path:
         return _load_labels_file(labels_path)
+
+    local_labels_path = os.path.join(embeddings_dir, "labels.npy")
+    if os.path.exists(local_labels_path):
+        return _load_labels_file(local_labels_path)
 
     if not dataset_name or not data_root:
         raise ValueError(
@@ -171,13 +200,31 @@ def _resolve_labels_train_test(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Метки для train/test-режима:
-    - если labels_path задан, считаем это старым совместимым режимом и используем
+    - если labels_path задан, считает это старым совместимым режимом и использует
       один и тот же массив меток для train и test;
-    - иначе грузим train/test метки отдельно через datasets.io.load_labels.
+    - иначе грузит train/test метки отдельно через datasets.io.load_labels.
     """
     if labels_path:
         y = _load_labels_file(labels_path)
         return y, y
+
+    train_labels_path = (
+        os.path.join(train_embeddings_dir, "labels.npy")
+        if train_embeddings_dir is not None
+        else ""
+    )
+    test_labels_path = (
+        os.path.join(test_embeddings_dir, "labels.npy")
+        if test_embeddings_dir is not None
+        else ""
+    )
+    if (
+        train_labels_path
+        and test_labels_path
+        and os.path.exists(train_labels_path)
+        and os.path.exists(test_labels_path)
+    ):
+        return _load_labels_file(train_labels_path), _load_labels_file(test_labels_path)
 
     if not dataset_name or not data_root:
         raise ValueError(
@@ -197,7 +244,6 @@ def _resolve_labels_train_test(
 class MLPProbe(nn.Module):
     def __init__(self, dim: int, n_classes: int, dropout: float = 0.3):
         super().__init__()
-        # Совмещаем текущий пайплайн с архитектурой probe из прошлогоднего benchmark'а:
         # 3 линейных слоя, 2 ReLU и 1 Dropout.
         self.net = nn.Sequential(
             nn.Linear(dim, 2048),
@@ -399,7 +445,7 @@ def main():
     )
 
     # Два режима:
-    # 1) Отложенный режим: embeddings_dir содержит ОДНО разделение, мы выполняем разделение на обучающую и валидационную выборки внутри него.
+    # 1) Отложенный режим: embeddings_dir содержит ОДНО разделение, выполняет разделение на обучающую и валидационную выборки внутри него.
     # 2) Обучающий/тестовый режим: train_embeddings_dir + test_embeddings_dir.
     parser.add_argument(
         "--embeddings_dir",
@@ -515,8 +561,19 @@ def main():
         default=None,
         help="Необязательная метка для логов; на вычисления не влияет.",
     )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default="",
+        help=(
+            "Необязательный фильтр моделей: идентификаторы через запятую "
+            "или псевдоним text20. Если пусто, используются все общие "
+            "файлы эмбеддингов."
+        ),
+    )
 
     args = parser.parse_args()
+    requested_models = _parse_model_filter(args.models)
 
     if not args.out_json:
         if not args.experiment_dir:
@@ -569,6 +626,14 @@ def main():
         test_models = _list_models(args.test_embeddings_dir)
 
         common = sorted(set(train_models.keys()) & set(test_models.keys()))
+        if requested_models is not None:
+            missing = [m for m in requested_models if m not in common]
+            if missing:
+                raise RuntimeError(
+                    f"--models содержит модели без train/test эмбеддингов: {missing}. "
+                    f"Доступные общие модели: {common}"
+                )
+            common = [m for m in requested_models if m in set(common)]
         if not common:
             raise RuntimeError(
                 "Нет общих моделей между train_embeddings_dir и test_embeddings_dir."
@@ -616,6 +681,14 @@ def main():
 
     else:
         models = _list_models(args.embeddings_dir)
+        if requested_models is not None:
+            missing = [m for m in requested_models if m not in models]
+            if missing:
+                raise RuntimeError(
+                    f"--models содержит модели без эмбеддингов: {missing}. "
+                    f"Доступные модели: {sorted(models.keys())}"
+                )
+            models = {m: models[m] for m in requested_models}
 
         y = _resolve_labels_holdout(
             labels_path=args.labels_path,

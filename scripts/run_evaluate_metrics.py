@@ -1,20 +1,3 @@
-"""
-Шаг 2 протокола:
-
-Берём посчитанные матрицы метрик (metric_matrices/*.npz) и downstream-качества моделей (json),
-и строим supervised оценку корреляции метрики с downstream.
-
-Поддерживаем 2 протокола:
-
-1) delta_signed (как раньше):
-   ordered пары (A,B), target = Δacc(B)-Δacc(A)
-   применимо к directed/antisym (и формально можно к sym, но смысла мало)
-
-2) delta_abs:
-   unordered пары (A,B) с A<B, target = |Δacc(B)-Δacc(A)|
-   это естественный вариант для симметричных метрик (sim).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -28,13 +11,12 @@ from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 from scipy.stats import spearmanr, pearsonr, kendalltau
 
-# Опционально для графиков (не делаем обязательной зависимостью)
 try:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-except Exception:  # pragma: no cover
+except Exception:
     plt = None
 
 
@@ -248,7 +230,6 @@ def eval_one_metric(
     models = intersect_models(model_names, downstream)
     idx = {m: i for i, m in enumerate(model_names)}
 
-    # ИСПРАВЛЕНИЕ: используем флаги так же, как в прошлом году
     is_paired = bool(meta.get("is_paired", True))
     is_symmetric = bool(meta.get("is_symmetric", False))
 
@@ -339,7 +320,6 @@ def eval_one_metric(
             )
         )
 
-    # Сводка: средние по задачам (как в логе)
     def _nanmean(vals: List[float]) -> float:
         arr = np.asarray(vals, dtype=float)
         return float(np.nanmean(arr)) if arr.size else float("nan")
@@ -359,7 +339,6 @@ def eval_one_metric(
         ),
     }
 
-    # meta -> добавим то, что полезно видеть в отчёте
     meta_out = dict(meta)
     meta_out["is_paired"] = is_paired
     meta_out["is_symmetric"] = is_symmetric
@@ -481,8 +460,8 @@ def _plot_scatter(
     ax.axvline(0.0)
     ax.axhline(0.0)
     ax.set_title(title)
-    ax.set_xlabel("metric")
-    ax.set_ylabel("target")
+    ax.set_xlabel("Метрика")
+    ax.set_ylabel("Целевая величина")
     fig.text(0.01, 0.01, subtitle, fontsize=9)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     base, _ = os.path.splitext(out_path)
@@ -573,7 +552,6 @@ def save_csv(
 ) -> None:
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
-    # Плоская таблица: одна строка на метрику, агрегаты по задачам
     fieldnames = [
         "metric_file",
         "pair_agg",
@@ -610,7 +588,6 @@ def save_md(
 ) -> None:
     os.makedirs(os.path.dirname(out_md), exist_ok=True)
 
-    # Простая таблица Markdown
     header = "| metric | pair_agg | spearman | pearson | kendall | cr_adj |\n|---|---|---:|---:|---:|---:|\n"
     lines = [header]
     for metric_file, meta, _per_task, summary in reports:
@@ -664,10 +641,13 @@ def main():
         type=str,
         default="delta_signed",
         choices=["delta_signed", "delta_abs"],
-        help="Как строить supervision из downstream: delta_signed использует упорядоченные пары и Δacc(B)-Δacc(A); delta_abs использует неупорядоченные пары и |Δacc|.",
+        help=(
+            "Как строить целевую величину из downstream: delta_signed использует "
+            "упорядоченные пары и Δacc(B)-Δacc(A); delta_abs использует "
+            "неупорядоченные пары и |Δacc|."
+        ),
     )
 
-    # Построение графиков (необязательно)
     parser.add_argument(
         "--plots_dir",
         type=str,
@@ -727,7 +707,6 @@ def main():
         [t.strip() for t in args.tasks.split(",") if t.strip()] if args.tasks else None
     )
 
-    # Метрики = все .npz в metrics_dir
     files = [f for f in os.listdir(args.metrics_dir) if f.endswith(".npz")]
     files.sort()
 
@@ -738,7 +717,7 @@ def main():
     reports = []
 
     print("\n" + "=" * 100)
-    print(f"ОТЧЁТ ПО ОЦЕНКЕ | protocol={args.eval_protocol}")
+    print(f"ОТЧЁТ ПО ОЦЕНКЕ | протокол={args.eval_protocol}")
     print("=" * 100 + "\n")
 
     for fname in chosen:
@@ -749,15 +728,17 @@ def main():
         reports.append((metric_file, meta, per_task, summary))
 
         print(f"Метрика: {metric_file}")
-        print(f"  pairs_total: {summary['pairs_total']}, tasks: {summary['tasks']}")
+        print(f"  всего пар: {summary['pairs_total']}, задач: {summary['tasks']}")
         print(
-            f"  meta: is_paired={meta.get('is_paired')}, is_symmetric={meta.get('is_symmetric')}, pair_agg={meta.get('pair_agg')}"
+            f"  метаданные: is_paired={meta.get('is_paired')}, "
+            f"is_symmetric={meta.get('is_symmetric')}, pair_agg={meta.get('pair_agg')}"
         )
         print(f"  Spearman (среднее по задачам): {summary['spearman_mean']:.4f}")
         print(f"  Pearson  (среднее по задачам): {summary['pearson_mean']:.4f}")
         print(f"  Kendall  (среднее по задачам): {summary['kendall_mean']:.4f}")
         print(
-            f"  correct_ratio_adjusted_mean: {summary['correct_ratio_adjusted_mean']:.4f}"
+            f"  скорректированная доля правильного ранжирования: "
+            f"{summary['correct_ratio_adjusted_mean']:.4f}"
         )
         print("-" * 100)
 

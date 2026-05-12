@@ -10,8 +10,16 @@ from typing import Any, Callable
 
 import numpy as np
 
+from configs.benchmark_configs import VKR_2024_2025_MODEL_NAMES
+from configs.text_benchmark_configs import (
+    TEXT_EMBEDDING_CPU_MODEL_IDS,
+    TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+    TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+)
+
 
 DEFAULT_SINGLE_METRICS_ROOT = Path("data") / "single_metrics"
+DEFAULT_EMBEDDINGS_ROOT = Path("data") / "embeddings"
 
 
 # ============================================================
@@ -19,6 +27,13 @@ DEFAULT_SINGLE_METRICS_ROOT = Path("data") / "single_metrics"
 # ============================================================
 
 SUPPORTED_EXTENSIONS = {".npy", ".npz", ".pt", ".pth"}
+NON_MODEL_STEMS = {
+    "subset_indices",
+    "labels",
+    "targets",
+    "embeddings_manifest",
+    "subset_manifest",
+}
 
 
 def _maybe_import_torch():
@@ -75,6 +90,42 @@ def slugify_dataset_key(raw: str) -> str:
 
 def infer_dataset_key(embeddings_dir: Path) -> str:
     return slugify_dataset_key(embeddings_dir.name)
+
+
+def infer_embeddings_dir(dataset_key: str) -> Path:
+    return DEFAULT_EMBEDDINGS_ROOT / slugify_dataset_key(dataset_key)
+
+
+def sampled_dataset_key(
+    dataset_key: str,
+    sample_size: int,
+    sample_seed: int,
+    sample_strategy: str = "stratified",
+) -> str:
+    key = (
+        f"{slugify_dataset_key(dataset_key)}_s{int(sample_size)}_seed{int(sample_seed)}"
+    )
+    if str(sample_strategy):
+        key = f"{key}_{sample_strategy}"
+    return key
+
+
+def infer_sampled_embeddings_dir(
+    dataset_key: str,
+    sample_size: int,
+    sample_seed: int,
+    sample_strategy: str = "stratified",
+) -> Path:
+    return (
+        DEFAULT_EMBEDDINGS_ROOT
+        / "samples"
+        / sampled_dataset_key(
+            dataset_key,
+            sample_size,
+            sample_seed,
+            sample_strategy,
+        )
+    )
 
 
 def covariance_eigenvalues(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -184,6 +235,7 @@ def discover_embedding_files(embeddings_dir: Path) -> list[Path]:
         Path(os.path.join(embeddings_dir, fn))
         for fn in sorted(os.listdir(embeddings_dir))
         if Path(fn).suffix.lower() in SUPPORTED_EXTENSIONS
+        and Path(fn).stem not in NON_MODEL_STEMS
     ]
 
     if files:
@@ -204,8 +256,106 @@ def discover_embedding_files(embeddings_dir: Path) -> list[Path]:
     )
 
 
+def parse_model_names(raw: str) -> list[str]:
+    names = [part.strip() for part in str(raw).split(",") if part.strip()]
+    aliases = {
+        "primary": VKR_2024_2025_MODEL_NAMES,
+        "cpu": TEXT_EMBEDDING_CPU_MODEL_IDS,
+        "snowflake": TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS,
+        "text20": TEXT_EMBEDDING_TEXT20_MODEL_IDS,
+    }
+    out: list[str] = []
+    for name in names:
+        out.extend(aliases.get(name, [name]))
+    return list(dict.fromkeys(out))
+
+
 def infer_model_name(path: Path) -> str:
     return path.stem
+
+
+def singular_values_clean(s: np.ndarray, epsilon: float = 1e-12) -> np.ndarray:
+    arr = np.asarray(s, dtype=np.float64).reshape(-1)
+    arr = np.abs(arr[np.isfinite(arr)])
+    return arr[arr > epsilon]
+
+
+def stable_rank_from_singular_values(s: np.ndarray, epsilon: float = 1e-12) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    if arr.size == 0:
+        return 0.0
+    sq = np.square(arr)
+    max_sq = float(np.max(sq))
+    if max_sq <= epsilon:
+        return 0.0
+    return float(np.sum(sq) / max_sq)
+
+
+def pseudo_condition_number_from_singular_values(
+    s: np.ndarray,
+    epsilon: float = 1e-12,
+) -> float:
+    arr = singular_values_clean(s, epsilon=epsilon)
+    if arr.size == 0:
+        return float("inf")
+    return float(np.max(arr) / np.min(arr))
+
+
+def rankme_from_singular_values(
+    s: np.ndarray,
+    epsilon: float = 1e-12,
+    normalize: bool = False,
+    normalizer: int | None = None,
+) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    if arr.size == 0:
+        return 0.0
+    total = float(np.sum(arr))
+    if total <= epsilon:
+        return 0.0
+    p = arr / total
+    p = p[p > 0.0]
+    value = float(np.exp(-float(np.sum(p * np.log(p)))))
+    if normalize:
+        value /= float(normalizer or arr.size)
+    return value
+
+
+def nesum_from_covariance_eigenvalues(
+    eigvals: np.ndarray,
+    epsilon: float = 1e-12,
+) -> float:
+    arr = np.asarray(eigvals, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    arr = arr[arr > epsilon]
+    if arr.size == 0:
+        return 0.0
+    return float(np.sum(arr) / float(np.max(arr)))
+
+
+def nesum_from_singular_values(s: np.ndarray, epsilon: float = 1e-12) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    return nesum_from_covariance_eigenvalues(np.square(arr), epsilon=epsilon)
+
+
+def alpha_req_from_covariance_eigenvalues(
+    eigvals: np.ndarray,
+    epsilon: float = 1e-12,
+) -> float:
+    arr = np.asarray(eigvals, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    arr = arr[arr > epsilon]
+    if arr.size < 2:
+        return 0.0
+    arr = np.sort(arr)[::-1]
+    ranks = np.arange(1, arr.size + 1, dtype=np.float64)
+    slope, _ = np.polyfit(np.log(ranks), np.log(np.maximum(arr, epsilon)), deg=1)
+    return -float(slope)
+
+
+def alpha_req_from_singular_values(s: np.ndarray, epsilon: float = 1e-12) -> float:
+    arr = singular_values_clean(s, epsilon=0.0)
+    return alpha_req_from_covariance_eigenvalues(np.square(arr), epsilon=epsilon)
 
 
 # ============================================================
@@ -392,7 +542,9 @@ def _torch_available_device(requested: str):
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     elif requested_norm == "cuda":
         if not torch.cuda.is_available():
-            raise RuntimeError("Запрошен --device cuda, но torch.cuda.is_available() == False")
+            raise RuntimeError(
+                "Запрошен --device cuda, но torch.cuda.is_available() == False"
+            )
         device_name = "cuda"
     elif requested_norm == "cpu":
         device_name = "cpu"
@@ -473,9 +625,7 @@ def compute_single_metrics_numpy(
                 else:
                     p = s / total
                     p = p[p > 0.0]
-                    values[metric_name] = float(
-                        np.exp(-float(np.sum(p * np.log(p))))
-                    )
+                    values[metric_name] = float(np.exp(-float(np.sum(p * np.log(p)))))
 
         elif metric_name == "nesum":
             if eigvals.size == 0 or float(eigvals[0]) <= epsilon:
@@ -541,7 +691,9 @@ def compute_single_metrics_torch(
         eigvals = torch.linalg.eigvalsh(cov).flip(0)
         eigvals = torch.clamp(eigvals, min=0.0)
         eigvals = eigvals[eigvals > epsilon]
-        artifacts["covariance_eigenvalues"] = eigvals.detach().cpu().numpy().astype(np.float64)
+        artifacts["covariance_eigenvalues"] = (
+            eigvals.detach().cpu().numpy().astype(np.float64)
+        )
     else:
         eigvals = torch.empty((0,), dtype=xt.dtype, device=xt.device)
 
@@ -562,7 +714,9 @@ def compute_single_metrics_torch(
             if s.numel() == 0 or s_pos.numel() == 0:
                 values[metric_name] = float("inf")
             else:
-                values[metric_name] = float((torch.max(s) / torch.min(s_pos)).detach().cpu())
+                values[metric_name] = float(
+                    (torch.max(s) / torch.min(s_pos)).detach().cpu()
+                )
 
         elif metric_name == "coherence":
             rank = int(torch.sum(s > epsilon).detach().cpu())
@@ -589,13 +743,17 @@ def compute_single_metrics_torch(
                 else:
                     p = s / total
                     p = p[p > 0.0]
-                    values[metric_name] = float(torch.exp(-torch.sum(p * torch.log(p))).detach().cpu())
+                    values[metric_name] = float(
+                        torch.exp(-torch.sum(p * torch.log(p))).detach().cpu()
+                    )
 
         elif metric_name == "nesum":
             if eigvals.numel() == 0 or float(eigvals[0].detach().cpu()) <= epsilon:
                 values[metric_name] = 0.0
             else:
-                values[metric_name] = float((torch.sum(eigvals) / eigvals[0]).detach().cpu())
+                values[metric_name] = float(
+                    (torch.sum(eigvals) / eigvals[0]).detach().cpu()
+                )
 
         elif metric_name == "self_cluster":
             n, d = int(xt.shape[0]), int(xt.shape[1])
@@ -664,7 +822,10 @@ def compute_single_metrics(
         except Exception as exc:
             if requested_device.lower() == "cuda":
                 raise
-            print(f"[warn] GPU/torch расчёт не удался ({exc!r}); fallback на numpy/CPU")
+            print(
+                f"[ПРЕДУПРЕЖДЕНИЕ] GPU/torch расчёт не удался ({exc!r}); "
+                "переход на numpy/CPU"
+            )
 
     return compute_single_metrics_numpy(x=x, metric_names=metric_names)
 
@@ -715,7 +876,9 @@ def collect_saved_value_rows(metrics_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def build_metric_output_path(metrics_dir: Path, metric_name: str, model_name: str) -> Path:
+def build_metric_output_path(
+    metrics_dir: Path, metric_name: str, model_name: str
+) -> Path:
     return metrics_dir / metric_name / f"{model_name}.json"
 
 
@@ -750,7 +913,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embeddings_dir",
         type=Path,
-        required=True,
+        default=None,
         help="Папка с файлами эмбеддингов моделей (.npy/.npz/.pt/.pth).",
     )
     parser.add_argument(
@@ -758,7 +921,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_SINGLE_METRICS_ROOT,
         help=(
-            "Корневая папка canonical single-metrics store. "
+            "Корневая папка основного хранилища одиночных метрик. "
             "Результаты пишутся в <out_root>/<dataset_key>/."
         ),
     )
@@ -772,11 +935,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sample_size",
+        type=int,
+        default=0,
+        help="Если >0, читать embeddings из data/embeddings/samples/<dataset_key>_sN_seedS_<sample_strategy>.",
+    )
+    parser.add_argument("--sample_seed", type=int, default=42)
+    parser.add_argument(
+        "--sample_strategy", choices=["stratified", "random"], default="stratified"
+    )
+    parser.add_argument(
         "--out_dir",
         type=Path,
         default=None,
         help=(
-            "Legacy/override: конкретная папка результата. "
+            "Совместимый режим/переопределение: конкретная папка результата. "
             "Если задано, используется вместо <out_root>/<dataset_key>."
         ),
     )
@@ -784,7 +957,7 @@ def parse_args() -> argparse.Namespace:
         "--device",
         type=str,
         default="auto",
-        help="Устройство для расчёта: auto, cuda, cpu или torch device string.",
+        help="Устройство для расчёта: auto, cuda, cpu или строка устройства torch.",
     )
     parser.add_argument(
         "--metrics",
@@ -801,6 +974,12 @@ def parse_args() -> argparse.Namespace:
         ],
         choices=sorted(METRICS.keys()),
         help="Список метрик для вычисления.",
+    )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default="",
+        help="Модели через запятую или псевдоним primary/cpu/snowflake/text20.",
     )
     parser.add_argument(
         "--center",
@@ -828,6 +1007,25 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.embeddings_dir is None:
+        if not args.dataset_key:
+            raise ValueError("Нужно указать либо --embeddings_dir, либо --dataset_key.")
+        if int(args.sample_size) > 0:
+            args.embeddings_dir = infer_sampled_embeddings_dir(
+                args.dataset_key,
+                int(args.sample_size),
+                int(args.sample_seed),
+                str(args.sample_strategy),
+            )
+            args.dataset_key = sampled_dataset_key(
+                args.dataset_key,
+                int(args.sample_size),
+                int(args.sample_seed),
+                str(args.sample_strategy),
+            )
+        else:
+            args.embeddings_dir = infer_embeddings_dir(args.dataset_key)
+
     embeddings_dir: Path = args.embeddings_dir
     metric_names: list[str] = args.metrics
     dataset_key, dataset_dir, metrics_dir, artifacts_dir = resolve_output_layout(args)
@@ -838,6 +1036,16 @@ def main() -> None:
         )
 
     files = discover_embedding_files(embeddings_dir)
+    requested_models = parse_model_names(args.models)
+    if requested_models:
+        by_model = {infer_model_name(path): path for path in files}
+        missing = [name for name in requested_models if name not in by_model]
+        if missing:
+            raise ValueError(
+                f"--models отсутствуют в embeddings_dir: {missing}. "
+                f"Доступные: {sorted(by_model.keys())}"
+            )
+        files = [by_model[name] for name in requested_models]
     dataset_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -866,7 +1074,7 @@ def main() -> None:
     print("============================================================")
     print("ВЫЧИСЛЕНИЕ ОДИНОЧНЫХ МЕТРИК")
     print("============================================================")
-    print(f"Dataset key            : {dataset_key}")
+    print(f"Ключ датасета          : {dataset_key}")
     print(f"Папка эмбеддингов      : {embeddings_dir}")
     print(f"Директория результатов : {dataset_dir}")
     print(f"Папка значений метрик  : {metrics_dir}")

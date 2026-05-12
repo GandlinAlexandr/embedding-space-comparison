@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple, Iterable, Any, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 
-# ВАЖНО: запускаем как модуль: python -m scripts.plot_pairwise_error_heatmaps
+# как модуль: python -m scripts.plot_pairwise_error_heatmaps
 from configs.metric_configs import short_metric_name as _short_metric_name
 
 VALID_PLOT_EXTS = ("png", "pdf", "svg")
@@ -76,7 +76,7 @@ def pretty_metric_name(name: str) -> str:
     if name in single_mapping:
         return single_mapping[name]
 
-    # Pairwise-метрики: делегируем в configs.metric_configs.short_metric_name.
+    # Pairwise-метрики: делегируется в configs.metric_configs.short_metric_name.
     return _short_metric_name(name)
 
 
@@ -147,7 +147,7 @@ def corr_from_vectors(x: np.ndarray, y: np.ndarray, corr_type: str) -> float:
         x_work = rankdata_average(x)
         y_work = rankdata_average(y)
     else:
-        raise ValueError(f"Unknown corr_type: {corr_type}")
+        raise ValueError(f"Неизвестный corr_type: {corr_type}")
 
     zx = zscore_population(x_work)
     zy = zscore_population(y_work)
@@ -218,7 +218,7 @@ def load_downstream_scores(
 
 
 # ============================================================
-# Single metrics loading
+# Загрузка одиночных метрик
 # ============================================================
 
 
@@ -232,7 +232,7 @@ def load_single_metric_scalar(path: Path) -> float:
           ...
         }
 
-    И fallback для npz, если вдруг встретится.
+    И запасной вариант для npz, если вдруг встретится.
     """
     if path.suffix.lower() == ".json":
         obj = load_json(path)
@@ -253,7 +253,7 @@ def load_single_metric_scalar(path: Path) -> float:
                 return float(arr.reshape(-1)[0])
         raise ValueError(f"Не удалось извлечь скаляр из npz: {path}")
 
-    raise ValueError(f"Неподдерживаемый формат single-metric файла: {path}")
+    raise ValueError(f"Неподдерживаемый формат файла одиночной метрики: {path}")
 
 
 def resolve_single_metrics_values_dir(single_metrics_dir: Path) -> Path:
@@ -267,7 +267,7 @@ def collect_single_metric_values(
     single_metrics_dir: Path,
 ) -> Dict[str, Dict[str, float]]:
     """
-    Поддерживается canonical структура:
+    Поддерживается основная структура:
         single_metrics/<dataset_key>/
             metrics/
                 stable_rank/
@@ -277,7 +277,7 @@ def collect_single_metric_values(
             artifacts/
                 resnet18.npz
 
-    И legacy структура:
+    Старая совместимая структура:
         single_metrics/
             stable_rank/
                 resnet18.json
@@ -299,7 +299,7 @@ def collect_single_metric_values(
         raise ValueError(
             f"В {values_dir} не найдено поддиректорий метрик. "
             f"Ожидалась структура <dataset>/metrics/<metric_name>/<model>.json "
-            f"или legacy single_metrics/<metric_name>/<model>.json"
+            f"или старый совместимый формат single_metrics/<metric_name>/<model>.json"
         )
 
     for metric_dir in metric_dirs:
@@ -316,14 +316,14 @@ def collect_single_metric_values(
 
     if not result:
         raise ValueError(
-            f"Не удалось загрузить ни одной single-метрики из {values_dir}"
+            f"Не удалось загрузить ни одной одиночной метрики из {values_dir}"
         )
 
     return result
 
 
 # ============================================================
-# Pairwise metrics loading
+# Загрузка попарных метрик
 # ============================================================
 
 
@@ -449,7 +449,7 @@ def ordered_models(
 
 
 # ============================================================
-# Pairwise matrices
+# Попарные матрицы
 # ============================================================
 
 
@@ -470,7 +470,7 @@ def build_pairwise_matrix(
             elif protocol == "abs":
                 mat[i, j] = abs(diff)
             else:
-                raise ValueError(f"Unknown protocol: {protocol}")
+                raise ValueError(f"Неизвестный protocol: {protocol}")
 
     return mat
 
@@ -522,7 +522,7 @@ def enforce_matrix_protocol(mat: np.ndarray, protocol: str) -> np.ndarray:
         sym = (mat + mat.T) / 2.0
         return np.abs(sym)
     else:
-        raise ValueError(f"Unknown protocol: {protocol}")
+        raise ValueError(f"Неизвестный protocol: {protocol}")
 
 
 # ============================================================
@@ -572,7 +572,7 @@ def iter_family_subset_pairs(
                 if fi == fam_a and fj == fam_b:
                     yield i, j
     else:
-        raise ValueError(f"Unknown protocol: {protocol}")
+        raise ValueError(f"Неизвестный protocol: {protocol}")
 
 
 def compute_family_subset_matrices(
@@ -657,7 +657,7 @@ def compute_global_corr(
                     xs.append(float(mv))
                     ys.append(float(tv))
     else:
-        raise ValueError(f"Unknown protocol: {protocol}")
+        raise ValueError(f"Неизвестный protocol: {protocol}")
 
     x, y = finite_pair_arrays(xs, ys)
     return corr_from_vectors(x, y, corr_type=corr_type), int(len(x))
@@ -714,7 +714,7 @@ def compute_leave_one_family_out(
                         xs.append(float(mv))
                         ys.append(float(tv))
         else:
-            raise ValueError(f"Unknown protocol: {protocol}")
+            raise ValueError(f"Неизвестный protocol: {protocol}")
 
         x, y = finite_pair_arrays(xs, ys)
         corr_wo = corr_from_vectors(x, y, corr_type=corr_type)
@@ -1044,10 +1044,7 @@ def save_family_correlation_grid(
 
     fig = plt.figure(figsize=(5.8 * NCOLS + 1.2, total_h))
 
-    # Нормируем высоты строк в figure-координатах
     fig_h = total_h
-    # Вертикальные позиции секций (сверху вниз, в figure-координатах)
-    # suptitle занимает sup_h сверху
     single_top = 1.0 - sup_h / fig_h
     single_sec_h_frac = sec_h / fig_h
     single_grid_h_frac = (s_rows * row_h) / fig_h
@@ -1066,7 +1063,7 @@ def save_family_correlation_grid(
         fontstyle="italic",
     )
 
-    # --- Single grid ---
+    # Single grid
     s_axes = np.array(
         [
             fig.add_axes(
@@ -1101,7 +1098,7 @@ def save_family_correlation_grid(
         protocol=protocol,
     )
 
-    # --- Section label: pairwise ---
+    # Section label: pairwise
     fig.text(
         0.01,
         pairwise_top - pairwise_sec_h_frac / 2,
@@ -1112,7 +1109,7 @@ def save_family_correlation_grid(
         fontstyle="italic",
     )
 
-    # --- Pairwise grid ---
+    # Pairwise grid
     p_axes = np.array(
         [
             fig.add_axes(
@@ -1379,7 +1376,7 @@ def _fill_loo_axes(
         ax.axhline(0.0, linestyle="--", linewidth=1.0)
         ax.set_xticks(x)
         ax.set_xticklabels(families, rotation=40, ha="right")
-        ax.set_ylabel("corr_without − corr_full", fontsize=8)
+        ax.set_ylabel("corr_без_семейства − corr_полная", fontsize=8)
         ax.set_title(pretty_metric_name(metric_name))
 
 
@@ -1462,7 +1459,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Строит family-wise heatmap'ы корреляции: "
             "для каждой пары семейств (family_a, family_b) считает корреляцию "
-            "между значениями метрики и target на соответствующем подмножестве пар."
+            "между значениями метрики и целевой величиной на соответствующем подмножестве пар."
         )
     )
     parser.add_argument("--downstream_json", type=Path, required=True)
@@ -1474,8 +1471,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Папка canonical data/single_metrics/<dataset_key> "
-            "или legacy single_metrics/<metric>/<model>.json"
+            "Папка основного формата data/single_metrics/<dataset_key> "
+            "или старого совместимого формата single_metrics/<metric>/<model>.json"
         ),
     )
     parser.add_argument(
@@ -1489,19 +1486,19 @@ def parse_args() -> argparse.Namespace:
         "--protocol",
         choices=["signed", "abs"],
         default="abs",
-        help="signed -> Δu vs Δacc, abs -> |Δu| vs |Δacc|",
+        help="signed -> Δu против Δacc, abs -> |Δu| против |Δacc|",
     )
     parser.add_argument(
         "--corr_type",
         choices=["spearman", "pearson"],
         default="spearman",
-        help="Какую корреляцию считать внутри family-subset",
+        help="Какую корреляцию считать внутри поднабора семейства",
     )
     parser.add_argument(
         "--task_name",
         type=str,
         default="main",
-        help="Какой task брать из downstream_json формата {model: {task: score}}",
+        help="Какую задачу брать из downstream_json формата {model: {task: score}}",
     )
     parser.add_argument(
         "--model_order",
@@ -1524,12 +1521,12 @@ def parse_args() -> argparse.Namespace:
         "--min_pairs",
         type=int,
         default=3,
-        help="Минимальное число пар для вычисления subset correlation",
+        help="Минимальное число пар для вычисления корреляции поднабора",
     )
     parser.add_argument(
         "--skip_leave_one_family_out",
         action="store_true",
-        help="Не считать leave-one-family-out summary",
+        help="Не считать сводку с исключением одного семейства",
     )
     parser.add_argument(
         "--plots_ext",
@@ -1623,9 +1620,9 @@ def main() -> None:
     count_ref: np.ndarray | None = None
     families_ref: List[str] | None = None
 
-    # --------------------------------------------------------
+    # ============================================================
     # Single metrics
-    # --------------------------------------------------------
+    # ============================================================
     for metric_name, metric_values in sorted(single_metrics.items()):
         metric_models = [m for m in models if m in metric_values]
         if len(metric_models) < 2:
@@ -1711,9 +1708,9 @@ def main() -> None:
                     }
                 )
 
-    # --------------------------------------------------------
+    # ============================================================
     # Pairwise metrics
-    # --------------------------------------------------------
+    # ============================================================
     for metric_name, spec in sorted(pairwise_metrics.items()):
         src_models = spec["model_names"]
         src_mat = spec["matrix"]
@@ -1730,7 +1727,7 @@ def main() -> None:
             models_dst=models,
         )
 
-        # Приводим загруженную матрицу к протоколу без пересчёта из скалярных значений.
+        # Приводит загруженную матрицу к протоколу без пересчёта из скалярных значений.
         # signed -> антисимметризация (m[i,j] = -m[j,i])
         # abs    -> симметризация + |·|  (m[i,j] = m[j,i] >= 0)
         metric_mat = enforce_matrix_protocol(metric_mat, args.protocol)
@@ -1821,9 +1818,9 @@ def main() -> None:
     assert target_mean_ref is not None
     assert count_ref is not None
 
-    # --------------------------------------------------------
+    # ============================================================
     # Save target / count heatmaps
-    # --------------------------------------------------------
+    # ============================================================
     target_plot = args.out_dir / (
         "family_target_mean_signed.png"
         if args.protocol == "signed"
@@ -1854,9 +1851,9 @@ def main() -> None:
         plots_exts=args.plots_ext,
     )
 
-    # --------------------------------------------------------
+    # ============================================================
     # Save main correlation grid
-    # --------------------------------------------------------
+    # ============================================================
     corr_plot = (
         args.out_dir
         / f"family_subset_correlations_{args.corr_type}_{args.protocol}.png"
@@ -1876,9 +1873,9 @@ def main() -> None:
         plots_exts=args.plots_ext,
     )
 
-    # --------------------------------------------------------
+    # ============================================================
     # Save CSVs
-    # --------------------------------------------------------
+    # ============================================================
     global_csv = (
         args.out_dir
         / f"family_subset_global_summary_{args.corr_type}_{args.protocol}.csv"
@@ -1890,9 +1887,9 @@ def main() -> None:
     )
     save_family_summary_csv(family_csv, family_rows)
 
-    # --------------------------------------------------------
+    # ============================================================
     # Leave-one-family-out
-    # --------------------------------------------------------
+    # ============================================================
     loo_csv = None
     loo_plot = None
 
@@ -1914,7 +1911,7 @@ def main() -> None:
             plots_exts=args.plots_ext,
         )
 
-    print("Saved:")
+    print("Сохранено:")
     for save_path in iter_plot_paths(target_plot, args.plots_ext):
         print(f"  - {save_path}")
     for save_path in iter_plot_paths(count_plot, args.plots_ext):

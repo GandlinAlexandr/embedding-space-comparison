@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# ВАЖНО: запускаем как модуль: python -m scripts.plot_single_metric_summary
-from configs.metric_configs import short_metric_name as short_pairwise_name
+# запускается как модуль: python -m scripts.plot_single_metric_summary
+from configs.plot_labels import display_dataset_name, display_metric_name
 
 
 # ============================================================
-# Utils
+# Вспомогательные функции
 # ============================================================
 
 
@@ -89,7 +89,7 @@ def target_label(protocol: str) -> str:
 
 
 def pairwise_corr_label(protocol: str) -> str:
-    return f"corr(metric(e₁, e₂), {target_label(protocol)})"
+    return f"corr(попарная метрика(e₁, e₂), {target_label(protocol)})"
 
 
 def single_corr_label(protocol: str) -> str:
@@ -104,9 +104,10 @@ def build_title_prefix(base_title: str, protocol: str) -> str:
     # Если пользователь уже явно указал нужную цель в title,
     # не дублируем её второй раз.
     tgt = target_label(protocol)
-    if tgt in base_title:
-        return base_title
-    return f"{base_title} | {tgt}"
+    title = display_dataset_name(base_title)
+    if tgt in title:
+        return title
+    return f"{title} | {tgt}"
 
 
 # ============================================================
@@ -115,22 +116,11 @@ def build_title_prefix(base_title: str, protocol: str) -> str:
 
 
 def short_single_name(metric_name: str) -> str:
-    mapping = {
-        "pseudo_condition_number": "pseudo_cond",
-        "rankme": "rankme",
-        "coherence": "coherence",
-        "stable_rank": "stable_rank",
-        "nesum": "nesum",
-        "self_cluster": "self_cluster",
-        "alpha_req": "alpha_req",
-    }
-    return mapping.get(metric_name, metric_name)
+    return display_metric_name(metric_name)
 
 
 # ============================================================
 # Load pairwise table
-# pairwise CSV from run_evaluate_metrics.py:
-# metric_file, spearman_mean, pearson_mean, kendall_mean, ...
 # ============================================================
 
 
@@ -145,7 +135,7 @@ def load_pairwise_table(pairwise_csv: Path) -> pd.DataFrame:
     out = pd.DataFrame(
         {
             "pairwise_metric_file": df["metric_file"].astype(str),
-            "pairwise_metric": df["metric_file"].astype(str).map(short_pairwise_name),
+            "pairwise_metric": df["metric_file"].astype(str).map(display_metric_name),
             "pairwise_spearman": pd.to_numeric(df["spearman_mean"], errors="coerce"),
             "pairwise_pearson": pd.to_numeric(df["pearson_mean"], errors="coerce"),
             "pairwise_kendall": pd.to_numeric(df["kendall_mean"], errors="coerce"),
@@ -166,8 +156,6 @@ def load_pairwise_table(pairwise_csv: Path) -> pd.DataFrame:
 
 # ============================================================
 # Load single table
-# single CSV from run_evaluate_single_metrics.py:
-# metric_name, protocol, task, spearman, pearson, kendall, ...
 # ============================================================
 
 
@@ -340,7 +328,7 @@ def plot_pairwise_only(
         l1="Spearman",
         l2="Pearson",
         l3="Kendall",
-        title=f"{title_prefix} | pairwise only",
+        title=f"{title_prefix} | только попарные метрики",
         ylabel=pairwise_corr_label(protocol),
         out_path=out_dir / "pairwise_only_all.png",
         plots_exts=plots_exts,
@@ -364,7 +352,7 @@ def plot_single_only(
         l1="Spearman",
         l2="Pearson",
         l3="Kendall",
-        title=f"{title_prefix} | single-diff only",
+        title=f"{title_prefix} | только разности одиночных метрик",
         ylabel=single_corr_label(protocol),
         out_path=out_dir / "single_diff_only_all.png",
         plots_exts=plots_exts,
@@ -393,7 +381,7 @@ def plot_best_pairwise_vs_single(
         single_vals=best_vs_single_df["single_spearman"].to_numpy(dtype=np.float64),
         pairwise_label=pairwise_label,
         single_label=single_label,
-        title=f"{title_prefix} | Spearman | best pairwise = {best_sp_name}",
+        title=f"{title_prefix} | Spearman | лучшая попарная = {best_sp_name}",
         ylabel="корреляция",
         out_path=out_dir / "best_pairwise_vs_single_spearman.png",
         plots_exts=plots_exts,
@@ -405,7 +393,7 @@ def plot_best_pairwise_vs_single(
         single_vals=best_vs_single_df["single_pearson"].to_numpy(dtype=np.float64),
         pairwise_label=pairwise_label,
         single_label=single_label,
-        title=f"{title_prefix} | Pearson | best pairwise = {best_pe_name}",
+        title=f"{title_prefix} | Pearson | лучшая попарная = {best_pe_name}",
         ylabel="корреляция",
         out_path=out_dir / "best_pairwise_vs_single_pearson.png",
         plots_exts=plots_exts,
@@ -417,7 +405,7 @@ def plot_best_pairwise_vs_single(
         single_vals=best_vs_single_df["single_kendall"].to_numpy(dtype=np.float64),
         pairwise_label=pairwise_label,
         single_label=single_label,
-        title=f"{title_prefix} | Kendall | best pairwise = {best_ke_name}",
+        title=f"{title_prefix} | Kendall | лучшая попарная = {best_ke_name}",
         ylabel="корреляция",
         out_path=out_dir / "best_pairwise_vs_single_kendall.png",
         plots_exts=plots_exts,
@@ -431,7 +419,7 @@ def plot_best_pairwise_vs_single(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Нормальные графики для pairwise-метрик и single-diff baseline."
+        description="Графики для попарных метрик и базовых разностей одиночных метрик."
     )
 
     parser.add_argument(
@@ -453,7 +441,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         choices=["signed", "abs"],
-        help="Какой protocol брать из single_eval_csv.",
+        help="Какой протокол брать из single_eval_csv.",
     )
 
     parser.add_argument(
@@ -480,21 +468,21 @@ def parse_args() -> argparse.Namespace:
         "--save_pairwise_table_csv",
         type=Path,
         default=None,
-        help="Необязательный путь для сохранения таблицы pairwise-only.",
+        help="Необязательный путь для сохранения таблицы только с попарными метриками.",
     )
 
     parser.add_argument(
         "--save_single_table_csv",
         type=Path,
         default=None,
-        help="Необязательный путь для сохранения таблицы single-only.",
+        help="Необязательный путь для сохранения таблицы только с одиночными метриками.",
     )
 
     parser.add_argument(
         "--save_best_comparison_csv",
         type=Path,
         default=None,
-        help="Необязательный путь для сохранения таблицы best-pairwise-vs-single.",
+        help="Необязательный путь для сохранения таблицы сравнения лучших попарных метрик с одиночными.",
     )
 
     return parser.parse_args()
@@ -533,14 +521,14 @@ def main() -> None:
         )
 
     print("============================================================")
-    print("ПОСТРОЕНИЕ ГРАФИКОВ ДЛЯ PAIRWISE И SINGLE-DIFF")
+    print("ПОСТРОЕНИЕ ГРАФИКОВ ДЛЯ ПОПАРНЫХ И ОДИНОЧНЫХ МЕТРИК")
     print("============================================================")
-    print(f"Pairwise CSV       : {args.pairwise_eval_csv}")
-    print(f"Single CSV         : {args.single_eval_csv}")
-    print(f"Single protocol    : {args.single_protocol}")
-    print(f"Target label       : {target_label(args.single_protocol)}")
-    print(f"Pairwise metrics   : {len(pairwise_df)}")
-    print(f"Baseline metrics   : {len(single_df)}")
+    print(f"CSV попарных метрик: {args.pairwise_eval_csv}")
+    print(f"CSV одиночных      : {args.single_eval_csv}")
+    print(f"Протокол одиночных : {args.single_protocol}")
+    print(f"Целевая подпись    : {target_label(args.single_protocol)}")
+    print(f"Попарных метрик    : {len(pairwise_df)}")
+    print(f"Базовых метрик     : {len(single_df)}")
     print(f"Папка вывода       : {args.out_dir}")
     print("============================================================")
 

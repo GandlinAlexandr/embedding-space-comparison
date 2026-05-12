@@ -1,53 +1,3 @@
-"""
-run_diagnose_local_map.py
-
-Диагностика метода локальных линейных отображений между эмбеддингами.
-
-Читает артефакты, сохранённые run_compute_embedding_metrics.py
-({metric_name}_artifacts.npz), и строит диагностические графики и статистику.
-
-Проверяемые гипотезы (по заданию):
-  1. Ошибка решения линейного уравнения (residual):
-       насколько хорошо линейное приближение работает в каждой точке.
-       Поддерживаются два режима:
-         - legacy residual из main, который дополнительно нормируется в diagnose-скрипте;
-         - relative_residuals из новых артефактов:
-             mean(|Xc @ M - Yc|) / mean(|Yc|)
-       то есть показывает, на сколько процентов отображение искажает координаты Y.
-  2. Вырожденность отображений:
-       для скольких центров оба направления (X->Y и Y->X) одновременно вырождены.
-       По гипотезе таких точек должно быть мало.
-  3. Стабильность ранга:
-       гистограмма рангов по всем центрам, дисперсия ранга.
-       Высокая дисперсия — сигнал шумного решения.
-
-Режимы работы:
-  - Сводный (--artifacts_dir): сравнение всех метрик между собой на одном графике.
-  - Агрегированный (--artifacts_path): статистика и графики по всем парам одной метрики.
-  - Детальный (--artifacts_path + --model_a + --model_b): графики для одной конкретной пары.
-
-Запуск:
-  # Сводный график по всем метрикам сразу:
-  python -m scripts.run_diagnose_local_map \\
-      --artifacts_dir metric_matrices/ \\
-      --out_dir diagnostics/ \\
-      --downstream_json data/downstream/food101_mlp.json \\
-      --downstream_task food101_mlp
-
-  # Агрегированная диагностика по одной метрике:
-  python -m scripts.run_diagnose_local_map \\
-      --artifacts_path metric_matrices/directed_k10_artifacts.npz \\
-      --out_dir diagnostics/ \\
-      --downstream_json data/downstream/food101_mlp.json \\
-      --downstream_task food101_mlp
-
-  # Детально по одной паре:
-  python -m scripts.run_diagnose_local_map \\
-      --artifacts_path metric_matrices/lin_k10_artifacts.npz \\
-      --model_a resnet50 --model_b vit_b16 \\
-      --out_dir diagnostics/
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -58,10 +8,12 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 
-# ВАЖНО: запускаем как модуль: python -m scripts.run_diagnose_local_map
+# ВАЖНО: запускает как модуль: python -m scripts.run_diagnose_local_map
 from configs.metric_configs import short_metric_name, get_embedding_metric_configs
+from configs.plot_labels import display_dataset_name, display_metric_name
 
 VALID_PLOT_EXTS = ("png", "pdf", "svg")
 
@@ -135,6 +87,190 @@ def _model_family(model_name: str) -> str:
     return "other"
 
 
+def _family_display_name(name: str) -> str:
+    mapping = {
+        "resnet": "ResNet",
+        "vgg": "VGG",
+        "vit": "ViT",
+        "other": "Other",
+    }
+    return mapping.get(str(name), str(name))
+
+
+def _family_block_display_name(block: str) -> str:
+    return "--".join(_family_display_name(part) for part in str(block).split("-"))
+
+
+def _family_block_short_display_name(block: str) -> str:
+    mapping = {
+        "resnet": "R",
+        "vgg": "VGG",
+        "vit": "ViT",
+        "other": "Other",
+    }
+    return "--".join(
+        mapping.get(str(part), str(part)) for part in str(block).split("-")
+    )
+
+
+def _subset_display_name(name: str) -> str:
+    mapping = {
+        "all": "Все",
+        "no_vit": "Без ViT",
+        "vit_only": "Только ViT",
+        "no_swag": "Без SWAG",
+        "no_resnet": "Без ResNet",
+        "no_vgg": "Без VGG",
+    }
+    return mapping.get(str(name), str(name))
+
+
+def _model_display_name(name: str, max_len: int = 34) -> str:
+    text = str(name)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _infer_dataset_name_from_path(path: str) -> str:
+    parts = [p for p in os.path.normpath(str(path)).split(os.sep) if p]
+    for part in reversed(parts):
+        lower = part.lower()
+        if (
+            lower.endswith("_test")
+            or lower.endswith("_train")
+            or lower.endswith("_val")
+        ):
+            return display_dataset_name(part)
+        if lower in {
+            "cifar10",
+            "cifar100",
+            "food101",
+            "sun397",
+            "ag_news",
+            "banking77",
+            "emotion",
+            "stl10",
+        }:
+            return display_dataset_name(part)
+    return ""
+
+
+def _display_model_name(model_name: str) -> str:
+    """Readable model names for dense diagnostic tick labels."""
+    name = str(model_name)
+    known = {
+        "resnet18": "ResNet-18",
+        "resnet34": "ResNet-34",
+        "resnet50": "ResNet-50",
+        "resnet50_v2": "ResNet-50 v2",
+        "resnet101": "ResNet-101",
+        "resnet101_v2": "ResNet-101 v2",
+        "wide_resnet50_2": "WRN-50-2",
+        "wide_resnet50_2_v2": "WRN-50-2 v2",
+        "wide_resnet101_2": "WRN-101-2",
+        "wide_resnet101_2_v2": "WRN-101-2 v2",
+        "vgg11": "VGG-11",
+        "vgg13": "VGG-13",
+        "vgg16": "VGG-16",
+        "vgg19": "VGG-19",
+        "vit_b_16": "ViT-B/16",
+        "vit_b_32": "ViT-B/32",
+        "vit_l_16": "ViT-L/16",
+        "vit_l_32": "ViT-L/32",
+        "vit_b_16_swag_e2e": "ViT-B/16 SWAG e2e",
+        "vit_b_16_swag_linear": "ViT-B/16 SWAG lin",
+        "vit_l_16_swag_linear": "ViT-L/16 SWAG lin",
+    }
+    if name in known:
+        return known[name]
+
+    pretty = name.replace("st_", "ST ")
+    pretty = pretty.replace("_", " ")
+    pretty = pretty.replace(" minilm ", " MiniLM ")
+    pretty = pretty.replace(" mpnet ", " MPNet ")
+    pretty = pretty.replace(" bge ", " BGE ")
+    pretty = pretty.replace(" e5 ", " E5 ")
+    pretty = " ".join(
+        part if len(part) <= 18 else part[:17] + "." for part in pretty.split()
+    )
+    return pretty
+
+
+def _compact_model_name(model_name: str) -> str:
+    """Very short labels for plots with dozens of pair ticks."""
+    name = str(model_name)
+    known = {
+        "resnet18": "R18",
+        "resnet34": "R34",
+        "resnet50": "R50",
+        "resnet50_v2": "R50v2",
+        "resnet101": "R101",
+        "resnet101_v2": "R101v2",
+        "wide_resnet50_2": "W50",
+        "wide_resnet50_2_v2": "W50v2",
+        "wide_resnet101_2": "W101",
+        "wide_resnet101_2_v2": "W101v2",
+        "vgg11": "VGG11",
+        "vgg13": "VGG13",
+        "vgg16": "VGG16",
+        "vgg19": "VGG19",
+        "vit_b_16": "B16",
+        "vit_b_32": "B32",
+        "vit_l_16": "L16",
+        "vit_l_32": "L32",
+        "vit_b_16_swag_e2e": "B16-SWAG",
+        "vit_b_16_swag_linear": "B16-SL",
+        "vit_l_16_swag_linear": "L16-SL",
+    }
+    if name in known:
+        return known[name]
+
+    compact = name
+    compact = compact.replace("sentence_transformers_", "ST_")
+    compact = compact.replace("st_", "ST_")
+    compact = compact.replace("snowflake_arctic_embed_", "snow_")
+    compact = compact.replace("multilingual_e5_", "mE5_")
+    compact = compact.replace("_base", "B")
+    compact = compact.replace("_large", "L")
+    compact = compact.replace("_small", "S")
+    compact = compact.replace("_", "-")
+    return compact if len(compact) <= 18 else compact[:17] + "."
+
+
+def _direction_tick_label(model_i: str, model_j: str) -> str:
+    return f"{_compact_model_name(model_i)}→{_compact_model_name(model_j)}"
+
+
+def _pair_tick_label(model_i: str, model_j: str) -> str:
+    return f"{_compact_model_name(model_i)}↔{_compact_model_name(model_j)}"
+
+
+def _diagnostic_metric_label(metric_name: str) -> str:
+    """Publication-friendly metric labels for summary diagnostics."""
+    return display_metric_name(short_metric_name(metric_name))
+
+
+_N_SYS_MATH = r"N_{\mathrm{sys}}"
+
+
+def _rank_reference_math_label(label: str) -> str:
+    raw = str(label or "rank")
+    low = raw.lower()
+    if low == "rankme":
+        return r"\mathrm{RankMe}"
+    if low in {"rank", "hard rank"}:
+        return r"\mathrm{rank}"
+    escaped = raw.replace("\\", "")
+    escaped = escaped.replace("_", r"\_")
+    escaped = escaped.replace(" ", r"\ ")
+    return rf"\mathrm{{{escaped}}}"
+
+
+def _system_margin_math_label(rank_ref_label: str) -> str:
+    return rf"${_N_SYS_MATH} - {_rank_reference_math_label(rank_ref_label)}$"
+
+
 def _rankdata(values: Iterable[float]) -> np.ndarray:
     arr = np.asarray(list(values), dtype=np.float64)
     order = np.argsort(arr)
@@ -201,7 +337,6 @@ def _load_downstream_scores(path: str, task_name: str = "") -> Dict[str, float]:
 # 1) Загрузка артефактов
 # ============================================================
 
-# Пороги по умолчанию — можно переопределить через --degenerate_threshold в CLI.
 DEGENERATE_SV_THRESHOLD_DEFAULT = 1e-6
 DEGENERATE_MAP_THRESHOLD_DEFAULT = 1e-6
 
@@ -218,9 +353,7 @@ def _local_id_artifacts_path(main_artifacts_path: str) -> str:
     if not main_artifacts_path.endswith("_artifacts.npz"):
         base, _ = os.path.splitext(main_artifacts_path)
         return f"{base}_local_id_artifacts.npz"
-    return main_artifacts_path.replace(
-        "_artifacts.npz", "_local_id_artifacts.npz"
-    )
+    return main_artifacts_path.replace("_artifacts.npz", "_local_id_artifacts.npz")
 
 
 def _load_optional_local_id_artifacts(
@@ -245,7 +378,7 @@ def _parse_direction_key(key: str) -> Optional[Tuple[str, str]]:
     # Разбиваем только по первому вхождению '_to_', чтобы не сломать имена моделей с '_to_'.
     idx = direction.index("_to_")
     model_i = direction[:idx]
-    model_j = direction[idx + 4:]
+    model_j = direction[idx + 4 :]
     return model_i, model_j
 
 
@@ -285,7 +418,9 @@ def _get_direction_data(
 
     rank_field = str(meta.get("preferred_rank_field", ""))
     if not rank_field or f"{prefix}/{rank_field}" not in artifacts:
-        rank_field = "metric_ranks" if f"{prefix}/metric_ranks" in artifacts else "ranks"
+        rank_field = (
+            "metric_ranks" if f"{prefix}/metric_ranks" in artifacts else "ranks"
+        )
 
     sv = artifacts[f"{prefix}/singular_values"]
     res = artifacts[f"{prefix}/{residual_field}"]
@@ -325,8 +460,13 @@ def _get_direction_rank_reference(
     metric_values: np.ndarray,
 ) -> Tuple[np.ndarray, str]:
     if _uses_metric_values_as_rank_reference(artifacts):
-        return metric_values, _metric_value_short_label(_load_diagnostics_labels(artifacts))
-    return _get_direction_hard_ranks(artifacts, model_i, model_j), _hard_rank_short_label()
+        return metric_values, _metric_value_short_label(
+            _load_diagnostics_labels(artifacts)
+        )
+    return (
+        _get_direction_hard_ranks(artifacts, model_i, model_j),
+        _hard_rank_short_label(),
+    )
 
 
 def _direction_uses_relative_residuals(
@@ -392,7 +532,9 @@ def _get_direction_extra_data(
         sigma_values=_get_optional_direction_array(
             artifacts, model_i, model_j, "sigma_values"
         ),
-        eps_values=_get_optional_direction_array(artifacts, model_i, model_j, "eps_values"),
+        eps_values=_get_optional_direction_array(
+            artifacts, model_i, model_j, "eps_values"
+        ),
         sample_weights=_get_optional_direction_array(
             artifacts, model_i, model_j, "sample_weights"
         ),
@@ -527,7 +669,6 @@ def _load_diagnostics_labels(artifacts: Dict[str, np.ndarray]) -> Dict[str, str]
     if not meta:
         return dict(_FALLBACK_LABELS)
 
-    # Подставляем только известные ключи; остальное берём из fallback.
     labels = dict(_FALLBACK_LABELS)
     for key in _FALLBACK_LABELS:
         if key in meta and isinstance(meta[key], str):
@@ -547,7 +688,9 @@ def _normalized_residual_short_label(normalized: bool) -> str:
 
 def _summary_residual_axis_label(all_normalized: bool) -> str:
     if all_normalized:
-        return r"Средний normalized residual $\|X_c M - Y_c\|_F / \sqrt{N_{\mathrm{eff}}}$"
+        return (
+            r"Средний normalized residual $\|X_c M - Y_c\|_F / \sqrt{N_{\mathrm{eff}}}$"
+        )
     return r"Средний residual / normalized residual"
 
 
@@ -947,8 +1090,8 @@ def _plot_single_pair(
             else "Ошибка по направлениям"
         )
 
-    label_ij = f"{model_i} → {model_j}"
-    label_ji = f"{model_j} → {model_i}"
+    label_ij = f"{_display_model_name(model_i)} → {_display_model_name(model_j)}"
+    label_ji = f"{_display_model_name(model_j)} → {_display_model_name(model_i)}"
 
     n_centers = len(ranks_ij)
 
@@ -964,7 +1107,11 @@ def _plot_single_pair(
     ax = axes[0, 0]
     ax.hist(ranks_ij, bins="auto", alpha=0.6, label=label_ij, color="steelblue")
     ax.hist(ranks_ji, bins="auto", alpha=0.6, label=label_ji, color="coral")
-    ax.set_xlabel(_metric_value_axis_label(labels) if use_metric_ranks else _hard_rank_axis_label())
+    ax.set_xlabel(
+        _metric_value_axis_label(labels)
+        if use_metric_ranks
+        else _hard_rank_axis_label()
+    )
     ax.set_ylabel("Количество центров")
     ax.set_title("Гистограмма значений метрики по направлениям")
     ax.legend(fontsize=8)
@@ -1031,7 +1178,11 @@ def _plot_single_pair(
             f"{stats_ij['rank_mean']:.2f}",
             f"{stats_ji['rank_mean']:.2f}",
         ],
-        [f"{_metric_value_short_label(labels)} (std)", f"{stats_ij['rank_std']:.2f}", f"{stats_ji['rank_std']:.2f}"],
+        [
+            f"{_metric_value_short_label(labels)} (std)",
+            f"{stats_ij['rank_std']:.2f}",
+            f"{stats_ji['rank_std']:.2f}",
+        ],
         [
             f"{_metric_value_short_label(labels)} (min/max)",
             f"{stats_ij['rank_min']:.2f}/{stats_ij['rank_max']:.2f}",
@@ -1068,7 +1219,7 @@ def _plot_single_pair(
     ):
         table_data.append(
             [
-                "N_sys (mean)",
+                r"$N_{\mathrm{sys}}$ (mean)",
                 f"{det_stats_ij['point_count_mean']:.2f}",
                 f"{det_stats_ji['point_count_mean']:.2f}",
             ]
@@ -1078,7 +1229,7 @@ def _plot_single_pair(
     ):
         table_data.append(
             [
-                f"N_sys-{rank_ref_label}",
+                _system_margin_math_label(rank_ref_label),
                 f"{det_stats_ij['margin_mean']:.2f}",
                 f"{det_stats_ji['margin_mean']:.2f}",
             ]
@@ -1088,7 +1239,7 @@ def _plot_single_pair(
     ):
         table_data.append(
             [
-                "N_sys>rank",
+                rf"${_N_SYS_MATH} > {_rank_reference_math_label(rank_ref_label)}$",
                 f"{det_stats_ij['overdetermined_frac']:.1%}",
                 f"{det_stats_ji['overdetermined_frac']:.1%}",
             ]
@@ -1133,7 +1284,9 @@ def _plot_single_pair(
                 f"{extra_stats_ji['neighbor_distance_mean']:.2e}",
             ]
         )
-    if np.isfinite(extra_stats_ij["sigma_mean"]) or np.isfinite(extra_stats_ji["sigma_mean"]):
+    if np.isfinite(extra_stats_ij["sigma_mean"]) or np.isfinite(
+        extra_stats_ji["sigma_mean"]
+    ):
         table_data.append(
             [
                 "Sigma (mean)",
@@ -1141,7 +1294,9 @@ def _plot_single_pair(
                 f"{extra_stats_ji['sigma_mean']:.2e}",
             ]
         )
-    if np.isfinite(extra_stats_ij["eps_mean"]) or np.isfinite(extra_stats_ji["eps_mean"]):
+    if np.isfinite(extra_stats_ij["eps_mean"]) or np.isfinite(
+        extra_stats_ji["eps_mean"]
+    ):
         table_data.append(
             [
                 "Eps (mean)",
@@ -1292,7 +1447,9 @@ def _plot_aggregated(
         _direction_uses_metric_ranks(artifacts, directions[0][0], directions[0][1])
     )
     use_relative_residuals = bool(
-        _direction_uses_relative_residuals(artifacts, directions[0][0], directions[0][1])
+        _direction_uses_relative_residuals(
+            artifacts, directions[0][0], directions[0][1]
+        )
     )
 
     for mi, mj in directions:
@@ -1315,7 +1472,7 @@ def _plot_aggregated(
         rank_means.append(stats["rank_mean"])
         rank_stds.append(stats["rank_std"])
         rank_reference_means.append(_safe_mean(rank_ref))
-        direction_labels.append(f"{mi[:10]}→{mj[:10]}")
+        direction_labels.append(_direction_tick_label(mi, mj))
         direction_is_forward.append(mi <= mj)
         normalized_flags.append(is_normalized)
         direction_stats[(mi, mj)] = {
@@ -1333,7 +1490,7 @@ def _plot_aggregated(
     )
     n_centers_per_direction = len(_ranks_first)
 
-    fig, axes_full = plt.subplots(3, 2, figsize=(14, 15))
+    fig, axes_full = plt.subplots(3, 2, figsize=(18, 16))
     axes = axes_full[:2, :]
     diff_ax = axes_full[2, 0]
     unused_ax = axes_full[2, 1]
@@ -1363,7 +1520,11 @@ def _plot_aggregated(
         linewidth=1.5,
         label=f"медиана={np.median(all_ranks):.2f}",
     )
-    ax.set_xlabel(_metric_value_axis_label(labels) if use_metric_ranks else _hard_rank_axis_label())
+    ax.set_xlabel(
+        _metric_value_axis_label(labels)
+        if use_metric_ranks
+        else _hard_rank_axis_label()
+    )
     ax.set_ylabel("Количество центров (все пары)")
     ax.set_title(
         f"Гистограмма значений метрики (X→Y и Y→X)\nstd={np.std(all_ranks):.3f}, медиана={np.median(all_ranks):.2f}"
@@ -1414,7 +1575,9 @@ def _plot_aggregated(
     direction_is_forward_arr = np.asarray(direction_is_forward, dtype=bool)
     finite_metric = np.isfinite(rank_means_arr)
     ax.set_xticks(x)
-    ax.set_xticklabels(direction_labels, rotation=45, ha="right", fontsize=7)
+    ax.set_xticklabels(direction_labels, rotation=90, ha="center", fontsize=6)
+    ax.tick_params(axis="x", pad=3)
+    ax.set_xlabel("Направленная пара моделей")
     ax.set_ylabel(f"Среднее {_metric_value_short_label(labels)} по центрам")
     ax.set_title("Значение метрики по направлениям (X→Y и Y→X)")
     ax.grid(True, alpha=0.3, axis="y")
@@ -1465,14 +1628,25 @@ def _plot_aggregated(
     finite_rank = np.isfinite(rank_reference_means)
     if np.any(finite_margin) or np.any(finite_points):
         x2 = np.arange(len(direction_labels))
-        bars2 = ax.bar(x2, margin_means, color="seagreen", alpha=0.8, label=f"mean(N_sys - {rank_ref_label})")
+        margin_label = _system_margin_math_label(rank_ref_label)
+        rank_ref_math = _rank_reference_math_label(rank_ref_label)
+        bars2 = ax.bar(
+            x2,
+            margin_means,
+            color="seagreen",
+            alpha=0.8,
+            label=rf"mean({margin_label})",
+        )
         ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
         ax.set_xticks(x2)
-        ax.set_xticklabels(direction_labels, rotation=45, ha="right", fontsize=7)
-        ax.set_ylabel(f"Средний запас N_sys - {rank_ref_label}")
+        ax.set_xticklabels(direction_labels, rotation=90, ha="center", fontsize=6)
+        ax.tick_params(axis="x", pad=3)
+        ax.set_xlabel("Направленная пара моделей")
+        ax.set_ylabel(rf"Средний запас ${_N_SYS_MATH} - {rank_ref_math}$")
         ax.set_title(
             "Определённость локальной системы по направлениям\n"
-            "(N_sys > rank: переопределена, N_sys <= rank: недоопределена/на границе)"
+            rf"(${_N_SYS_MATH} > {rank_ref_math}$: переопределена; "
+            rf"${_N_SYS_MATH} \leq {rank_ref_math}$: недоопределена/на границе)"
         )
         ax.grid(True, alpha=0.3, axis="y")
         if np.any(finite_margin):
@@ -1486,7 +1660,7 @@ def _plot_aggregated(
                 "D--",
                 color="darkred",
                 markersize=5,
-                label="mean(N_sys)",
+                label=rf"mean(${_N_SYS_MATH}$)",
             )
         if np.any(finite_rank):
             ax2.plot(
@@ -1495,7 +1669,7 @@ def _plot_aggregated(
                 "o-.",
                 color="navy",
                 markersize=4,
-                label=f"mean({rank_ref_label})",
+                label=rf"mean(${rank_ref_math}$)",
             )
         ax2.set_ylabel("Среднее значение")
         lines1, lbls1 = ax.get_legend_handles_labels()
@@ -1539,18 +1713,12 @@ def _plot_aggregated(
         s_ij = direction_stats[(mi, mj)]
         s_ji = direction_stats[(mj, mi)]
         rank_mean_diffs.append(abs(s_ij["rank_mean"] - s_ji["rank_mean"]))
-        residual_mean_diffs.append(
-            abs(s_ij["residual_mean"] - s_ji["residual_mean"])
-        )
-        if (
-            downstream_scores
-            and mi in downstream_scores
-            and mj in downstream_scores
-        ):
+        residual_mean_diffs.append(abs(s_ij["residual_mean"] - s_ji["residual_mean"]))
+        if downstream_scores and mi in downstream_scores and mj in downstream_scores:
             accuracy_diffs.append(abs(downstream_scores[mi] - downstream_scores[mj]))
         else:
             accuracy_diffs.append(np.nan)
-        pair_labels.append(f"{mi[:10]}↔{mj[:10]}")
+        pair_labels.append(_pair_tick_label(mi, mj))
 
     x_diff = np.arange(len(pair_labels))
     if pair_labels:
@@ -1564,7 +1732,9 @@ def _plot_aggregated(
             label=f"|Δ mean({_metric_value_short_label(labels)})|",
         )
         diff_ax.set_xticks(x_diff)
-        diff_ax.set_xticklabels(pair_labels, rotation=45, ha="right", fontsize=7)
+        diff_ax.set_xticklabels(pair_labels, rotation=90, ha="center", fontsize=6)
+        diff_ax.tick_params(axis="x", pad=3)
+        diff_ax.set_xlabel("Пара моделей")
         diff_ax.set_ylabel(f"|Δ mean({_metric_value_short_label(labels)})|")
         diff_ax.set_title(
             "Разница между прямым и обратным отображением по парам моделей"
@@ -1610,7 +1780,9 @@ def _plot_aggregated(
                 label="|Δ accuracy|",
             )
             unused_ax.set_xticks(x_diff)
-            unused_ax.set_xticklabels(pair_labels, rotation=45, ha="right", fontsize=7)
+            unused_ax.set_xticklabels(pair_labels, rotation=90, ha="center", fontsize=6)
+            unused_ax.tick_params(axis="x", pad=3)
+            unused_ax.set_xlabel("Пара моделей")
             unused_ax.set_ylabel("|Δ accuracy|")
             unused_ax.set_title("Разница accuracy по парам моделей")
             unused_ax.grid(True, alpha=0.3, axis="y")
@@ -1641,7 +1813,7 @@ def _plot_aggregated(
         diff_ax.set_title("Разница между прямым и обратным отображением")
         unused_ax.axis("off")
 
-    plt.tight_layout()
+    plt.tight_layout(rect=(0, 0, 1, 0.95), h_pad=2.4, w_pad=1.6)
     fname = f"{metric_name}_aggregated_diagnostics.png"
     fpath = os.path.join(plots_dir, fname)
     saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
@@ -1710,7 +1882,7 @@ def _save_pair_contribution_diagnostics(
     plots_dir: str,
     metric_name: str,
     plots_exts: Iterable[str] = ("png",),
-    top_n: int = 20,
+    top_n: int = 15,
 ) -> None:
     """
     Универсальная pair-contribution диагностика для directed map-артефактов.
@@ -1771,7 +1943,7 @@ def _save_pair_contribution_diagnostics(
             )
 
     if not rows:
-        print("  [INFO] Pair contributions: нет пар с downstream scores.")
+        print("  [ИНФО] Вклады пар: нет пар с downstream-оценками.")
         return
 
     raw_overall = _evaluate_pair_rows(rows)
@@ -1843,18 +2015,18 @@ def _save_pair_contribution_diagnostics(
     }
     for name, keep_models in groups.items():
         keep = set(keep_models)
-        group_rows = [
-            r for r in rows if r["model_a"] in keep and r["model_b"] in keep
-        ]
+        group_rows = [r for r in rows if r["model_a"] in keep and r["model_b"] in keep]
         if group_rows:
-            leave_out_stats.append((
-                name,
-                _evaluate_pair_rows(
-                    group_rows,
-                    signal_key="signal_plot",
-                    correct_key="plot_correct",
-                ),
-            ))
+            leave_out_stats.append(
+                (
+                    name,
+                    _evaluate_pair_rows(
+                        group_rows,
+                        signal_key="signal_plot",
+                        correct_key="plot_correct",
+                    ),
+                )
+            )
 
     top_bad = sorted(
         [r for r in rows if not bool(r["plot_correct"])],
@@ -1862,24 +2034,81 @@ def _save_pair_contribution_diagnostics(
         reverse=True,
     )[:top_n]
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    dataset_name = _infer_dataset_name_from_path(plots_dir)
+    metric_label = display_metric_name(metric_name)
+    fig, axes = plt.subplots(2, 2, figsize=(7.4, 6.8))
     score_note = (
-        f"доля верных пар={display_overall['raw_cr']:.3f}; "
-        f"связь с Δacc={display_overall['spearman']:+.3f}"
+        rf"$CR={display_overall['raw_cr']:.3f}$; "
+        rf"$\rho={display_overall['spearman']:+.3f}$"
     )
+
+    def _annotate_bar(
+        ax,
+        bar,
+        val: float,
+        text: str,
+        fontsize: float = 8,
+        offset: float = 0.03,
+    ) -> None:
+        if val >= 0.92:
+            y = val - 0.035
+            va = "top"
+            color = "white"
+        else:
+            y = val + offset
+            va = "bottom"
+            color = "black"
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            y,
+            text,
+            ha="center",
+            va=va,
+            fontsize=fontsize,
+            color=color,
+        )
+
+    def _annotate_subset_bar(ax, bar, idx: int, val: float, sp: float) -> None:
+        horizontal_offsets = {
+            0: -0.04,
+            1: 0.00,
+            2: 0.00,
+            3: -0.035,
+            4: 0.00,
+            5: 0.055,
+        }
+        text = f"{val:.2f}\n" + rf"$\rho={sp:+.2f}$"
+        if val >= 0.92:
+            y = val - 0.035
+            va = "top"
+            color = "white"
+        else:
+            y = val + 0.035 + 0.035 * (idx % 2)
+            va = "bottom"
+            color = "black"
+        ax.text(
+            bar.get_x() + bar.get_width() / 2 + horizontal_offsets.get(idx, 0.0),
+            y,
+            text,
+            ha="center",
+            va=va,
+            fontsize=7.3,
+            color=color,
+        )
+
+    title_dataset = f"{dataset_name}. " if dataset_name else ""
     fig.suptitle(
-        f"Какие пары моделей дают ошибки ранжирования\n"
-        f"Метрика: {short_metric_name(metric_name)} | "
-        f"{score_note}",
-        fontsize=13,
+        f"{title_dataset}{metric_label}: {score_note}",
+        fontsize=11,
+        y=0.975,
     )
     fig.text(
         0.5,
-        0.925,
-        "Ось Y автоматически приведена: выше 0 = метрика считает B лучше A",
+        0.93,
+        "Ориентация сигнала выбрана так, что положительное значение соответствует предсказанию: B лучше A",
         ha="center",
         va="center",
-        fontsize=10,
+        fontsize=8.2,
     )
 
     ax = axes[0, 0]
@@ -1904,7 +2133,7 @@ def _save_pair_contribution_diagnostics(
                 s=24,
                 alpha=0.65,
                 color=color,
-                label=block,
+                label=_family_block_short_display_name(block),
             )
         if np.any(~ok):
             ax.scatter(
@@ -1912,83 +2141,232 @@ def _save_pair_contribution_diagnostics(
                 y[~ok],
                 s=46,
                 alpha=0.95,
-                facecolors="none",
+                color=color,
                 edgecolors="crimson",
                 linewidths=1.4,
             )
     ax.axhline(0.0, color="black", linewidth=0.9)
     ax.axvline(0.0, color="black", linewidth=0.9)
-    ax.set_xlabel("Δacc = acc[B] - acc[A]")
-    ax.set_ylabel("Предсказание метрики: выше 0 значит B лучше A")
-    ax.set_title("Каждая точка = сравнение A→B; красный контур = неверная пара")
+    ax.set_xlabel(r"$\Delta acc = acc(B) - acc(A)$")
+    ax.set_ylabel("Ориентированный сигнал метрики")
+    ax.set_title("Попарные сравнения моделей")
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8, loc="best")
+    handles, labels = ax.get_legend_handles_labels()
+    handles.append(
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="none",
+            markerfacecolor="white",
+            markeredgecolor="crimson",
+            markeredgewidth=1.4,
+            markersize=7,
+        )
+    )
+    labels.append("ошибка")
+    legend = ax.legend(
+        handles,
+        labels,
+        fontsize=7.0,
+        loc="upper right",
+        ncol=2,
+        columnspacing=0.7,
+        handletextpad=0.3,
+        borderpad=0.3,
+        labelspacing=0.25,
+    )
+    legend.get_frame().set_alpha(0.68)
 
     ax = axes[0, 1]
     if top_bad:
         labels_bad = [
-            f"{r['model_a']}→{r['model_b']}"[:42]
+            f"{_compact_model_name(r['model_a'])}→{_compact_model_name(r['model_b'])}"
             for r in reversed(top_bad)
         ]
         vals_bad = [float(r["abs_delta_acc"]) for r in reversed(top_bad)]
         ax.barh(np.arange(len(vals_bad)), vals_bad, color="crimson", alpha=0.8)
         ax.set_yticks(np.arange(len(vals_bad)))
-        ax.set_yticklabels(labels_bad, fontsize=8)
-        ax.set_xlabel("|Δacc|")
-        ax.set_title(f"{len(top_bad)} крупнейших ошибок по разнице качества")
+        ax.set_yticklabels(labels_bad, fontsize=7.5)
+        ax.set_xlabel(r"$|\Delta acc|$")
+        ax.set_title(f"{len(top_bad)} крупнейших ошибок", pad=18)
+        ax.text(
+            0.5,
+            1.02,
+            "R=ResNet; W=Wide ResNet; B/L=ViT-B/L; SL=SWAG linear",
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=7.2,
+        )
         ax.grid(True, alpha=0.3, axis="x")
     else:
-        ax.text(0.5, 0.5, "Ошибочных пар нет", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "Ошибочных пар нет",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
         ax.set_title("Top ошибок")
 
     ax = axes[1, 0]
-    fam_labels = list(family_stats.keys())
-    fam_vals = [family_stats[k]["raw_cr"] for k in fam_labels]
-    fam_pairs = [family_stats[k]["n_pairs"] for k in fam_labels]
+    fam_keys = list(family_stats.keys())
+    fam_labels = [_family_block_display_name(k) for k in fam_keys]
+    fam_vals = [family_stats[k]["raw_cr"] for k in fam_keys]
+    fam_pairs = [family_stats[k]["n_pairs"] for k in fam_keys]
     bars = ax.bar(np.arange(len(fam_labels)), fam_vals, color="steelblue", alpha=0.85)
-    ax.set_ylim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.15)
     ax.set_xticks(np.arange(len(fam_labels)))
     ax.set_xticklabels(fam_labels, rotation=35, ha="right")
-    ax.set_ylabel("Доля верных пар")
-    ax.set_title("Где метрика чаще ошибается: блоки семейств")
+    ax.set_ylabel("CR")
+    ax.set_title("Качество по блокам семейств")
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val, n_pairs in zip(bars, fam_vals, fam_pairs):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            min(0.98, val + 0.025),
-            f"{val:.2f}\nN={int(n_pairs)}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
+        _annotate_bar(ax, bar, val, f"{val:.2f}\nN={int(n_pairs)}")
 
     ax = axes[1, 1]
-    lo_labels = [x[0] for x in leave_out_stats]
+    lo_labels = [_subset_display_name(x[0]) for x in leave_out_stats]
     lo_vals = [x[1]["raw_cr"] for x in leave_out_stats]
     lo_spearman = [x[1]["spearman"] for x in leave_out_stats]
     bars = ax.bar(np.arange(len(lo_labels)), lo_vals, color="darkseagreen", alpha=0.9)
-    ax.set_ylim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.15)
     ax.set_xticks(np.arange(len(lo_labels)))
     ax.set_xticklabels(lo_labels, rotation=35, ha="right")
-    ax.set_ylabel("Доля верных пар")
-    ax.set_title("Что меняется, если смотреть поднаборы моделей")
+    ax.set_ylabel("CR")
+    ax.set_title("Качество на поднаборах моделей")
     ax.grid(True, alpha=0.3, axis="y")
-    for bar, val, sp in zip(bars, lo_vals, lo_spearman):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            min(0.98, val + 0.025),
-            f"{val:.2f}\nρ={sp:+.2f}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
+    for idx, (bar, val, sp) in enumerate(zip(bars, lo_vals, lo_spearman)):
+        _annotate_subset_bar(ax, bar, idx, val, sp)
 
-    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.9))
+    fig.subplots_adjust(
+        left=0.085,
+        right=0.99,
+        bottom=0.09,
+        top=0.84,
+        hspace=0.44,
+        wspace=0.42,
+    )
     fpath = os.path.join(plots_dir, f"{metric_name}_pair_contributions.png")
     saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
     for save_path in saved_paths:
         print(f"  Сохранён график вкладов пар: {save_path}")
+
+    fig = plt.figure(figsize=(9.8, 7.4))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.08, 1.0])
+    ax_scatter = fig.add_subplot(gs[0, :])
+    ax_family = fig.add_subplot(gs[1, 0])
+    ax_subset = fig.add_subplot(gs[1, 1])
+    fig.suptitle(
+        f"{title_dataset}Попарный анализ адаптивной окрестности\n"
+        f"{metric_label}: {score_note}",
+        fontsize=12,
+        y=0.985,
+    )
+
+    for block in family_blocks:
+        block_rows = [r for r in rows if r["family_block"] == block]
+        ok = np.asarray([bool(r["plot_correct"]) for r in block_rows], dtype=bool)
+        x = np.asarray([float(r["delta_acc"]) for r in block_rows])
+        y = np.asarray([float(r["signal_plot"]) for r in block_rows])
+        color = colors.get(block, "0.45")
+        if np.any(ok):
+            ax_scatter.scatter(
+                x[ok],
+                y[ok],
+                s=22,
+                alpha=0.62,
+                color=color,
+                label=_family_block_short_display_name(block),
+            )
+        if np.any(~ok):
+            ax_scatter.scatter(
+                x[~ok],
+                y[~ok],
+                s=42,
+                alpha=0.95,
+                color=color,
+                edgecolors="crimson",
+                linewidths=1.3,
+            )
+    ax_scatter.axhline(0.0, color="black", linewidth=0.9)
+    ax_scatter.axvline(0.0, color="black", linewidth=0.9)
+    ax_scatter.set_xlabel(r"$\Delta acc = acc(B) - acc(A)$")
+    ax_scatter.set_ylabel("Ориентированный сигнал метрики")
+    ax_scatter.set_title("Попарные сравнения моделей")
+    ax_scatter.grid(True, alpha=0.3)
+    handles, labels = ax_scatter.get_legend_handles_labels()
+    handles.append(
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="none",
+            markerfacecolor="white",
+            markeredgecolor="crimson",
+            markeredgewidth=1.4,
+            markersize=7,
+        )
+    )
+    labels.append("ошибка")
+    legend = ax_scatter.legend(
+        handles,
+        labels,
+        fontsize=7.0,
+        loc="upper right",
+        ncol=2,
+        columnspacing=0.7,
+        handletextpad=0.3,
+        borderpad=0.3,
+        labelspacing=0.25,
+    )
+    legend.get_frame().set_alpha(0.68)
+
+    bars = ax_family.bar(
+        np.arange(len(fam_labels)),
+        fam_vals,
+        color="steelblue",
+        alpha=0.85,
+    )
+    ax_family.set_ylim(0.0, 1.15)
+    ax_family.set_xticks(np.arange(len(fam_labels)))
+    ax_family.set_xticklabels(fam_labels, rotation=35, ha="right")
+    ax_family.set_ylabel("CR")
+    ax_family.set_title("Качество по блокам семейств")
+    ax_family.grid(True, alpha=0.3, axis="y")
+    for bar, val, n_pairs in zip(bars, fam_vals, fam_pairs):
+        _annotate_bar(ax_family, bar, val, f"{val:.2f}\nN={int(n_pairs)}")
+
+    bars = ax_subset.bar(
+        np.arange(len(lo_labels)),
+        lo_vals,
+        color="darkseagreen",
+        alpha=0.9,
+    )
+    ax_subset.set_ylim(0.0, 1.15)
+    ax_subset.set_xticks(np.arange(len(lo_labels)))
+    ax_subset.set_xticklabels(lo_labels, rotation=35, ha="right")
+    ax_subset.set_ylabel("CR")
+    ax_subset.set_title("Качество на поднаборах моделей")
+    ax_subset.grid(True, alpha=0.3, axis="y")
+    for idx, (bar, val, sp) in enumerate(zip(bars, lo_vals, lo_spearman)):
+        _annotate_subset_bar(ax_subset, bar, idx, val, sp)
+
+    fig.subplots_adjust(
+        left=0.065,
+        right=0.992,
+        bottom=0.105,
+        top=0.895,
+        hspace=0.34,
+        wspace=0.22,
+    )
+    fpath = os.path.join(plots_dir, f"{metric_name}_pair_contributions_compact.png")
+    saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
+    plt.close(fig)
+    for save_path in saved_paths:
+        print(f"  Сохранён компактный график вкладов пар: {save_path}")
 
 
 # ============================================================
@@ -2007,7 +2385,9 @@ def _save_report(
     """Сохраняет текстовый отчёт с ключевыми числами диагностики."""
     labels = _load_diagnostics_labels(artifacts)
     use_relative_residuals = bool(
-        _direction_uses_relative_residuals(artifacts, directions[0][0], directions[0][1])
+        _direction_uses_relative_residuals(
+            artifacts, directions[0][0], directions[0][1]
+        )
     )
     res_description = labels["residual_description"]
     lines = []
@@ -2025,9 +2405,7 @@ def _save_report(
             artifacts, mi, mj, ranks
         )
         extra_data = _get_direction_extra_data(artifacts, mi, mj)
-        local_id_data = _get_direction_local_id_data(
-            local_id_artifacts or {}, mi, mj
-        )
+        local_id_data = _get_direction_local_id_data(local_id_artifacts or {}, mi, mj)
         if _direction_uses_relative_residuals(artifacts, mi, mj):
             work_res = np.asarray(res, dtype=np.float64)
             is_normalized = True
@@ -2130,6 +2508,7 @@ def _save_report(
         lines.append(extra_header)
         lines.append("-" * len(extra_header))
         for row in extra_rows:
+
             def _fmt(val: float, fmt: str) -> str:
                 return fmt.format(val) if np.isfinite(val) else "n/a"
 
@@ -2178,7 +2557,9 @@ def _save_report(
         "both_degenerate": both_deg_stats,
         "mean_rank_std": float(np.mean(all_rank_stds)),
         "uses_relative_residuals": use_relative_residuals,
-        "residuals_normalized": bool(all(normalized_flags)) if normalized_flags else False,
+        "residuals_normalized": (
+            bool(all(normalized_flags)) if normalized_flags else False
+        ),
         "direction_extras": extra_rows,
     }
     json_path = os.path.join(reports_dir, f"{metric_name}_diagnostics_report.json")
@@ -2221,21 +2602,28 @@ def _plot_summary(
       }
     """
     if not metrics_data:
-        print("  [WARN] Нет данных для сводного графика.")
+        print("  [ПРЕДУПРЕЖДЕНИЕ] Нет данных для сводного графика.")
         return
 
     labels = [d["metric_name"] for d in metrics_data]
-    # Укорачиваем длинные имена для читаемости осей.
-    short_labels = [short_metric_name(l) for l in labels]
+    display_labels = [_diagnostic_metric_label(l) for l in labels]
     x = np.arange(len(labels))
 
-    fig, axes = plt.subplots(5, 1, figsize=(max(12, len(labels) * 1.2), 22))
+    fig = plt.figure(figsize=(15.5, 8.0))
+    gs = fig.add_gridspec(2, 6, height_ratios=[1.0, 1.05])
+    axes = [
+        fig.add_subplot(gs[0, 0:2]),
+        fig.add_subplot(gs[0, 2:4]),
+        fig.add_subplot(gs[0, 4:6]),
+        fig.add_subplot(gs[1, 0:3]),
+        fig.add_subplot(gs[1, 3:6]),
+    ]
     n_centers = metrics_data[0]["n_centers"]
     fig.suptitle(
         f"Сводная диагностика локальных отображений\n"
-        f"Центров на пару: {n_centers} | Метрик: {len(labels)} | "
-        f"Порог вырожденности: {threshold:.0e}",
-        fontsize=13,
+        f"Центров на пару: {n_centers} | Метрик: {len(labels)}",
+        fontsize=11,
+        y=0.985,
     )
 
     # --- 1. Стабильность значения метрики: среднее std по направлениям ---
@@ -2250,22 +2638,13 @@ def _plot_summary(
     ax2.plot(
         x, mean_rank_means, "D--", color="darkred", markersize=6, label="mean(value)"
     )
-    ax2.set_ylabel("Среднее значение метрики", color="darkred")
+    ax2.set_ylabel("Среднее значение", color="darkred")
     ax2.tick_params(axis="y", labelcolor="darkred")
     ax.set_xticks(x)
-    ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Среднее std значения метрики по направлениям")
-    ax.set_title("Стабильность значения метрики\n(чем меньше std — тем стабильнее)")
+    ax.set_xticklabels(display_labels, rotation=35, ha="right", fontsize=8)
+    ax.set_ylabel("Средний std")
+    ax.set_title("Стабильность значений\nменьше std — стабильнее", fontsize=10)
     ax.grid(True, alpha=0.3, axis="y")
-    for bar, val in zip(bars, mean_rank_stds):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + max(mean_rank_stds) * 0.01,
-            f"{val:.2f}",
-            ha="center",
-            va="bottom",
-            fontsize=7,
-        )
     lines1, lbls1 = ax.get_legend_handles_labels()
     lines2, lbls2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
@@ -2274,7 +2653,9 @@ def _plot_summary(
     ax = axes[1]
     mean_res = [float(np.mean(d["res_means"])) for d in metrics_data]
     std_res = [float(np.mean(d["res_stds"])) for d in metrics_data]
-    all_relative_residuals = all(bool(d.get("uses_relative_residuals", False)) for d in metrics_data)
+    all_relative_residuals = all(
+        bool(d.get("uses_relative_residuals", False)) for d in metrics_data
+    )
     all_residuals_normalized = all(
         bool(d.get("residuals_normalized", False)) for d in metrics_data
     )
@@ -2300,37 +2681,36 @@ def _plot_summary(
         error_kw={"elinewidth": 1.2, "ecolor": "darkred"},
     )
     ax.set_xticks(x)
-    ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(res_summary_label)
+    ax.set_xticklabels(display_labels, rotation=35, ha="right", fontsize=8)
+    ax.set_ylabel(
+        "Относительная ошибка"
+        if all_relative_residuals
+        else "Нормированная ошибка" if all_residuals_normalized else "Ошибка решения"
+    )
     ax.set_title(
         (
-            "Относительная ошибка решения линейного уравнения\n"
-            "(чем меньше — тем лучше линейное приближение; сопоставима между метриками)"
+            "Ошибка линейного приближения\n" "меньше — лучше"
             if all_relative_residuals
-            else "Нормированная ошибка решения линейного уравнения\n"
-            "(чем меньше — тем лучше линейное приближение)"
-            if all_residuals_normalized
-            else "Ошибка решения линейного уравнения\n"
-            "(часть артефактов не содержит данных для нормировки)"
-        )
+            else (
+                "Нормированная ошибка решения\n" "меньше — лучше"
+                if all_residuals_normalized
+                else "Ошибка решения\n" "часть артефактов без нормировки"
+            )
+        ),
+        fontsize=10,
     )
     ax.grid(True, alpha=0.3, axis="y")
-    for bar, val in zip(bars, mean_res):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + max(mean_res) * 0.01,
-            f"{val:.2e}",
-            ha="center",
-            va="bottom",
-            fontsize=7,
-        )
-
     # --- 3. Определённость системы ---
     ax = axes[2]
     mean_margins = [_safe_mean(d["determined_margin_means"]) for d in metrics_data]
     mean_point_counts = [_safe_mean(d["system_point_means"]) for d in metrics_data]
     rank_reference_labels = {
-        str(d.get("rank_reference_label", _metric_value_short_label(d.get("labels", _FALLBACK_LABELS))))
+        str(
+            d.get(
+                "rank_reference_label",
+                _metric_value_short_label(d.get("labels", _FALLBACK_LABELS)),
+            )
+        )
         for d in metrics_data
     }
     rank_reference_label = (
@@ -2338,18 +2718,27 @@ def _plot_summary(
         if len(rank_reference_labels) == 1
         else "rank reference"
     )
+    rank_reference_math = _rank_reference_math_label(rank_reference_label)
+    margin_label = _system_margin_math_label(rank_reference_label)
     mean_rank_values = [
         _safe_mean(d.get("rank_reference_means", d.get("rank_means")))
         for d in metrics_data
     ]
-    bars = ax.bar(x, mean_margins, color="seagreen", alpha=0.8, label=f"mean(N_sys - {rank_reference_label})")
+    bars = ax.bar(
+        x,
+        mean_margins,
+        color="seagreen",
+        alpha=0.8,
+        label=rf"mean({margin_label})",
+    )
     ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
     ax.set_xticks(x)
-    ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(f"Средний запас N_sys - {rank_reference_label}")
+    ax.set_xticklabels(display_labels, rotation=35, ha="right", fontsize=8)
+    ax.set_ylabel(rf"Средний запас")
     ax.set_title(
         "Определённость локальной системы\n"
-        "(N_sys > rank: переопределена, N_sys <= rank: недоопределена/на границе)"
+        rf"${_N_SYS_MATH} > {rank_reference_math}$: переопределена; иначе — на границе",
+        fontsize=10,
     )
     ax.grid(True, alpha=0.3, axis="y")
     finite_margins = np.isfinite(mean_margins)
@@ -2364,7 +2753,7 @@ def _plot_summary(
             "D--",
             color="darkred",
             markersize=6,
-            label="mean(N_sys)",
+            label=rf"mean(${_N_SYS_MATH}$)",
         )
     if np.any(np.isfinite(mean_rank_values)):
         ax2.plot(
@@ -2373,19 +2762,9 @@ def _plot_summary(
             "o-.",
             color="navy",
             markersize=5,
-            label=f"mean({rank_reference_label})",
+            label=rf"mean(${rank_reference_math}$)",
         )
     ax2.set_ylabel("Среднее значение")
-    for bar, val in zip(bars, mean_margins):
-        if np.isfinite(val):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + (0.01 * ax.get_ylim()[1] if val >= 0 else -0.06 * ax.get_ylim()[1]),
-                f"{val:.1f}",
-                ha="center",
-                va="bottom" if val >= 0 else "top",
-                fontsize=7,
-            )
     lines1, lbls1 = ax.get_legend_handles_labels()
     lines2, lbls2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=8, loc="upper right")
@@ -2399,7 +2778,7 @@ def _plot_summary(
         if len(sp_med) == 0:
             continue
         color = cmap(idx % 10)
-        short_name = short_metric_name(d["metric_name"])
+        short_name = _diagnostic_metric_label(d["metric_name"])
         # Нормируем ось X как долю от длины спектра — сравниваем метрики с разной размерностью.
         x_norm = np.linspace(0, 1, len(sp_med))
         ax.plot(x_norm, sp_med, color=color, linewidth=1.5, label=short_name)
@@ -2407,13 +2786,14 @@ def _plot_summary(
             x_norm, sp_med - sp_std, sp_med + sp_std, color=color, alpha=0.12
         )
     ax.set_xlabel("Нормированный индекс сингулярного значения (0 = макс, 1 = мин)")
-    ax.set_ylabel("Сингулярное значение (медиана по центрам и парам)")
+    ax.set_ylabel("Сингулярное значение")
     ax.set_title(
         "Спектр сингулярных значений матрицы M\n"
-        "(медиана ± std по всем центрам, X→Y и Y→X)"
+        "медиана ± std по центрам и направлениям",
+        fontsize=10,
     )
     ax.set_yscale("log")
-    ax.legend(fontsize=7, ncol=2, loc="upper right")
+    ax.legend(fontsize=7, ncol=1, loc="upper right")
     ax.grid(True, alpha=0.3)
 
     # --- 5. Распределение значений метрики по центрам ---
@@ -2428,7 +2808,7 @@ def _plot_summary(
             continue
         metric_value_arrays.append(vals)
         metric_value_positions.append(idx + 1)
-        metric_value_labels.append(short_metric_name(d["metric_name"]))
+        metric_value_labels.append(_diagnostic_metric_label(d["metric_name"]))
 
     if metric_value_arrays:
         box = ax.boxplot(
@@ -2443,11 +2823,12 @@ def _plot_summary(
             patch.set_facecolor("lightsteelblue")
             patch.set_alpha(0.85)
         ax.set_xticks(metric_value_positions)
-        ax.set_xticklabels(metric_value_labels, rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("Значение метрики по направлению для данного центра")
+        ax.set_xticklabels(metric_value_labels, rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel("Значение метрики")
         ax.set_title(
             "Распределение значений метрики по центрам и направлениям\n"
-            "(boxplot по всем центрам, X→Y и Y→X)"
+            "boxplot по всем центрам",
+            fontsize=10,
         )
         ax.grid(True, alpha=0.3, axis="y")
     else:
@@ -2461,12 +2842,170 @@ def _plot_summary(
             fontsize=10,
         )
 
-    plt.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.955), h_pad=1.25, w_pad=1.7)
     fpath = os.path.join(plots_dir, "summary_diagnostics.png")
     saved_paths = _save_figure_variants(fig, fpath, plots_exts, dpi=150)
     plt.close(fig)
     for save_path in saved_paths:
         print(f"  Сохранён сводный график: {save_path}")
+
+    # Page-oriented version for thesis appendix: the wide summary above becomes
+    # too small on a portrait page, so save an additional 2+2+1 layout.
+    fig_page = plt.figure(figsize=(7.2, 9.2))
+    gs_page = fig_page.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 1.15])
+    page_axes = [
+        fig_page.add_subplot(gs_page[0, 0]),
+        fig_page.add_subplot(gs_page[0, 1]),
+        fig_page.add_subplot(gs_page[1, 0]),
+        fig_page.add_subplot(gs_page[1, 1]),
+        fig_page.add_subplot(gs_page[2, :]),
+    ]
+    fig_page.suptitle(
+        f"Сводная диагностика локальных отображений\n"
+        f"Центров на пару: {n_centers} | Метрик: {len(labels)}",
+        fontsize=11,
+        y=0.985,
+    )
+
+    ax = page_axes[0]
+    ax.bar(x, mean_rank_stds, color="steelblue", alpha=0.8, label="mean(std)")
+    ax2 = ax.twinx()
+    ax2.plot(
+        x, mean_rank_means, "D--", color="darkred", markersize=4.5, label="mean(value)"
+    )
+    ax2.set_ylabel("Среднее значение", color="darkred", fontsize=9)
+    ax2.tick_params(axis="y", labelcolor="darkred", labelsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(display_labels, rotation=35, ha="right", fontsize=7.2)
+    ax.set_ylabel("Средний std", fontsize=9)
+    ax.set_title("Стабильность значений\nменьше std — стабильнее", fontsize=9.5)
+    ax.grid(True, alpha=0.3, axis="y")
+    lines1, lbls1 = ax.get_legend_handles_labels()
+    lines2, lbls2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=7, loc="upper right")
+    ax.tick_params(axis="y", labelsize=8)
+
+    ax = page_axes[1]
+    ax.bar(
+        x,
+        mean_res,
+        color="coral",
+        alpha=0.8,
+        yerr=std_res,
+        capsize=3,
+        error_kw={"elinewidth": 1.0, "ecolor": "darkred"},
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(display_labels, rotation=35, ha="right", fontsize=7.2)
+    ax.set_ylabel(
+        (
+            "Относительная ошибка"
+            if all_relative_residuals
+            else (
+                "Нормированная ошибка" if all_residuals_normalized else "Ошибка решения"
+            )
+        ),
+        fontsize=9,
+    )
+    ax.set_title("Ошибка линейного приближения\nменьше — лучше", fontsize=9.5)
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.tick_params(axis="y", labelsize=8)
+
+    ax = page_axes[2]
+    ax.bar(x, mean_margins, color="seagreen", alpha=0.8, label=rf"mean({margin_label})")
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=0.9)
+    ax.set_xticks(x)
+    ax.set_xticklabels(display_labels, rotation=35, ha="right", fontsize=7.2)
+    ax.set_ylabel("Средний запас", fontsize=9)
+    ax.set_title(
+        "Определённость локальной системы\n"
+        rf"${_N_SYS_MATH}>{rank_reference_math}$: переопределена",
+        fontsize=9.5,
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+    if np.any(finite_margins):
+        ax.set_ylim(-max_abs_margin, max_abs_margin)
+    ax2 = ax.twinx()
+    if np.any(np.isfinite(mean_point_counts)):
+        ax2.plot(
+            x,
+            mean_point_counts,
+            "D--",
+            color="darkred",
+            markersize=4.5,
+            label=rf"mean(${_N_SYS_MATH}$)",
+        )
+    if np.any(np.isfinite(mean_rank_values)):
+        ax2.plot(
+            x,
+            mean_rank_values,
+            "o-.",
+            color="navy",
+            markersize=4,
+            label=rf"mean(${rank_reference_math}$)",
+        )
+    ax2.set_ylabel("Среднее значение", fontsize=9)
+    ax.tick_params(axis="y", labelsize=8)
+    ax2.tick_params(axis="y", labelsize=8)
+    lines1, lbls1 = ax.get_legend_handles_labels()
+    lines2, lbls2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=7, loc="upper right")
+
+    ax = page_axes[3]
+    if metric_value_arrays:
+        box = ax.boxplot(
+            metric_value_arrays,
+            positions=metric_value_positions,
+            widths=0.6,
+            patch_artist=True,
+            showfliers=False,
+            medianprops=dict(color="darkred", linewidth=1.2),
+        )
+        for patch in box["boxes"]:
+            patch.set_facecolor("lightsteelblue")
+            patch.set_alpha(0.85)
+        ax.set_xticks(metric_value_positions)
+        ax.set_xticklabels(metric_value_labels, rotation=35, ha="right", fontsize=7.2)
+        ax.set_ylabel("Значение метрики", fontsize=9)
+        ax.set_title("Распределение значений\nboxplot по всем центрам", fontsize=9.5)
+        ax.grid(True, alpha=0.3, axis="y")
+        ax.tick_params(axis="y", labelsize=8)
+    else:
+        ax.axis("off")
+
+    ax = page_axes[4]
+    for idx, d in enumerate(metrics_data):
+        sp_med = d.get("spectrum_median", np.array([]))
+        sp_std = d.get("spectrum_std", np.array([]))
+        if len(sp_med) == 0:
+            continue
+        color = cmap(idx % 10)
+        short_name = _diagnostic_metric_label(d["metric_name"])
+        x_norm = np.linspace(0, 1, len(sp_med))
+        ax.plot(x_norm, sp_med, color=color, linewidth=1.3, label=short_name)
+        ax.fill_between(
+            x_norm, sp_med - sp_std, sp_med + sp_std, color=color, alpha=0.10
+        )
+    ax.set_xlabel(
+        "Нормированный индекс сингулярного значения (0 = макс, 1 = мин)", fontsize=9
+    )
+    ax.set_ylabel("Сингулярное значение", fontsize=9)
+    ax.set_title(
+        "Спектр сингулярных значений матрицы M\n"
+        "медиана ± std по центрам и направлениям",
+        fontsize=9.5,
+    )
+    ax.set_yscale("log")
+    ax.legend(fontsize=7, ncol=2, loc="upper right")
+    ax.grid(True, alpha=0.3)
+    ax.tick_params(axis="both", labelsize=8)
+
+    fig_page.tight_layout(rect=(0, 0, 1, 0.955), h_pad=1.15, w_pad=1.3)
+    fpath = os.path.join(plots_dir, "summary_diagnostics_page.png")
+    saved_paths = _save_figure_variants(fig_page, fpath, plots_exts, dpi=180)
+    plt.close(fig_page)
+    for save_path in saved_paths:
+        print(f"  Сохранён постраничный сводный график: {save_path}")
 
 
 def _plot_summary_local_id(
@@ -2494,7 +3033,12 @@ def _plot_summary_local_id(
     mean_id_y = [_safe_mean(d.get("local_id_y_means")) for d in metrics_data]
     mean_id_min = [_safe_mean(d.get("local_id_min_means")) for d in metrics_data]
     rank_reference_labels = {
-        str(d.get("rank_reference_label", _metric_value_short_label(d.get("labels", _FALLBACK_LABELS))))
+        str(
+            d.get(
+                "rank_reference_label",
+                _metric_value_short_label(d.get("labels", _FALLBACK_LABELS)),
+            )
+        )
         for d in metrics_data
     }
     rank_reference_label = (
@@ -2506,16 +3050,21 @@ def _plot_summary_local_id(
         _safe_mean(d.get("rank_reference_means", d.get("rank_means")))
         for d in metrics_data
     ]
-    mean_rank_gap = [
-        _safe_mean(d.get("rank_minus_id_min_means")) for d in metrics_data
-    ]
+    mean_rank_gap = [_safe_mean(d.get("rank_minus_id_min_means")) for d in metrics_data]
     mean_system_gap = [
         _safe_mean(d.get("system_minus_id_min_means")) for d in metrics_data
     ]
 
     ax = axes[0]
     width = 0.25
-    ax.bar(x - width, mean_id_x, width=width, color="steelblue", alpha=0.8, label="mean(ID_x)")
+    ax.bar(
+        x - width,
+        mean_id_x,
+        width=width,
+        color="steelblue",
+        alpha=0.8,
+        label="mean(ID_x)",
+    )
     ax.bar(x, mean_id_y, width=width, color="coral", alpha=0.8, label="mean(ID_y)")
     ax.bar(
         x + width,
@@ -2525,7 +3074,14 @@ def _plot_summary_local_id(
         alpha=0.8,
         label="mean(min(ID_x, ID_y))",
     )
-    ax.plot(x, mean_rank, "D--", color="darkred", markersize=6, label=f"mean({rank_reference_label})")
+    ax.plot(
+        x,
+        mean_rank,
+        "D--",
+        color="darkred",
+        markersize=6,
+        label=f"mean({rank_reference_label})",
+    )
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Среднее значение")
@@ -2622,7 +3178,9 @@ def _collect_metric_data(
         s = _compute_direction_stats(sv, work_res, ranks, threshold=threshold)
         det_stats = _compute_determinedness_stats(rank_ref, extra)
         lid_stats = _compute_local_id_stats(rank_ref, extra, local_id)
-        all_metric_values.extend(np.asarray(ranks, dtype=np.float64).reshape(-1).tolist())
+        all_metric_values.extend(
+            np.asarray(ranks, dtype=np.float64).reshape(-1).tolist()
+        )
         rank_means.append(s["rank_mean"])
         rank_stds.append(s["rank_std"])
         rank_reference_means.append(_safe_mean(rank_ref))
@@ -2676,18 +3234,22 @@ def _collect_metric_data(
         "local_id_min_means": np.array(local_id_min_means),
         "rank_minus_id_min_means": np.array(rank_minus_id_min_means),
         "system_minus_id_min_means": np.array(system_minus_id_min_means),
-        "residuals_normalized": bool(all(residuals_normalized_flags))
-        if residuals_normalized_flags
-        else False,
-        "uses_relative_residuals": bool(all(relative_residual_flags))
-        if relative_residual_flags
-        else False,
+        "residuals_normalized": (
+            bool(all(residuals_normalized_flags))
+            if residuals_normalized_flags
+            else False
+        ),
+        "uses_relative_residuals": (
+            bool(all(relative_residual_flags)) if relative_residual_flags else False
+        ),
         "frac_both_degenerate": both_deg_stats["frac_both_degenerate_overall"],
         "n_centers": n_centers,
         "n_directions": len(directions),
         "spectrum_median": spectrum_median,  # (min_len,) - медиана сингулярных значений
         "spectrum_std": spectrum_std,  # (min_len,) - std сингулярных значений
-        "labels": _load_diagnostics_labels(artifacts),  # подписи из diagnostics_meta_json
+        "labels": _load_diagnostics_labels(
+            artifacts
+        ),  # подписи из diagnostics_meta_json
     }
 
 
@@ -2774,12 +3336,12 @@ def _run_single_metric(
             "текущий diagnose-скрипт ориентирован на rank/residual-сравнения map-метрик "
             "и не подходит для графиков сравнения размерностей новой метрики."
         )
-        print(f"  [WARN] {warn}")
+        print(f"  [ПРЕДУПРЕЖДЕНИЕ] {warn}")
         os.makedirs(reports_dir, exist_ok=True)
         stub_path = os.path.join(reports_dir, f"{metric_name}_diagnostics_skipped.txt")
         with open(stub_path, "w", encoding="utf-8") as f:
             f.write(warn + "\n")
-        print(f"  [INFO] Сохранена заглушка: {stub_path}")
+        print(f"  [ИНФО] Сохранена заглушка: {stub_path}")
         return None
 
     artifacts = _load_artifacts(artifacts_path)
@@ -2792,7 +3354,7 @@ def _run_single_metric(
     directions = _list_directions(artifacts)
     if not directions:
         print(
-            f"  [WARN] Не найдено ни одного направления в {artifacts_path}, пропускаем."
+            f"  [ПРЕДУПРЕЖДЕНИЕ] Не найдено ни одного направления в {artifacts_path}, пропускаем."
         )
         return None
 
@@ -2836,7 +3398,7 @@ def _run_single_metric(
                 missing.append(f"{a} → {b}")
         if missing:
             print(
-                f"  [WARN] Не найдены направления: {missing}. Детальный анализ пропущен."
+                f"  [ПРЕДУПРЕЖДЕНИЕ] Не найдены направления: {missing}. Детальный анализ пропущен."
             )
         else:
             _plot_single_pair(
@@ -2894,7 +3456,7 @@ def main():
     parser.add_argument(
         "--plots_ext",
         type=str,
-        default="png",
+        default="png,svg",
         help="Одно или несколько расширений графиков через запятую, например png или svg,png.",
     )
     parser.add_argument(
