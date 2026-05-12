@@ -53,318 +53,412 @@
 
 ## Примеры запуска
 
-Все примеры запуска показаны для `Power Shell`.
+Ниже приведены актуальные примеры запуска через `bash`. Все изменяемые значения вынесены в переменные: набор данных, модели, папки, список `k`, список метрик и режим геометрии. В самих командах ничего заменять не нужно.
 
-A) Пример пошагового запуска и оценки основных метрик данной работы представлен ниже.
+### Основные скрипты
+
+| Скрипт | Назначение |
+| --- | --- |
+| `scripts.run_extract_embeddings` | Сохраняет эмбеддинги моделей для изображений. |
+| `scripts.run_extract_text_embeddings` | Сохраняет эмбеддинги моделей для текстов. |
+| `scripts.run_compute_downstream_scores` | Обучает простой классификатор на эмбеддингах и сохраняет качество моделей. |
+| `scripts.run_compute_local_map_store` | Считает локальные линейные отображения между парами моделей. |
+| `scripts.run_compute_metrics_from_local_maps` | Строит матрицы метрик по уже сохранённым локальным отображениям. |
+| `scripts.run_compute_embedding_metrics` | Старый способ расчёта парных метрик напрямую из эмбеддингов. |
+| `scripts.run_evaluate_metrics` | Сравнивает парные метрики с разницей качества моделей. |
+| `scripts.run_compute_single_metrics` | Считает одиночные метрики качества эмбеддингов. |
+| `scripts.run_evaluate_single_metrics` | Сравнивает одиночные метрики с качеством моделей. |
+| `scripts.run_diagnose_local_map` | Строит диагностические графики по локальным отображениям. |
+| `scripts.plot_metric_summary`, `scripts.plot_single_metric_summary`, `scripts.plot_single_metric_diagnostics`, `scripts.plot_pairwise_error_heatmaps` | Строят итоговые графики. |
+| `scripts.plot_centering_comparison_diagnostics` | Сравнивает режимы центрирования по готовым файлам артефактов. |
 
 <details>
-  <summary><b>▶ Пример запуска</b></summary>
+  <summary><b>▶ Полный расчёт через сохранённые локальные отображения</b></summary>
 
-1. Получить эмбеддинги на трейне:
-   ```powershell
-    python -m scripts.run_extract_embeddings `
-      --dataset cifar10 `
-      --data_root .\data `
-      --split train `
-      --output_dir .\data\embeddings\cifar10_train `
-      --models resnet18,resnet50,wide_resnet50_2,vgg11,vgg16,vgg19,vit_b_16,vit_b_32,vit_l_16 `
-      --batch_size 128
-   ```
-   Итог: Для каждой указанной модели сохраняются эмбеддинги объектов обучающей выборки CIFAR-10. На выходе формируется набор файлов с представлениями, который далее используется как обучающая часть для downstream-оценки и, при необходимости, для других экспериментов с эмбеддингами..
-2. Получить эмбеддинги на тесте:
-   ```powershell
-    python -m scripts.run_extract_embeddings `
-      --dataset cifar10 `
-      --data_root .\data `
-      --split test `
-      --output_dir .\data\embeddings\cifar10_test `
-      --models resnet18,resnet50,wide_resnet50_2,vgg11,vgg16,vgg19,vit_b_16,vit_b_32,vit_l_16 `
-      --batch_size 128
-   ```
-   Итог: Для каждой указанной модели сохраняются эмбеддинги объектов тестовой выборки CIFAR-10. Эти представления далее используются для вычисления парных метрик между моделями и для оценки качества самих эмбеддингов на downstream-задаче.
-3. Downstream train -> test:
-   ```powershell
-    python -m scripts.run_compute_downstream_scores `
-      --train_embeddings_dir .\data\embeddings\cifar10_train `
-      --test_embeddings_dir .\data\embeddings\cifar10_test `
-      --data_root .\data `
-      --out_json .\data\downstream\cifar10_mlp.json `
-      --task_name cifar10_mlp
-   ```
-   Итог: Для эмбеддингов каждой модели обучается простой downstream-классификатор на train-части и оценивается на test-части. На выходе получается JSON-файл с итоговыми downstream-результатами моделей, который служит опорным сигналом качества представлений и затем используется для оценки того, насколько хорошо парные и одиночные метрики согласуются с реальной разницей в качестве моделей.
+1. Задать рабочую папку проекта и основные пути:
 
-4. Посчитать метрики на тестовой выборке:
+   ```bash
+   PROJECT_DIR="$HOME/YarTwoProject"
+   cd "$PROJECT_DIR"
 
-   а. для антисимметричных версий метрик
-   ```powershell
-    python -m scripts.run_compute_embedding_metrics `
-      --embeddings_dir .\data\embeddings\cifar10_test `
-      --out_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\metric_matrices\cifar10_test `
-      --include directed_k10,lin_k10,lin_k5,lin_k20,lin_k40,lin_eps_5,lin_eps_10,lin_eps_20,multiscale_mean,rff_k10 `
-      --seed 42 `
-      --incremental
-   ```
-   
-   b. для семмитричных версий метрик
-   ```powershell
-    python -m scripts.run_compute_embedding_metrics `
-      --embeddings_dir .\data\embeddings\cifar10_test `
-      --out_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\metric_matrices\cifar10_test `
-      --include directed_k10,lin_k10_sym,lin_k5_sym,lin_k20_sym,lin_k40_sym,lin_eps_5_sym,lin_eps_10_sym,lin_eps_20_sym,multiscale_mean_sym,rff_k10_sym `
-      --seed 42 `
-      --incremental
-   ```
-   Итог: Для каждой выбранной метрики строится матрица попарных сравнений моделей на тестовых эмбеддингах. Иными словами, для каждой пары моделей получается численное значение метрики, отражающее степень их различия или сходства в выбранном протоколе. На выходе формируются готовые матрицы метрик, которые затем можно сопоставлять с реальными различиями в downstream-качестве моделей.
-   
-   Важно, что попарные метрики посчитаются по **всем** парам эмбеддингов, которые находятся в `embeddings_dir`. Можно добавлять модели, уже посчитанные метрики пересчитываться не будут. Но убрать из матрицы уже посчитанные модели - пока не реализовано. Аналогично для всякого расчёта любых метрик.
+   DATA_ROOT="$PROJECT_DIR/data"
+   DATASET="food101"
+   TRAIN_SPLIT="train"
+   TEST_SPLIT="test"
+   TRAIN_DATASET_KEY="${DATASET}_${TRAIN_SPLIT}"
+   TEST_DATASET_KEY="${DATASET}_${TEST_SPLIT}"
 
-5. Запустить оценку метрик посредством результатов работы MLP:
+   TRAIN_EMB_DIR="$DATA_ROOT/embeddings/$TRAIN_DATASET_KEY"
+   TEST_EMB_DIR="$DATA_ROOT/embeddings/$TEST_DATASET_KEY"
+   DOWNSTREAM_JSON="$DATA_ROOT/downstream/${DATASET}_mlp.json"
+   LOCAL_MAPS_ROOT="$DATA_ROOT/local_maps"
+   EXPERIMENT_ROOT="$DATA_ROOT/experiments/${DATASET}_centered_v2_knn"
+   ```
 
-   а. для антисимметричных версий метрик
-   ```powershell
-    python -m scripts.run_evaluate_metrics `
-      --metrics_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\metric_matrices\cifar10_test `
-      --downstream_json .\data\downstream\cifar10_mlp.json `
-      --out_csv .\data\experiments\exp01_antisym_cifar10_09-03-2026\reports\cifar10_eval_signed.csv `
-      --eval_protocol delta_signed `
-      --plots_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\plots\cifar10_test_signed `
-      --plots_mode alltasks `
-      --plots_ext svg,png
-   ```
-   
-   b. для симметричных версий метрик
-   ```powershell
-    python -m scripts.run_evaluate_metrics `
-      --metrics_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\metric_matrices\cifar10_test `
-      --downstream_json .\data\downstream\cifar10_mlp.json `
-      --out_csv .\data\experiments\exp02_sym_cifar10_10-03-2026\reports\cifar10_eval.csv `
-      --eval_protocol abs `
-      --plots_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\plots\cifar10_test_signed `
-      --plots_mode alltasks `
-      --plots_ext svg,png
-   ```
-   Итог: Для каждой парной метрики вычисляется, насколько хорошо её значения согласуются с реальными различиями в downstream-качестве моделей.
-На выходе формируется итоговая таблица оценки метрик, в которой для каждой метрики собраны корреляции и вспомогательные показатели качества.
-В антисимметричном протоколе проверяется согласованность с направленной разницей качества между моделями, а в симметричном — с абсолютной величиной этой разницы..
+2. Задать модели и общие параметры расчёта:
 
-6. Получение графиков по результатам оценки метрик:
+   ```bash
+   MODELS="resnet18,resnet34,resnet50,resnet50_v2,resnet101,resnet101_v2,wide_resnet50_2,wide_resnet50_2_v2,wide_resnet101_2,wide_resnet101_2_v2,vgg11,vgg13,vgg16,vgg19,vit_b_16,vit_b_16_swag_e2e,vit_b_16_swag_linear,vit_b_32,vit_l_16,vit_l_16_swag_linear,vit_l_32"
+   SEED="42"
+   BATCH_SIZE="128"
+   DEVICE="auto"
+   BACKEND="cuda"
+   N_CENTERS="200"
+   MAP_DTYPE="float32"
+   ```
 
-   а. для антисимметричных версий метрик
-   ```powershell
-    python -m scripts.plot_metric_summary `
-      --eval_csv .\data\experiments\exp01_antisym_cifar10_09-03-2026\reports\cifar10_eval_signed.csv `
-      --out_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026 `
-      --dataset cifar10 `
-      --protocol "Δacc" `
-      --out_name metrics_summary_antisym.png
+3. Задать режим геометрии и окрестности для сравнения обычного kNN с адаптивным kNN:
+
+   ```bash
+   LOCAL_GEOMETRY_MODE="centered_offsets_v2"
+   K_LIST="5,10,20,40,80"
+   RFF_K_LIST=""
+   EPS_PERCENTILES=""
+   WEIGHTED_EPS_PERCENTILES=""
+   WEIGHTED_EPS_SCALE="3.0"
    ```
-   
-   b. для симметричных версий метрик
-   ```powershell
-    python -m scripts.plot_metric_summary `
-      --eval_csv .\data\experiments\exp02_sym_cifar10_10-03-2026\reports\cifar10_eval.csv `
-      --out_dir .\data\experiments\exp02_sym_cifar10_10-03-2026 `
-      --dataset cifar10 `
-      --protocol "|Δacc|" `
-      --out_name metrics_summary_sym.png
+
+4. Если нужен полный набор окрестностей, задать kNN, RFF и epsilon-варианты:
+
+   ```bash
+   LOCAL_GEOMETRY_MODE="absolute_coords_v0"
+   EXPERIMENT_ROOT="$DATA_ROOT/experiments/${DATASET}_absolute_all"
+   K_LIST="5,10,20,40,80"
+   RFF_K_LIST="10"
+   EPS_PERCENTILES="5,10,20"
+   WEIGHTED_EPS_PERCENTILES="5,10,20"
+   WEIGHTED_EPS_SCALE="3.0"
    ```
-   Итог: Строятся итоговые сравнительные графики, на которых видно, какие парные метрики лучше всего согласуются с downstream-различиями моделей. Эти визуализации позволяют быстро сравнить варианты метрик между собой и выделить наиболее сильные конфигурации по выбранному протоколу оценки.
+
+5. Задать параметры отчётов и графиков:
+
+   ```bash
+   PLOTS_EXT="png,svg"
+   PLOTS_MODE="alltasks"
+   EVAL_PROTOCOL="delta_signed"
+   ```
+
+6. Сохранить эмбеддинги обучающей части набора данных:
+
+   ```bash
+   python -m scripts.run_extract_embeddings \
+     --dataset "$DATASET" \
+     --data_root "$DATA_ROOT" \
+     --split "$TRAIN_SPLIT" \
+     --output_dir "$TRAIN_EMB_DIR" \
+     --models "$MODELS" \
+     --batch_size "$BATCH_SIZE"
+   ```
+
+7. Сохранить эмбеддинги тестовой части набора данных:
+
+   ```bash
+   python -m scripts.run_extract_embeddings \
+     --dataset "$DATASET" \
+     --data_root "$DATA_ROOT" \
+     --split "$TEST_SPLIT" \
+     --output_dir "$TEST_EMB_DIR" \
+     --models "$MODELS" \
+     --batch_size "$BATCH_SIZE"
+   ```
+
+8. Обучить простой классификатор на обучающих эмбеддингах, проверить его на тестовых эмбеддингах и сохранить качество моделей:
+
+   ```bash
+   python -m scripts.run_compute_downstream_scores \
+     --train_embeddings_dir "$TRAIN_EMB_DIR" \
+     --test_embeddings_dir "$TEST_EMB_DIR" \
+     --dataset "$DATASET" \
+     --data_root "$DATA_ROOT" \
+     --out_json "$DOWNSTREAM_JSON" \
+     --task_name "${DATASET}_mlp"
+   ```
+
+9. Посчитать локальные отображения между парами моделей. Без `--store_maps` сохраняются спектры и служебные величины, а не полные матрицы отображений:
+
+   ```bash
+   python -m scripts.run_compute_local_map_store \
+     --embeddings_dir "$TEST_EMB_DIR" \
+     --out_root "$LOCAL_MAPS_ROOT" \
+     --dataset_key "$TEST_DATASET_KEY" \
+     --models "$MODELS" \
+     --k_list "$K_LIST" \
+     --rff_k_list "$RFF_K_LIST" \
+     --eps_percentiles "$EPS_PERCENTILES" \
+     --weighted_eps_percentiles "$WEIGHTED_EPS_PERCENTILES" \
+     --weighted_eps_scale "$WEIGHTED_EPS_SCALE" \
+     --n_centers "$N_CENTERS" \
+     --seed "$SEED" \
+     --local_geometry_mode "$LOCAL_GEOMETRY_MODE" \
+     --backend "$BACKEND" \
+     --map_dtype "$MAP_DTYPE" \
+     --incremental
+   ```
+
+10. Задать папку с готовыми локальными отображениями. Значение `STORE_ID` берётся из имени папки внутри `data/local_maps/<ключ_набора>/`:
+
+   ```bash
+   STORE_ID="45734736e2cf"
+   MAPS_DIR="$LOCAL_MAPS_ROOT/$TEST_DATASET_KEY/$STORE_ID"
+   METRICS_EXPERIMENT_DIR="$EXPERIMENT_ROOT/store_metrics"
+   ```
+
+11. Посчитать фиксированные kNN-метрики и адаптивную kNN-метрику по готовым локальным отображениям:
+
+   ```bash
+   SELECTORS="fixed_k,adaptive"
+   FIXED_KS="$K_LIST"
+   AGGREGATIONS="rankme,stable_rank,nesum,pseudo_condition_number,alpha_req,spectral_entropy,hard_rank,tail_spectrum_log_ratio"
+   PAIR_AGG="antisym"
+
+   python -m scripts.run_compute_metrics_from_local_maps \
+     --maps_dir "$MAPS_DIR" \
+     --dataset_key "$TEST_DATASET_KEY" \
+     --models "$MODELS" \
+     --selectors "$SELECTORS" \
+     --fixed_ks "$FIXED_KS" \
+     --k_list "$K_LIST" \
+     --aggregations "$AGGREGATIONS" \
+     --pair_agg "$PAIR_AGG" \
+     --experiment_dir "$METRICS_EXPERIMENT_DIR" \
+     --downstream_json "$DOWNSTREAM_JSON" \
+     --eval_protocol "$EVAL_PROTOCOL" \
+     --local_geometry_mode "$LOCAL_GEOMETRY_MODE" \
+     --plots_mode "$PLOTS_MODE" \
+     --plots_ext "$PLOTS_EXT" \
+     --incremental
+   ```
+
+12. Посчитать явно перечисленные метрики, включая RFF и epsilon-варианты:
+
+   ```bash
+   INCLUDE_METRICS="lin_k5_rankme_antisym,lin_k10_rankme_antisym,lin_k20_rankme_antisym,lin_k40_rankme_antisym,lin_k80_rankme_antisym,adaptive_k5_10_20_40_80_rankme_antisym,rff_k10_rankme_antisym,lin_eps_5_rankme_antisym,lin_eps_10_rankme_antisym,lin_eps_20_rankme_antisym,w_eps_5_rankme_antisym,w_eps_10_rankme_antisym,w_eps_20_rankme_antisym"
+
+   python -m scripts.run_compute_metrics_from_local_maps \
+     --maps_dir "$MAPS_DIR" \
+     --dataset_key "$TEST_DATASET_KEY" \
+     --models "$MODELS" \
+     --include "$INCLUDE_METRICS" \
+     --experiment_dir "$METRICS_EXPERIMENT_DIR" \
+     --downstream_json "$DOWNSTREAM_JSON" \
+     --eval_protocol "$EVAL_PROTOCOL" \
+     --local_geometry_mode "$LOCAL_GEOMETRY_MODE" \
+     --plots_mode "$PLOTS_MODE" \
+     --plots_ext "$PLOTS_EXT" \
+     --incremental
+   ```
+
+Примечания:
+
+* Для сравнения фиксированных kNN-метрик с адаптивной kNN-метрикой используйте один и тот же `LOCAL_GEOMETRY_MODE`.
+* Для текущего варианта с центрированием используется `centered_offsets_v2`.
+* Для старого варианта без центрирования используется `absolute_coords_v0`.
+* `--incremental` продолжает расчёт и не пересчитывает уже готовые результаты.
+* Без `--store_maps` сохраняются спектры и служебные значения. Это основной режим для больших запусков.
+
 </details>
 
-B) Ниже представлены примеры команд запуска вывода графиков, связанных непосредственно с матрицей отображения.
-
 <details>
-  <summary><b>▶ Пример запуска</b></summary>
+  <summary><b>▶ Диагностика и вспомогательные запуски</b></summary>
 
-  1. Общая агрегация по всем метрикам
-   ```powershell
-   python -m scripts.run_diagnose_local_map `
-      --artifacts_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\artifacts `
-      --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\summary `
-      --degenerate_threshold 0.01 `
-      --plots_ext svg,png
-   ```
-   Итог: Строятся графики, тражающие качество отображения. Четыре главных графика:
-   * Стабильность ранга
-   * Ошибка решения линейного уравнения
-   * Одновременная вырожденность
-   * Спектр сингулярных значений
-   
-   А также дополнительные графики для каждой метрики в отдельности:
-   * Гистограмма рангов
-   * Распределение ошибок решения
-   * Вырожденность по направлениям (по парам)
-   * Одновременная вырожденность (по парам)
+1. Задать основные пути к уже посчитанному эксперименту:
 
-2. Даннsе по конкретной паре моделей
-   ```powershell
-   python -m scripts.run_diagnose_local_map `
-      --artifacts_path .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\metric_matrices\cifar10_test\artifacts\lin_k10_artifacts.npz `
-      --model_a resnet50 `
-      --model_b vit_b_16 `
-      --out_dir .\data\experiments\exp06_antisym_diagn_cifar10_18-03-2026\diagnostics\cifar10_test\paars\pair_resnet50_vit_b_16 `
-      --degenerate_threshold 0.01 `
-      --plots_ext svg,png
+   ```bash
+   PROJECT_DIR="$HOME/YarTwoProject"
+   cd "$PROJECT_DIR"
+
+   DATA_ROOT="$PROJECT_DIR/data"
+   DATASET="food101"
+   TEST_DATASET_KEY="${DATASET}_test"
+   EXPERIMENT_ROOT="$DATA_ROOT/experiments/${DATASET}_centered_v2_knn"
+   METRICS_EXPERIMENT_DIR="$EXPERIMENT_ROOT/store_metrics"
+   DOWNSTREAM_JSON="$DATA_ROOT/downstream/${DATASET}_mlp.json"
+   PLOTS_EXT="png,svg"
+   PLOTS_MODE="alltasks"
    ```
-   Итог: графики качества отображения для конкретной пары моделей. Графики следующие:
-   * Гистограмма рангов
-   * Распределение ошибок решения
-   * Boxplot для ошибок решения
-   * Сингулярные значения
-      * Для отображения $X\to Y$
-      * Для отображения $Y\to X$
-   Также выводится таблица со значенимями.
+
+2. Посчитать только одну часть исходных моделей для локальных отображений. Это удобно для параллельного ручного запуска нескольких одинаковых команд с разными значениями `SOURCE_SHARD_INDEX`:
+
+   ```bash
+   LOCAL_MAPS_ROOT="$DATA_ROOT/local_maps"
+   TEST_EMB_DIR="$DATA_ROOT/embeddings/$TEST_DATASET_KEY"
+   MODELS="primary"
+   LOCAL_GEOMETRY_MODE="centered_offsets_v2"
+   K_LIST="5,10,20,40,80"
+   RFF_K_LIST=""
+   EPS_PERCENTILES=""
+   WEIGHTED_EPS_PERCENTILES=""
+   WEIGHTED_EPS_SCALE="3.0"
+   SOURCE_SHARD_INDEX="0"
+   SOURCE_SHARD_COUNT="21"
+
+   python -m scripts.run_compute_local_map_store \
+     --embeddings_dir "$TEST_EMB_DIR" \
+     --out_root "$LOCAL_MAPS_ROOT" \
+     --dataset_key "$TEST_DATASET_KEY" \
+     --models "$MODELS" \
+     --k_list "$K_LIST" \
+     --rff_k_list "$RFF_K_LIST" \
+     --eps_percentiles "$EPS_PERCENTILES" \
+     --weighted_eps_percentiles "$WEIGHTED_EPS_PERCENTILES" \
+     --weighted_eps_scale "$WEIGHTED_EPS_SCALE" \
+     --n_centers "200" \
+     --seed "42" \
+     --local_geometry_mode "$LOCAL_GEOMETRY_MODE" \
+     --backend "cuda" \
+     --map_dtype "float32" \
+     --source_shard_index "$SOURCE_SHARD_INDEX" \
+     --source_shard_count "$SOURCE_SHARD_COUNT" \
+     --incremental
+   ```
+
+3. Посчитать одиночные метрики качества эмбеддингов для каждой модели:
+
+   ```bash
+   TEST_EMB_DIR="$DATA_ROOT/embeddings/$TEST_DATASET_KEY"
+   SINGLE_METRICS_ROOT="$DATA_ROOT/single_metrics"
+   SINGLE_METRICS="rankme stable_rank nesum pseudo_condition_number alpha_req"
+   MODELS="primary"
+
+   python -m scripts.run_compute_single_metrics \
+     --embeddings_dir "$TEST_EMB_DIR" \
+     --dataset_key "$TEST_DATASET_KEY" \
+     --out_root "$SINGLE_METRICS_ROOT" \
+     --models "$MODELS" \
+     --metrics $SINGLE_METRICS \
+     --device "auto"
+   ```
+
+4. Сравнить одиночные метрики с качеством моделей:
+
+   ```bash
+   SINGLE_METRICS_ROOT="$DATA_ROOT/single_metrics"
+   SINGLE_EXPERIMENT_DIR="$EXPERIMENT_ROOT/single_metrics_eval"
+
+   python -m scripts.run_evaluate_single_metrics \
+     --dataset_key "$TEST_DATASET_KEY" \
+     --single_metrics_root "$SINGLE_METRICS_ROOT" \
+     --experiment_dir "$SINGLE_EXPERIMENT_DIR" \
+     --downstream_json "$DOWNSTREAM_JSON" \
+     --plots_mode "$PLOTS_MODE" \
+     --plots_ext "$PLOTS_EXT" \
+     --protocol "signed"
+   ```
+
+5. Построить общие диагностические графики по всем артефактам метрик:
+
+   ```bash
+   ARTIFACTS_DIR="$METRICS_EXPERIMENT_DIR/metric_matrices/$TEST_DATASET_KEY/artifacts"
+   DIAGNOSTICS_DIR="$METRICS_EXPERIMENT_DIR/diagnostics/$TEST_DATASET_KEY"
+
+   python -m scripts.run_diagnose_local_map \
+     --artifacts_dir "$ARTIFACTS_DIR" \
+     --out_dir "$DIAGNOSTICS_DIR/summary" \
+     --degenerate_threshold "0.01" \
+     --plots_ext "$PLOTS_EXT"
+   ```
+
+6. Построить диагностические графики для одной пары моделей:
+
+   ```bash
+   ARTIFACTS_DIR="$METRICS_EXPERIMENT_DIR/metric_matrices/$TEST_DATASET_KEY/artifacts"
+   DIAGNOSTICS_DIR="$METRICS_EXPERIMENT_DIR/diagnostics/$TEST_DATASET_KEY"
+   ARTIFACT_NAME="lin_k10_antisym_artifacts.npz"
+   MODEL_A="resnet50"
+   MODEL_B="vit_b_16"
+
+   python -m scripts.run_diagnose_local_map \
+     --artifacts_path "$ARTIFACTS_DIR/$ARTIFACT_NAME" \
+     --model_a "$MODEL_A" \
+     --model_b "$MODEL_B" \
+     --out_dir "$DIAGNOSTICS_DIR/pair_${MODEL_A}_${MODEL_B}" \
+     --degenerate_threshold "0.01" \
+     --plots_ext "$PLOTS_EXT"
+   ```
+
+7. Сравнить режимы центрирования по уже готовым артефактам. Новый расчёт локальных отображений эта команда не запускает:
+
+   ```bash
+   ABS_EXPERIMENT_DIR="$DATA_ROOT/experiments/${DATASET}_absolute_coords_v0/store_metrics"
+   CV2_EXPERIMENT_DIR="$DATA_ROOT/experiments/${DATASET}_centered_v2_knn/store_metrics"
+   CENTERING_OUT_DIR="$DATA_ROOT/experiments/${DATASET}_centering_comparison"
+   CENTERING_ARTIFACT_NAME="lin_k10_antisym_artifacts.npz"
+
+   python -m scripts.plot_centering_comparison_diagnostics \
+     --experiment "absolute_coords_v0=$ABS_EXPERIMENT_DIR" \
+     --experiment "centered_offsets_v2=$CV2_EXPERIMENT_DIR" \
+     --dataset_key "$TEST_DATASET_KEY" \
+     --artifact_name "$CENTERING_ARTIFACT_NAME" \
+     --out_dir "$CENTERING_OUT_DIR" \
+     --plots_ext "$PLOTS_EXT"
+   ```
+
 </details>
 
-C) Далее прадставлен пример расчёта "одиночных" метрик (метрик качества эмбеддингов) из статьи [Unsupervised Embedding Quality Evaluation](https://proceedings.mlr.press/v221/tsitsulin23a.html).
-
 <details>
-<summary><b>▶ Пример запуска</b></summary>
+  <summary><b>▶ Расчёт без сохранённых локальных отображений</b></summary>
 
-1. Вычисление "одиночных" метрик:
-   ```powershell
-    python -m scripts.run_compute_single_metrics `
-      --embeddings_dir .\data\embeddings\cifar10_test `
-      --dataset_key cifar10_test `
-      --out_root .\data\single_metrics `
-      --device auto
-   ```
-   Итог: Для эмбеддингов каждой модели вычисляются одиночные метрики качества представлений, то есть такие характеристики, которые оценивают каждое пространство эмбеддингов само по себе, без попарного сравнения с другими моделями. На выходе получается набор файлов со значениями этих метрик для всех моделей.
+1. Задать рабочую папку проекта и основные пути:
 
-2. Запустить оценку метрик качества эмбеддингов посредством результатов работы MLP:
+   ```bash
+   PROJECT_DIR="$HOME/YarTwoProject"
+   cd "$PROJECT_DIR"
 
-   а. по протоколу `signed`
-   ```powershell
-    python -m scripts.run_evaluate_single_metrics `
-      --single_metrics_dir .\data\single_metrics\cifar10_test `
-      --downstream_json .\data\downstream\cifar10_mlp.json `
-      --out_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_signed.csv `
-      --out_pairs_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_pairs_signed `
-      --plots_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_scatter_signed `
-      --plots_mode alltasks `
-      --protocol signed
-   ```
-   
-   b. по протоколу `abs`
-   ```powershell
-    python -m scripts.run_evaluate_single_metrics `
-      --single_metrics_dir .\data\single_metrics\cifar10_test `
-      --downstream_json .\data\downstream\cifar10_mlp.json `
-      --out_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_abs.csv `
-      --out_pairs_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_pairs_abs `
-      --protocol abs
-   ```
-   Итог: Значения одиночных метрик переводятся в формат, пригодный для сравнения с downstream-результатами моделей.
-   Для этого по значениям одиночных метрик для разных моделей строятся попарные различия, после чего проверяется, насколько эти различия согласуются с разницей в downstream-качестве.
-   На выходе получаются:
-   * итоговая таблица качества одиночных метрик;
-   * вспомогательные попарные таблицы, используемые для дальнейшей визуализации и анализа.
-   Для `signed` в итоговой таблице также сохраняется доля правильного ранжирования (`correct_ratio_*`), а при указании `--plots_dir` строятся scatter-графики `u(e_i)-u(e_j)` против `Δacc`.
-
-3. Итоговый диагностический график для "одиночных" метрик:
-   ```powershell
-   python -m scripts.plot_single_metric_diagnostics `
-      --single_eval_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_signed.csv `
-      --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\single_metric_diagnostics `
-      --dataset cifar10 `
-      --protocol signed `
-      --title "single-diff"
+   DATA_ROOT="$PROJECT_DIR/data"
+   DATASET="cifar10"
+   TEST_DATASET_KEY="${DATASET}_test"
+   TEST_EMB_DIR="$DATA_ROOT/embeddings/$TEST_DATASET_KEY"
+   DOWNSTREAM_JSON="$DATA_ROOT/downstream/${DATASET}_mlp.json"
+   EXPERIMENT_ROOT="$DATA_ROOT/experiments/${DATASET}_direct_metrics"
    ```
 
-4. Графики для сравнения "одиночных" и попарных метрик:
+2. Задать список метрик и параметры расчёта:
 
-   а. по протоколу `signed`
-   ```powershell
-    python -m scripts.plot_single_metric_summary `
-      --single_eval_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_signed.csv `
-      --pairwise_eval_csv .\data\experiments\exp01_antisym_cifar10_09-03-2026\reports\cifar10_eval_signed.csv `
-      --single_protocol signed `
-      --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\antisym-pairwise-single_final_comparison `
-      --plots_ext svg,png `
-      --title "CIFAR10 | Δacc" `
-      --save_pairwise_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\antisym-pairwise-single_final_comparison\pairwise_only.csv `
-      --save_single_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\antisym-pairwise-single_final_comparison\single_diff_only.csv `
-      --save_best_comparison_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\antisym-pairwise-single_final_comparison\best_pairwise_vs_single.csv
+   ```bash
+   INCLUDE_METRICS="directed_k10,lin_k10_antisym,lin_k5_antisym,lin_k20_antisym,lin_k40_antisym,lin_eps_5_antisym,lin_eps_10_antisym,lin_eps_20_antisym,multiscale_mean_antisym,rff_k10_antisym"
+   SEED="42"
+   LOCAL_GEOMETRY_MODE="centered_offsets_v2"
+   METRICS_DIR="$EXPERIMENT_ROOT/metric_matrices/$TEST_DATASET_KEY"
+   REPORTS_DIR="$EXPERIMENT_ROOT/reports"
+   PLOTS_DIR="$EXPERIMENT_ROOT/plots/$TEST_DATASET_KEY"
    ```
-   
-   b. по протоколу `abs`
-   ```powershell
-    python -m scripts.plot_single_metric_summary `
-      --single_eval_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\single_metric_eval_abs.csv `
-      --pairwise_eval_csv .\data\experiments\exp02_sym_cifar10_10-03-2026\reports\cifar10_eval.csv `
-      --single_protocol abs `
-      --out_dir .\data\experiments\exp03_single_cifar10_11-03-2026\reports\plots\sym-pairwise-single_final_comparison `
-      --plots_ext svg,png `
-      --title "CIFAR10 | |Δacc|" `
-      --save_pairwise_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\sym-pairwise-single_final_comparison\pairwise_only.csv `
-      --save_single_table_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\sym-pairwise-single_final_comparison\single_diff_only.csv `
-      --save_best_comparison_csv .\data\experiments\exp03_single_cifar10_11-03-2026\reports\sym-pairwise-single_final_comparison\best_pairwise_vs_abs.csv
+
+3. Посчитать парные метрики напрямую по эмбеддингам:
+
+   ```bash
+   python -m scripts.run_compute_embedding_metrics \
+     --embeddings_dir "$TEST_EMB_DIR" \
+     --out_dir "$METRICS_DIR" \
+     --include "$INCLUDE_METRICS" \
+     --seed "$SEED" \
+     --local_geometry_mode "$LOCAL_GEOMETRY_MODE" \
+     --incremental
    ```
-   Итог: Строятся итоговые визуализации, в которых одиночные метрики качества эмбеддингов напрямую сравниваются с лучшими парными метриками. Это позволяет увидеть, какие подходы лучше объясняют различия в downstream-качестве моделей: парные меры сравнения пространств или одиночные меры качества самих эмбеддингов.
-</details>
 
-D) Ниже указаны команды для графиков, сравнивающих одиночные и попарные метрики в оценке качества эмбеддингов.
+4. Оценить метрики по качеству моделей:
 
-<details>
-<summary><b>▶ Пример запуска</b></summary>
-
-1. Тепловая карта по семействам моделей для "одиночных" метрик:
-
-   а. по протоколу `signed`
-   ```powershell
-   python -m scripts.plot_pairwise_error_heatmaps `
-      --downstream_json .\data\downstream\cifar10_mlp.json `
-      --single_metrics_dir .\data\single_metrics\cifar10_test `
-      --family_map_json .\data\experiments\model_families.json `
-      --out_dir .\data\experiments\exp04_heatmap_13-03-2026\reports\family_corr_signed `
-      --pairwise_metrics_dir .\data\experiments\exp01_antisym_cifar10_09-03-2026\metric_matrices\cifar10_test `
-      --protocol signed `
-      --corr_type spearman `
-      --title "CIFAR10 signed" `
-      --plots_ext svg,png `
-      --annotate
+   ```bash
+   python -m scripts.run_evaluate_metrics \
+     --metrics_dir "$METRICS_DIR" \
+     --downstream_json "$DOWNSTREAM_JSON" \
+     --out_csv "$REPORTS_DIR/${DATASET}_eval_signed.csv" \
+     --eval_protocol "delta_signed" \
+     --plots_dir "$PLOTS_DIR/scatter" \
+     --plots_mode "alltasks" \
+     --plots_ext "png,svg"
    ```
-   
-   b. по протоколу `abs`
-   ```powershell
-   python -m scripts.plot_pairwise_error_heatmaps `
-      --downstream_json .\data\downstream\cifar10_mlp.json `
-      --single_metrics_dir .\data\single_metrics\cifar10_test `
-      --family_map_json .\data\experiments\model_families.json `
-      --out_dir .\data\experiments\exp04_heatmap_13-03-2026\reports\family_corr_abs `
-      --pairwise_metrics_dir .\data\experiments\exp02_sym_cifar10_10-03-2026\metric_matrices\cifar10_test `
-      --protocol abs `
-      --corr_type spearman `
-      --title "CIFAR10 abs" `
-      --plots_ext svg,png `
-      --annotate
-   ```
-   
-   Файл `model_families.json` разбивает модели на семейства. Пример файла:
-   ```json
-   {
-    	"resnet18": "resnet",
-        "resnet50": "resnet",
-        "vgg11": "vgg",
-        "vgg16": "vgg",
-        "vgg19": "vgg",
-        "vit_b_16": "vit",
-        "vit_b_32": "vit",
-        "vit_l_16": "vit",
-        "wide_resnet50_2": "resnet"
-   }
-   ```
-   Итог: Строятся графики, показывающие, насколько хорошо одиночные И попарные метрики согласуются с downstream-различиями в разрезе семейств моделей. Такая визуализация позволяет увидеть, на каких архитектурных группах метрика работает лучше или хуже, и помогает анализировать не только общий средний результат, но и устойчивость поведения метрики на разных типах моделей. 
-   
-   Графики характеристики выборки:
-   * Показывает количество пар моделей, сравниваемых между каждой парой семейств моделей.
-   * Средняя значение целевой величины ($\Delta\mathrm{accuracy}$ для протокола `signed` и $|\Delta\mathrm{accuracy}|$ для протокола `abc`) по семействам.
-   
-   Графики по метрикам:
-   * Корреляция метрики и целевой величины по семействам моделей - тепловая карта.
-   * Абляционные графики изменения корреляции при удалении конкретного семейства моделей - столбчатые диаграммы.
 
-   Для получения графиков только для попарных или только непарных метрик, досточно просто не указывать дирректорию с матрицами для непарных и парных метрик соответственно.
+5. Построить итоговый график сравнения метрик:
+
+   ```bash
+   python -m scripts.plot_metric_summary \
+     --eval_csv "$REPORTS_DIR/${DATASET}_eval_signed.csv" \
+     --out_dir "$EXPERIMENT_ROOT" \
+     --dataset "$DATASET" \
+     --protocol "Δacc" \
+     --out_name "metrics_summary_antisym.png"
+   ```
+
 </details>
 <p align="right">(<a href="#readme-top">Вернуться к началу</a>)</p>
 

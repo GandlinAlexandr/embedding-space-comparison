@@ -28,7 +28,7 @@ def _set_determinism(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    # Детерминизм порядка (cuDNN) без "строгого" режима, который требует CUBLAS_WORKSPACE_CONFIG.
+    # Детерминизм порядка
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
@@ -98,8 +98,8 @@ def _parse_model_filter(raw: Optional[str]) -> Optional[list[str]]:
     unknown = [x for x in names if x not in TEXT_EMBEDDING_MODEL_BY_ID]
     if unknown:
         raise ValueError(
-            f"Unknown text model ids in --models: {unknown}. "
-            f"Available: {TEXT_EMBEDDING_MODEL_IDS}"
+            f"Неизвестные идентификаторы текстовых моделей в --models: {unknown}. "
+            f"Доступно: {TEXT_EMBEDDING_MODEL_IDS}"
         )
     return names
 
@@ -167,10 +167,10 @@ def _resolve_labels_holdout(
 ) -> np.ndarray:
     """
     Метки для holdout-режима:
-    - если labels_path задан, грузим из файла;
-    - иначе пытаемся загрузить по (dataset_name, data_root, split), где split
+    - если labels_path задан, грузит из файла;
+    - иначе пытается загрузить по (dataset_name, data_root, split), где split
       выводится из имени папки embeddings_dir.
-      Если не удалось — считаем split='test' по умолчанию.
+      Если не удалось — считает split='test' по умолчанию.
     """
     if labels_path:
         return _load_labels_file(labels_path)
@@ -200,9 +200,9 @@ def _resolve_labels_train_test(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Метки для train/test-режима:
-    - если labels_path задан, считаем это старым совместимым режимом и используем
+    - если labels_path задан, считает это старым совместимым режимом и использует
       один и тот же массив меток для train и test;
-    - иначе грузим train/test метки отдельно через datasets.io.load_labels.
+    - иначе грузит train/test метки отдельно через datasets.io.load_labels.
     """
     if labels_path:
         y = _load_labels_file(labels_path)
@@ -218,7 +218,12 @@ def _resolve_labels_train_test(
         if test_embeddings_dir is not None
         else ""
     )
-    if train_labels_path and test_labels_path and os.path.exists(train_labels_path) and os.path.exists(test_labels_path):
+    if (
+        train_labels_path
+        and test_labels_path
+        and os.path.exists(train_labels_path)
+        and os.path.exists(test_labels_path)
+    ):
         return _load_labels_file(train_labels_path), _load_labels_file(test_labels_path)
 
     if not dataset_name or not data_root:
@@ -239,7 +244,6 @@ def _resolve_labels_train_test(
 class MLPProbe(nn.Module):
     def __init__(self, dim: int, n_classes: int, dropout: float = 0.3):
         super().__init__()
-        # Совмещаем текущий пайплайн с архитектурой probe из прошлогоднего benchmark'а:
         # 3 линейных слоя, 2 ReLU и 1 Dropout.
         self.net = nn.Sequential(
             nn.Linear(dim, 2048),
@@ -441,7 +445,7 @@ def main():
     )
 
     # Два режима:
-    # 1) Отложенный режим: embeddings_dir содержит ОДНО разделение, мы выполняем разделение на обучающую и валидационную выборки внутри него.
+    # 1) Отложенный режим: embeddings_dir содержит ОДНО разделение, выполняет разделение на обучающую и валидационную выборки внутри него.
     # 2) Обучающий/тестовый режим: train_embeddings_dir + test_embeddings_dir.
     parser.add_argument(
         "--embeddings_dir",
@@ -562,8 +566,9 @@ def main():
         type=str,
         default="",
         help=(
-            "Необязательный фильтр моделей: comma-separated model ids или alias text20. "
-            "Если пусто, используются все общие embedding-файлы."
+            "Необязательный фильтр моделей: идентификаторы через запятую "
+            "или псевдоним text20. Если пусто, используются все общие "
+            "файлы эмбеддингов."
         ),
     )
 

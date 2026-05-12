@@ -1,15 +1,3 @@
-"""
-Шаг 0 протокола.
-
-Назначение:
-- загрузить модель
-- прогнать датасет
-- сохранить эмбеддинги в формате .npy
-
-Выход:
-data/embeddings/{...}/{model_name}.npy
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -31,7 +19,7 @@ from datasets.io import (
 from model_zoo.registry import (
     get_model,
     available_models,
-)  # вынесено в отдельный пакет model_zoo/
+)
 
 
 def _stratified_subset_indices(
@@ -60,7 +48,9 @@ def _stratified_subset_indices(
     while int(np.sum(quotas)) > num_samples:
         removable = np.where(quotas > 1)[0]
         if removable.size == 0:
-            raise ValueError("Не удалось построить stratified подвыборку с заданным sample_size.")
+            raise ValueError(
+                "Не удалось построить stratified подвыборку с заданным sample_size."
+            )
         frac = exact[removable] - np.floor(exact[removable])
         cls_pos = removable[int(np.argmin(frac))]
         quotas[cls_pos] -= 1
@@ -164,21 +154,21 @@ def main():
         description="Извлечь эмбеддинги из torchvision-моделей."
     )
     parser.add_argument("--dataset", type=str, default="cifar10")
-    parser.add_argument("--split", type=str, default="test", help="train|val|test|trainval")
+    parser.add_argument(
+        "--split", type=str, default="test", help="train|val|test|trainval"
+    )
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument(
         "--output_dir",
         type=str,
         default="",
         help=(
-            "Куда сохранять embeddings. Если пусто: full -> data/embeddings/<dataset>_<split>, "
-            "sampled -> data/embeddings/samples/<dataset>_<split>_sN_seedS_<strategy>."
+            "Куда сохранять эмбеддинги. Если пусто: полный сплит -> "
+            "data/embeddings/<dataset>_<split>, подвыборка -> "
+            "data/embeddings/samples/<dataset>_<split>_sN_seedS_<strategy>."
         ),
     )
 
-    # ВАЖНО:
-    # - теперь vgg16 по умолчанию означает vgg16_conv512 (см. model_zoo.registry)
-    # - если нужно старое поведение, укажи vgg16_fc4096
     parser.add_argument(
         "--models",
         type=str,
@@ -204,7 +194,7 @@ def main():
         "--sample_size",
         type=int,
         default=None,
-        help="Alias для --num_samples.",
+        help="Псевдоним для --num_samples.",
     )
     parser.add_argument(
         "--subset_strategy",
@@ -248,7 +238,9 @@ def main():
         np.save(labels_path, subset_labels)
         classes, counts = np.unique(subset_labels, return_counts=True)
         class_counts = {str(int(c)): int(n) for c, n in zip(classes, counts)}
-        with open(os.path.join(args.output_dir, "class_counts.json"), "w", encoding="utf-8") as f:
+        with open(
+            os.path.join(args.output_dir, "class_counts.json"), "w", encoding="utf-8"
+        ) as f:
             json.dump(class_counts, f, ensure_ascii=False, indent=2)
         print(f"Сохранены индексы подвыборки: {idx_path}")
         print(f"Сохранены метки подвыборки: {labels_path}")
@@ -304,12 +296,17 @@ def main():
             if int(args.num_samples) > 0 and int(args.num_samples) < len(base_dataset)
             else _dataset_key(args.dataset, args.split)
         ),
-        "sampled": bool(int(args.num_samples) > 0 and int(args.num_samples) < len(base_dataset)),
+        "sampled": bool(
+            int(args.num_samples) > 0 and int(args.num_samples) < len(base_dataset)
+        ),
         "sample_size": int(len(subset_indices)),
         "full_size": int(len(base_dataset)),
         "seed": int(args.seed),
         "subset_strategy": str(args.subset_strategy),
-        "class_counts": {str(int(c)): int(n) for c, n in zip(*np.unique(subset_labels, return_counts=True))},
+        "class_counts": {
+            str(int(c)): int(n)
+            for c, n in zip(*np.unique(subset_labels, return_counts=True))
+        },
         "subset_indices_path": (
             os.path.abspath(os.path.join(args.output_dir, "subset_indices.npy"))
             if len(subset_indices) != len(base_dataset)
@@ -323,7 +320,9 @@ def main():
         "models": model_names,
         "output_dir": os.path.abspath(args.output_dir),
     }
-    with open(os.path.join(args.output_dir, "embeddings_manifest.json"), "w", encoding="utf-8") as f:
+    with open(
+        os.path.join(args.output_dir, "embeddings_manifest.json"), "w", encoding="utf-8"
+    ) as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
 

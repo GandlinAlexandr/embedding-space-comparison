@@ -1,12 +1,3 @@
-"""
-Compute pairwise metric matrices from a reusable local-map store.
-
-The store is produced by scripts.run_compute_local_map_store and contains the
-same local maps/spectra for all k candidates.  This script is a view layer:
-fixed-k, adaptive-k and different spectrum aggregations are all derived from
-the saved candidate maps without solving local least-squares problems again.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -123,7 +114,9 @@ def _load_model_names(maps_dir: Path, models_raw: str) -> List[str]:
     if requested:
         missing = [m for m in requested if m not in names]
         if missing:
-            raise ValueError(f"--models отсутствуют в store: {missing}. Доступные: {names}")
+            raise ValueError(
+                f"--models отсутствуют в store: {missing}. Доступные: {names}"
+            )
         names = [m for m in names if m in set(requested)]
     return names
 
@@ -281,8 +274,11 @@ def _requested_from_include(
     pair_aggs = {p[0]: p for p in []}
     del pair_aggs
     pair_agg_values = {
-        "directed" if p[2] == "fixed_k" and p[0].lower().startswith("directed_")
-        else ("sym" if p[0].lower().endswith("_sym") else "antisym")
+        (
+            "directed"
+            if p[2] == "fixed_k" and p[0].lower().startswith("directed_")
+            else ("sym" if p[0].lower().endswith("_sym") else "antisym")
+        )
         for p in parsed
     }
     if len(pair_agg_values) != 1:
@@ -311,8 +307,6 @@ def _find_maps_dir(
     if root.exists():
         manifest_paths = list(root.glob("*/manifest.json"))
     else:
-        # If the store was created with an explicit --store_dir, it may not live
-        # under maps_root/<dataset_key>/<store_id>. Fall back to scanning maps_root.
         manifest_paths = list(Path(maps_root).glob("**/manifest.json"))
     matches: List[Path] = []
     for manifest_path in manifest_paths:
@@ -320,7 +314,9 @@ def _find_maps_dir(
             manifest = _load_json(manifest_path)
         except Exception:
             continue
-        if dataset_key and str(manifest.get("dataset_key", dataset_key)) != str(dataset_key):
+        if dataset_key and str(manifest.get("dataset_key", dataset_key)) != str(
+            dataset_key
+        ):
             continue
         manifest_ks = {int(k) for k in manifest.get("k_list", [])}
         manifest_store_keys = {
@@ -331,7 +327,9 @@ def _find_maps_dir(
         manifest_models = {str(m) for m in manifest.get("model_names", [])}
         if not set(required_ks).issubset(manifest_ks):
             continue
-        if required_store_keys and not set(required_store_keys).issubset(manifest_store_keys):
+        if required_store_keys and not set(required_store_keys).issubset(
+            manifest_store_keys
+        ):
             continue
         if models and not set(models).issubset(manifest_models):
             continue
@@ -391,7 +389,7 @@ def _pair_path(maps_dir: Path, model_i: str, model_j: str) -> Path:
 def _load_pair(maps_dir: Path, model_i: str, model_j: str) -> Dict[str, Any]:
     path = _pair_path(maps_dir, model_i, model_j)
     if not path.exists():
-        raise FileNotFoundError(f"Нет сохраненного направления: {path}")
+        raise FileNotFoundError(f"Нет сохранённого направления: {path}")
     z = np.load(path, allow_pickle=True)
     return {k: z[k] for k in z.files}
 
@@ -410,7 +408,9 @@ def _adaptive_store_keys_from_name(metric_name: str) -> List[str]:
     return [f"k{int(x)}" for x in m.group(1).split("_") if x]
 
 
-def _assert_same_centers(base: Dict[str, Any], other: Dict[str, Any], *, key: str) -> None:
+def _assert_same_centers(
+    base: Dict[str, Any], other: Dict[str, Any], *, key: str
+) -> None:
     a = np.asarray(base["center_indices"], dtype=np.int64).reshape(-1)
     b = np.asarray(other["center_indices"], dtype=np.int64).reshape(-1)
     if a.shape != b.shape or not np.array_equal(a, b):
@@ -427,7 +427,7 @@ def _load_pair_for_store_keys(
 ) -> Dict[str, Any]:
     keys = list(dict.fromkeys(store_keys))
     if not keys:
-        raise ValueError("store_keys пуст")
+        raise ValueError("store_keys пустой")
     merged: Dict[str, Any] | None = None
     errors: List[np.ndarray] = []
     k_candidates: List[int] = []
@@ -437,7 +437,8 @@ def _load_pair_for_store_keys(
             merged = {
                 k: v
                 for k, v in pair.items()
-                if "/" not in k and k not in {"k_candidates", "center_prediction_errors", "selected_ks"}
+                if "/" not in k
+                and k not in {"k_candidates", "center_prediction_errors", "selected_ks"}
             }
         else:
             _assert_same_centers(merged, pair, key=key)
@@ -447,9 +448,14 @@ def _load_pair_for_store_keys(
         if key.startswith("k") and key[1:].isdigit():
             k_candidates.append(int(key[1:]))
             err = np.asarray(pair["center_prediction_errors"], dtype=np.float32)
-            pair_ks = [int(x) for x in np.asarray(pair["k_candidates"], dtype=np.int32).reshape(-1)]
+            pair_ks = [
+                int(x)
+                for x in np.asarray(pair["k_candidates"], dtype=np.int32).reshape(-1)
+            ]
             if int(key[1:]) not in pair_ks:
-                raise RuntimeError(f"Store {store_dirs_by_key[key]} не содержит {key}.")
+                raise RuntimeError(
+                    f"Хранилище {store_dirs_by_key[key]} не содержит {key}."
+                )
             errors.append(err[:, [pair_ks.index(int(key[1:]))]])
 
     assert merged is not None
@@ -465,7 +471,9 @@ def _load_pair_for_store_keys(
     return merged
 
 
-def _discover_models_from_embeddings(dataset_key: str, sampled: bool = False) -> List[str]:
+def _discover_models_from_embeddings(
+    dataset_key: str, sampled: bool = False
+) -> List[str]:
     embeddings_dir = (
         _infer_sampled_embeddings_dir(dataset_key)
         if sampled
@@ -520,7 +528,7 @@ def _ensure_single_metric_values(
     ]
     if models_raw:
         cmd.extend(["--models", str(models_raw)])
-    print("\nSingle-baseline values missing; computing them:")
+    print("\nНе найдены значения одиночных базовых метрик; считаю их:")
     print(" ".join(cmd))
     subprocess.run(cmd, check=True)
 
@@ -535,7 +543,7 @@ def _load_single_scores(
     for model_name in model_names:
         path = _single_metric_path(dataset_key, metric_name, model_name)
         if not path.exists():
-            raise FileNotFoundError(f"Не найден single metric файл: {path}")
+            raise FileNotFoundError(f"Не найден файл одиночной метрики: {path}")
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
         scores[model_name] = float(payload["value"])
         hib = bool(payload.get("higher_is_better", True))
@@ -552,16 +560,15 @@ def _single_baseline_matrix(
     model_names: List[str],
     pair_agg: str,
 ) -> np.ndarray:
-    scores, higher_is_better = _load_single_scores(dataset_key, metric_name, model_names)
+    scores, higher_is_better = _load_single_scores(
+        dataset_key, metric_name, model_names
+    )
     aligned = dict(scores) if higher_is_better else {m: -v for m, v in scores.items()}
     matrix = np.full((len(model_names), len(model_names)), np.nan, dtype=np.float32)
     np.fill_diagonal(matrix, 0.0)
     for i, mi in enumerate(model_names):
         for j in range(i + 1, len(model_names)):
             mj = model_names[j]
-            # run_evaluate_metrics compares M[i, j] with downstream[j] - downstream[i].
-            # This one-triangle layout keeps signed single baselines equivalent
-            # to run_evaluate_single_metrics, which uses combinations(i, j).
             delta = float(aligned[mj] - aligned[mi])
             if pair_agg == "sym":
                 val = np.float32(abs(delta))
@@ -632,7 +639,9 @@ def _metric_name(
 
 
 def _available_k_list(pair: Dict[str, Any]) -> List[int]:
-    return [int(x) for x in np.asarray(pair["k_candidates"], dtype=np.int32).reshape(-1)]
+    return [
+        int(x) for x in np.asarray(pair["k_candidates"], dtype=np.int32).reshape(-1)
+    ]
 
 
 def _direction_value_fixed(
@@ -644,7 +653,9 @@ def _direction_value_fixed(
     weak_spectrum_count: int,
 ) -> float:
     if aggregation == "rankme" and f"{store_key}/metric_rankme" in pair:
-        vals = np.asarray(pair[f"{store_key}/metric_rankme"], dtype=np.float64).reshape(-1)
+        vals = np.asarray(pair[f"{store_key}/metric_rankme"], dtype=np.float64).reshape(
+            -1
+        )
         return float(np.nanmean(vals))
     sv = np.asarray(pair[f"{store_key}/singular_values"], dtype=np.float64)
     vals = [
@@ -677,7 +688,9 @@ def _direction_value_adaptive(
         if aggregation == "rankme" and f"k{k_int}/metric_rankme" in pair:
             vals.append(float(np.asarray(pair[f"k{k_int}/metric_rankme"])[center_pos]))
         else:
-            sv = np.asarray(pair[f"k{k_int}/singular_values"], dtype=np.float64)[center_pos]
+            sv = np.asarray(pair[f"k{k_int}/singular_values"], dtype=np.float64)[
+                center_pos
+            ]
             vals.append(
                 _aggregate_singular_values(
                     sv,
@@ -791,7 +804,9 @@ def _artifact_fixed_from_pair(
     if f"{store_key}/neighbor_sizes" in pair:
         neighbor_sizes = np.asarray(pair[f"{store_key}/neighbor_sizes"], dtype=np.int32)
     elif neighbor_indices is not None and np.asarray(neighbor_indices).dtype != object:
-        neighbor_sizes = np.full((c_count,), int(np.asarray(neighbor_indices).shape[1]), dtype=np.int32)
+        neighbor_sizes = np.full(
+            (c_count,), int(np.asarray(neighbor_indices).shape[1]), dtype=np.int32
+        )
     else:
         neighbor_sizes = np.full((c_count,), 0, dtype=np.int32)
 
@@ -809,7 +824,11 @@ def _artifact_fixed_from_pair(
         pair,
         f"{store_key}/sample_weights",
         fallback_count=c_count,
-        fallback_size=int(neighbor_sizes[0]) if neighbor_sizes.size and np.all(neighbor_sizes == neighbor_sizes[0]) else 0,
+        fallback_size=(
+            int(neighbor_sizes[0])
+            if neighbor_sizes.size and np.all(neighbor_sizes == neighbor_sizes[0])
+            else 0
+        ),
         fill=1.0,
         dtype=np.float32,
     )
@@ -828,7 +847,9 @@ def _artifact_fixed_from_pair(
         inlier_masks = _object_array(
             [np.ones((int(size),), dtype=bool) for size in neighbor_sizes]
         )
-    inlier_counts = np.asarray([int(np.sum(mask)) for mask in inlier_masks], dtype=np.int32)
+    inlier_counts = np.asarray(
+        [int(np.sum(mask)) for mask in inlier_masks], dtype=np.int32
+    )
     inlier_fracs = np.asarray(
         [
             float(np.sum(mask) / len(mask)) if len(mask) > 0 else float("nan")
@@ -838,9 +859,13 @@ def _artifact_fixed_from_pair(
     )
 
     return {
-        "singular_values": _object_array([np.asarray(row, dtype=np.float64) for row in sv]),
+        "singular_values": _object_array(
+            [np.asarray(row, dtype=np.float64) for row in sv]
+        ),
         "residuals": np.asarray(pair[f"{store_key}/residuals"], dtype=np.float32),
-        "relative_residuals": np.asarray(pair[f"{store_key}/relative_residuals"], dtype=np.float32),
+        "relative_residuals": np.asarray(
+            pair[f"{store_key}/relative_residuals"], dtype=np.float32
+        ),
         "ranks": _artifact_hard_ranks(sv),
         "metric_ranks": metric_ranks,
         "neighbor_sizes": neighbor_sizes,
@@ -892,10 +917,16 @@ def _artifact_adaptive_from_pair(
         key = f"k{int(k)}"
         sv = np.asarray(pair[f"{key}/singular_values"], dtype=np.float64)[center_pos]
         rows["singular_values"].append(sv)
-        rows["residuals"].append(float(np.asarray(pair[f"{key}/residuals"])[center_pos]))
-        rows["relative_residuals"].append(float(np.asarray(pair[f"{key}/relative_residuals"])[center_pos]))
+        rows["residuals"].append(
+            float(np.asarray(pair[f"{key}/residuals"])[center_pos])
+        )
+        rows["relative_residuals"].append(
+            float(np.asarray(pair[f"{key}/relative_residuals"])[center_pos])
+        )
         if aggregation == "rankme" and f"{key}/metric_rankme" in pair:
-            rows["metric_ranks"].append(float(np.asarray(pair[f"{key}/metric_rankme"])[center_pos]))
+            rows["metric_ranks"].append(
+                float(np.asarray(pair[f"{key}/metric_rankme"])[center_pos])
+            )
         else:
             rows["metric_ranks"].append(
                 _aggregate_singular_values(
@@ -908,15 +939,27 @@ def _artifact_adaptive_from_pair(
         dists = np.asarray(pair[f"{key}/neighbor_distances"])[center_pos]
         rows["neighbor_distances"].append(np.asarray(dists, dtype=np.float32))
         rows["neighbor_sizes"].append(int(np.asarray(dists).reshape(-1).size))
-        rows["sample_weights"].append(np.ones((rows["neighbor_sizes"][-1],), dtype=np.float32))
+        rows["sample_weights"].append(
+            np.ones((rows["neighbor_sizes"][-1],), dtype=np.float32)
+        )
         if f"{key}/inlier_masks" in pair:
-            rows["inlier_masks"].append(np.asarray(pair[f"{key}/inlier_masks"])[center_pos].astype(bool))
+            rows["inlier_masks"].append(
+                np.asarray(pair[f"{key}/inlier_masks"])[center_pos].astype(bool)
+            )
         else:
-            rows["inlier_masks"].append(np.ones((rows["neighbor_sizes"][-1],), dtype=bool))
+            rows["inlier_masks"].append(
+                np.ones((rows["neighbor_sizes"][-1],), dtype=bool)
+            )
 
-    sv_obj = _object_array([np.asarray(x, dtype=np.float64) for x in rows["singular_values"]])
-    inlier_masks = _object_array([np.asarray(x, dtype=bool) for x in rows["inlier_masks"]])
-    inlier_counts = np.asarray([int(np.sum(mask)) for mask in inlier_masks], dtype=np.int32)
+    sv_obj = _object_array(
+        [np.asarray(x, dtype=np.float64) for x in rows["singular_values"]]
+    )
+    inlier_masks = _object_array(
+        [np.asarray(x, dtype=bool) for x in rows["inlier_masks"]]
+    )
+    inlier_counts = np.asarray(
+        [int(np.sum(mask)) for mask in inlier_masks], dtype=np.int32
+    )
     inlier_fracs = np.asarray(
         [
             float(np.sum(mask) / len(mask)) if len(mask) > 0 else float("nan")
@@ -928,19 +971,28 @@ def _artifact_adaptive_from_pair(
         "singular_values": sv_obj,
         "residuals": np.asarray(rows["residuals"], dtype=np.float32),
         "relative_residuals": np.asarray(rows["relative_residuals"], dtype=np.float32),
-        "ranks": _artifact_hard_ranks(np.asarray(rows["singular_values"], dtype=np.float64)),
+        "ranks": _artifact_hard_ranks(
+            np.asarray(rows["singular_values"], dtype=np.float64)
+        ),
         "metric_ranks": np.asarray(rows["metric_ranks"], dtype=np.float32),
         "neighbor_sizes": np.asarray(rows["neighbor_sizes"], dtype=np.int32),
-        "neighbor_distances": _object_array([np.asarray(x, dtype=np.float32) for x in rows["neighbor_distances"]]),
+        "neighbor_distances": _object_array(
+            [np.asarray(x, dtype=np.float32) for x in rows["neighbor_distances"]]
+        ),
         "sigma_values": np.full((selected.size,), np.nan, dtype=np.float32),
         "eps_values": np.full((selected.size,), np.nan, dtype=np.float32),
-        "sample_weights": _object_array([np.asarray(x, dtype=np.float32) for x in rows["sample_weights"]]),
+        "sample_weights": _object_array(
+            [np.asarray(x, dtype=np.float32) for x in rows["sample_weights"]]
+        ),
         "inlier_masks": inlier_masks,
         "inlier_counts": inlier_counts,
         "inlier_fracs": inlier_fracs,
         "selected_ks": selected.astype(np.int32),
         "center_prediction_errors": _object_array(
-            [np.asarray(center_errors[pos], dtype=np.float32) for pos in range(selected.size)]
+            [
+                np.asarray(center_errors[pos], dtype=np.float32)
+                for pos in range(selected.size)
+            ]
         ),
     }
 
@@ -1047,22 +1099,31 @@ def _iter_requested_metrics(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compute fixed/adaptive pairwise metrics from a saved local-map store."
+        description=(
+            "Вычислить фиксированные и адаптивные попарные метрики "
+            "по сохранённому хранилищу локальных отображений."
+        )
     )
     parser.add_argument(
         "--maps_dir",
         default="",
-        help="Папка local-map store. Если пусто, ищется автоматически по --dataset_key.",
+        help=(
+            "Папка хранилища локальных отображений. Если пусто, "
+            "ищется автоматически по --dataset_key."
+        ),
     )
     parser.add_argument(
         "--embeddings_dir",
         default="",
-        help="Legacy alias для вывода dataset_key; расчет из local maps эмбеддинги не читает.",
+        help=(
+            "Старый псевдоним для вывода dataset_key; расчёт из локальных "
+            "отображений эмбеддинги не читает."
+        ),
     )
     parser.add_argument(
         "--maps_root",
         default=str(Path("data") / "local_maps"),
-        help="Корень local-map stores для автопоиска.",
+        help="Корень хранилищ локальных отображений для автопоиска.",
     )
     parser.add_argument(
         "--experiment_dir",
@@ -1076,21 +1137,29 @@ def main() -> None:
     parser.add_argument(
         "--dataset_key",
         default="",
-        help="Имя датасета для стандартных путей и заголовков. Если пусто, берется из manifest.",
+        help=(
+            "Имя набора данных для стандартных путей и заголовков. "
+            "Если пусто, берётся из манифеста."
+        ),
     )
     parser.add_argument(
         "--sample_size",
         type=int,
         default=0,
-        help="Если >0, использовать sampled ключ <dataset_key>_sN_seedS_<sample_strategy> и samples-папки.",
+        help=(
+            "Если >0, использовать ключ подвыборки "
+            "<dataset_key>_sN_seedS_<sample_strategy> и папки samples."
+        ),
     )
     parser.add_argument("--sample_seed", type=int, default=42)
-    parser.add_argument("--sample_strategy", choices=["stratified", "random"], default="stratified")
+    parser.add_argument(
+        "--sample_strategy", choices=["stratified", "random"], default="stratified"
+    )
     parser.add_argument(
         "--downstream_json",
         default="",
         help=(
-            "JSON downstream-качества. Если пусто и не задан --skip_eval, "
+            "JSON с качеством моделей. Если пусто и не задан --skip_eval, "
             "автоматически ищется data/downstream/<dataset>_mlp.json."
         ),
     )
@@ -1103,17 +1172,26 @@ def main() -> None:
     parser.add_argument(
         "--reports_dir",
         default="",
-        help="Куда сохранять CSV/MD отчеты. Если пусто и задан --experiment_dir, используется reports/.",
+        help=(
+            "Куда сохранять CSV/MD-отчёты. Если пусто и задан "
+            "--experiment_dir, используется reports/."
+        ),
     )
     parser.add_argument(
         "--plots_dir",
         default="",
-        help="Куда сохранять scatter-графики evaluator. Если пусто и задан --experiment_dir, используется reports/plots/scatter.",
+        help=(
+            "Куда сохранять точечные графики оценки. Если пусто и задан "
+            "--experiment_dir, используется reports/plots/scatter."
+        ),
     )
     parser.add_argument(
         "--summary_plots_dir",
         default="",
-        help="Куда сохранять summary-график. Если пусто и задан --experiment_dir, используется reports/plots/summary.",
+        help=(
+            "Куда сохранять сводный график. Если пусто и задан "
+            "--experiment_dir, используется reports/plots/summary."
+        ),
     )
     parser.add_argument("--plots_ext", default="png")
     parser.add_argument(
@@ -1124,7 +1202,7 @@ def main() -> None:
     parser.add_argument(
         "--skip_eval",
         action="store_true",
-        help="Не запускать CSV/MD/plots после расчета матриц метрик.",
+        help="Не запускать отчёты и графики после расчёта матриц метрик.",
     )
     parser.add_argument("--models", default="")
     parser.add_argument(
@@ -1150,8 +1228,8 @@ def main() -> None:
         "--k_list",
         default="",
         help=(
-            "k-кандидаты, которые должны быть в store. Удобно для adaptive-only "
-            "запуска без selector fixed_k."
+            "Кандидаты k, которые должны быть в хранилище. Удобно для "
+            "адаптивного запуска без selector fixed_k."
         ),
     )
     parser.add_argument(
@@ -1167,7 +1245,7 @@ def main() -> None:
         "--single_metrics",
         default="",
         help=(
-            "Single-baseline метрики через запятую или all. "
+            "Одиночные базовые метрики через запятую или all. "
             "Будут посчитаны в этом же запуске и попадут в те же CSV/графики."
         ),
     )
@@ -1211,14 +1289,15 @@ def main() -> None:
     requested = list(requested_from_include)
     needs_maps = True
     if requested_from_include:
-        needs_maps = any(selector != "single_baseline" for _, _, selector, _, _ in requested)
+        needs_maps = any(
+            selector != "single_baseline" for _, _, selector, _, _ in requested
+        )
 
     if not args.dataset_key:
         if args.maps_dir:
             args.dataset_key = Path(args.maps_dir).parent.name
         elif args.embeddings_dir:
-            # Backward-compatible convenience only. Metrics-from-maps does not
-            # load embeddings; dataset_key is the proper source identifier.
+            # Совместимость со старым CLI
             args.dataset_key = _dataset_key_from_embeddings_dir(args.embeddings_dir)
     base_dataset_key = str(args.dataset_key)
     sampled = bool(int(args.sample_size) > 0)
@@ -1289,7 +1368,7 @@ def main() -> None:
             first_dir = next(iter(maps_dirs_by_key.values()))
             manifest = _load_json(first_dir / "manifest.json")
         else:
-            raise ValueError("Не найден local-map/spectrum store.")
+            raise ValueError("Не найдено хранилище локальных отображений/спектров.")
         if not dataset_key:
             dataset_key = str(manifest.get("dataset_key", ""))
     elif not dataset_key:
@@ -1308,7 +1387,9 @@ def main() -> None:
         raise ValueError("Нужно указать либо --out_dir, либо --experiment_dir.")
     out_dir = Path(args.out_dir)
     if needs_maps:
-        model_source_dir = maps_dir if maps_dir is not None else next(iter(maps_dirs_by_key.values()))
+        model_source_dir = (
+            maps_dir if maps_dir is not None else next(iter(maps_dirs_by_key.values()))
+        )
         model_names = _load_model_names(model_source_dir, args.models)
     elif requested_models:
         model_names = requested_models
@@ -1339,7 +1420,9 @@ def main() -> None:
         )
         missing_k = [k for k in fixed_ks if k not in k_list]
         if missing_k:
-            raise ValueError(f"fixed_ks отсутствуют в store: {missing_k}. Доступные: {k_list}")
+            raise ValueError(
+                f"fixed_ks отсутствуют в store: {missing_k}. Доступные: {k_list}"
+            )
 
     selectors = _parse_csv(args.selectors)
     aggregations = _parse_aggregation_names(args.aggregations)
@@ -1359,14 +1442,22 @@ def main() -> None:
         (f"single_{metric_name}", None, "single_baseline", metric_name, "")
         for metric_name in single_metrics_requested
     )
-    single_metric_names = sorted({aggregation for _, _, selector, aggregation, _ in requested if selector == "single_baseline"})
+    single_metric_names = sorted(
+        {
+            aggregation
+            for _, _, selector, aggregation, _ in requested
+            if selector == "single_baseline"
+        }
+    )
     if single_metric_names:
         if sampled:
             missing = [
                 (metric_name, model_name)
                 for metric_name in single_metric_names
                 for model_name in model_names
-                if not _single_metric_path(dataset_key, metric_name, model_name).exists()
+                if not _single_metric_path(
+                    dataset_key, metric_name, model_name
+                ).exists()
             ]
             if missing:
                 cmd = [
@@ -1386,7 +1477,10 @@ def main() -> None:
                 ]
                 if args.models:
                     cmd.extend(["--models", str(args.models)])
-                print("\nSingle-baseline values missing; computing sampled values:")
+                print(
+                    "\nНе найдены значения одиночных базовых метрик; "
+                    "считаю значения для подвыборки:"
+                )
                 print(" ".join(cmd))
                 subprocess.run(cmd, check=True)
         else:
@@ -1397,15 +1491,18 @@ def main() -> None:
                 str(args.models),
             )
 
-    print(f"Maps dir: {maps_dir if maps_dir is not None else '<not used>'}")
-    print(f"Out dir : {out_dir}")
-    print(f"Models  : {len(model_names)}")
-    print(f"Metrics : {len(requested)}")
+    print(
+        "Папка локальных отображений: "
+        f"{maps_dir if maps_dir is not None else '<не используется>'}"
+    )
+    print(f"Папка вывода: {out_dir}")
+    print(f"Моделей: {len(model_names)}")
+    print(f"Метрик: {len(requested)}")
 
     for metric_name, fixed_k, selector, aggregation, store_key in requested:
         out_path = out_dir / f"{metric_name}.npz"
         if args.incremental and out_path.exists():
-            print(f"[skip] {out_path}")
+            print(f"[пропуск] {out_path}")
             continue
 
         if selector == "single_baseline":
@@ -1432,7 +1529,9 @@ def main() -> None:
             continue
 
         if maps_dir is None and not maps_dirs_by_key:
-            raise ValueError(f"Метрика {metric_name} требует local-map store.")
+            raise ValueError(
+                f"Метрика {metric_name} требует хранилище локальных отображений."
+            )
         matrix = np.full((len(model_names), len(model_names)), np.nan, dtype=np.float32)
         metric_artifacts: Dict[str, Any] = {}
         metric_store_keys = (
@@ -1449,12 +1548,16 @@ def main() -> None:
                     pair = (
                         _load_pair(maps_dir, mi, mj)
                         if maps_dir is not None
-                        else _load_pair_for_store_keys(maps_dirs_by_key, mi, mj, metric_store_keys)
+                        else _load_pair_for_store_keys(
+                            maps_dirs_by_key, mi, mj, metric_store_keys
+                        )
                     )
                     matrix[i, j] = np.float32(
                         _direction_value_fixed(
                             pair,
-                            store_key=f"k{fixed_k}" if selector == "fixed_k" else store_key,
+                            store_key=(
+                                f"k{fixed_k}" if selector == "fixed_k" else store_key
+                            ),
                             aggregation=aggregation,
                             hard_rank_threshold=float(args.hard_rank_threshold),
                             weak_spectrum_count=int(args.weak_spectrum_count),
@@ -1487,10 +1590,16 @@ def main() -> None:
                     pair_ij = _load_pair(maps_dir, mi, mj)
                     pair_ji = _load_pair(maps_dir, mj, mi)
                 else:
-                    pair_ij = _load_pair_for_store_keys(maps_dirs_by_key, mi, mj, metric_store_keys)
-                    pair_ji = _load_pair_for_store_keys(maps_dirs_by_key, mj, mi, metric_store_keys)
+                    pair_ij = _load_pair_for_store_keys(
+                        maps_dirs_by_key, mi, mj, metric_store_keys
+                    )
+                    pair_ji = _load_pair_for_store_keys(
+                        maps_dirs_by_key, mj, mi, metric_store_keys
+                    )
                 if selector in {"fixed_k", "fixed_store_key"}:
-                    effective_store_key = f"k{fixed_k}" if selector == "fixed_k" else store_key
+                    effective_store_key = (
+                        f"k{fixed_k}" if selector == "fixed_k" else store_key
+                    )
                     mij = _direction_value_fixed(
                         pair_ij,
                         store_key=effective_store_key,
@@ -1632,7 +1741,7 @@ def main() -> None:
                 "--out_name",
                 f"metrics_summary_constructor_{args.pair_agg}.png",
             ]
-            print("\nЗапуск summary-графика:")
+            print("\nЗапуск сводного графика:")
             print(" ".join(summary_cmd))
             subprocess.run(summary_cmd, check=True)
 

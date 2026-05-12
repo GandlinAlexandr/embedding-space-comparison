@@ -1,11 +1,5 @@
 """
-Build a reusable local spectrum store for local neighborhoods.
-
-This script intentionally lives next to the legacy metric runner instead of
-replacing it.  It solves the same local linear problems as
-run_compute_embedding_metrics.py, but stores candidate spectra for every
-requested neighborhood so fixed and adaptive metrics can reuse one shared
-source without saving full local matrices by default.
+Строит переиспользуемое хранилище локальных спектров.
 """
 
 from __future__ import annotations
@@ -72,7 +66,9 @@ def _parse_model_names(raw: str) -> List[str]:
 
 
 def _json_hash(payload: Dict[str, Any]) -> str:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    text = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
@@ -158,7 +154,9 @@ def _singular_values_array(items: List[np.ndarray], dim: int) -> np.ndarray:
     return np.empty((0, int(dim)), dtype=np.float64)
 
 
-def _neighborhood_specs(args: argparse.Namespace, k_list: Tuple[int, ...]) -> List[Dict[str, Any]]:
+def _neighborhood_specs(
+    args: argparse.Namespace, k_list: Tuple[int, ...]
+) -> List[Dict[str, Any]]:
     specs: List[Dict[str, Any]] = [
         {"key": f"k{k}", "kind": "knn", "k": int(k), "solver": str(args.solver)}
         for k in k_list
@@ -214,7 +212,9 @@ def _neighborhood_specs(args: argparse.Namespace, k_list: Tuple[int, ...]) -> Li
     return specs
 
 
-def _build_store_spec(args: argparse.Namespace, k_list: Tuple[int, ...]) -> Dict[str, Any]:
+def _build_store_spec(
+    args: argparse.Namespace, k_list: Tuple[int, ...]
+) -> Dict[str, Any]:
     neighborhood_specs = _neighborhood_specs(args, k_list)
     return {
         "schema_version": 1,
@@ -235,8 +235,12 @@ def _build_store_spec(args: argparse.Namespace, k_list: Tuple[int, ...]) -> Dict
         "rff_gamma": float(args.rff_gamma),
         "rff_seed": int(args.rff_seed),
         "eps_percentiles": list(_parse_csv_ints(args.eps_percentiles)),
-        "weighted_eps_percentiles": list(_parse_csv_ints(args.weighted_eps_percentiles)),
-        "ransac_weighted_eps_percentiles": list(_parse_csv_ints(args.ransac_weighted_eps_percentiles)),
+        "weighted_eps_percentiles": list(
+            _parse_csv_ints(args.weighted_eps_percentiles)
+        ),
+        "ransac_weighted_eps_percentiles": list(
+            _parse_csv_ints(args.ransac_weighted_eps_percentiles)
+        ),
         "neighborhood_specs": neighborhood_specs,
         "local_geometry_mode": str(args.local_geometry_mode),
         "adaptive_selection": "center_prediction_error",
@@ -308,7 +312,9 @@ def _save_pair_store(
         "model_j": np.array(model_j, dtype=object),
         "center_indices": np.asarray(center_indices, dtype=np.int32),
         "k_candidates": np.asarray(k_list, dtype=np.int32),
-        "center_prediction_errors": np.asarray(center_prediction_errors, dtype=np.float32),
+        "center_prediction_errors": np.asarray(
+            center_prediction_errors, dtype=np.float32
+        ),
         "selected_ks": np.asarray(selected_ks, dtype=np.int32),
         "meta_json": json.dumps(meta, ensure_ascii=False),
     }
@@ -351,7 +357,9 @@ def _compute_direction_store(
     Xn: np.ndarray,
     Yn: np.ndarray,
     cache_x: legacy.NeighborCache,
-    extra_knn_specs: Dict[str, Tuple[np.ndarray, np.ndarray, legacy.NeighborCache, int]],
+    extra_knn_specs: Dict[
+        str, Tuple[np.ndarray, np.ndarray, legacy.NeighborCache, int]
+    ],
     k_list: Tuple[int, ...],
     args: argparse.Namespace,
     model_i: str,
@@ -427,7 +435,9 @@ def _compute_direction_store(
             "residuals": np.asarray(residuals, dtype=np.float32),
             "relative_residuals": np.asarray(relative_residuals, dtype=np.float32),
             "neighbor_indices": np.stack(neighbor_indices, axis=0).astype(np.int32),
-            "neighbor_distances": np.stack(neighbor_distances, axis=0).astype(np.float32),
+            "neighbor_distances": np.stack(neighbor_distances, axis=0).astype(
+                np.float32
+            ),
             "inlier_masks": np.stack(inlier_masks, axis=0).astype(bool),
         }
         if maps is not None:
@@ -441,7 +451,8 @@ def _compute_direction_store(
         selected_ks = np.zeros((c_count,), dtype=np.int32)
     payload_by_spec: Dict[str, Dict[str, Any]] = {}
     eps_specs = [
-        spec for spec in _neighborhood_specs(args, k_list)
+        spec
+        for spec in _neighborhood_specs(args, k_list)
         if spec["kind"] in {"epsilon", "weighted_epsilon"}
     ]
     for spec in eps_specs:
@@ -464,14 +475,18 @@ def _compute_direction_store(
         inlier_masks: List[np.ndarray] = []
         sigma_values: List[float] = []
         eps_values: List[float] = []
-        for center_idx, idxs_raw, dists_raw in zip(center_indices, neigh, neigh_distances):
+        for center_idx, idxs_raw, dists_raw in zip(
+            center_indices, neigh, neigh_distances
+        ):
             idxs = np.asarray(idxs_raw, dtype=np.int32).reshape(-1)
             dists = np.asarray(dists_raw, dtype=np.float32).reshape(-1)
             if idxs.size < 2:
                 continue
             weights = None
             if spec.get("weighting") == "gaussian":
-                weights = np.exp(-np.square(dists.astype(np.float64)) / (sigma_safe**2)).astype(np.float32)
+                weights = np.exp(
+                    -np.square(dists.astype(np.float64)) / (sigma_safe**2)
+                ).astype(np.float32)
             solved = legacy._solve_local_linear_map_and_rank(
                 Xn[idxs],
                 Yn[idxs],
@@ -481,9 +496,15 @@ def _compute_direction_store(
                 solver=str(spec.get("solver", args.solver)),
                 rng=rng,
                 ransac_n_iter=int(spec.get("ransac_n_iter", args.ransac_n_iter)),
-                ransac_sample_frac=float(spec.get("ransac_sample_frac", args.ransac_sample_frac)),
-                ransac_min_inliers=int(spec.get("ransac_min_inliers", args.ransac_min_inliers)),
-                ransac_threshold_scale=float(spec.get("ransac_threshold_scale", args.ransac_threshold_scale)),
+                ransac_sample_frac=float(
+                    spec.get("ransac_sample_frac", args.ransac_sample_frac)
+                ),
+                ransac_min_inliers=int(
+                    spec.get("ransac_min_inliers", args.ransac_min_inliers)
+                ),
+                ransac_threshold_scale=float(
+                    spec.get("ransac_threshold_scale", args.ransac_threshold_scale)
+                ),
                 rank_aggregation="rankme",
                 hard_rank_threshold=1e-2,
                 weak_spectrum_count=5,
@@ -578,7 +599,9 @@ def _compute_direction_store(
             "residuals": np.asarray(residuals, dtype=np.float32),
             "relative_residuals": np.asarray(relative_residuals, dtype=np.float32),
             "neighbor_indices": np.stack(neighbor_indices, axis=0).astype(np.int32),
-            "neighbor_distances": np.stack(neighbor_distances, axis=0).astype(np.float32),
+            "neighbor_distances": np.stack(neighbor_distances, axis=0).astype(
+                np.float32
+            ),
             "inlier_masks": np.stack(inlier_masks, axis=0).astype(bool),
         }
         if maps is not None:
@@ -604,7 +627,10 @@ def _compute_direction_store(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build reusable local linear map store for kNN candidate neighborhoods."
+        description=(
+            "Построить переиспользуемое хранилище локальных линейных "
+            "отображений для кандидатных окрестностей."
+        )
     )
     parser.add_argument("--embeddings_dir", default="")
     parser.add_argument("--out_root", default=str(Path("data") / "local_maps"))
@@ -618,7 +644,9 @@ def main() -> None:
         help="Если >0, используется data/embeddings/samples/<dataset_key>_sN_seedS_<sample_strategy>.",
     )
     parser.add_argument("--sample_seed", type=int, default=42)
-    parser.add_argument("--sample_strategy", choices=["stratified", "random"], default="stratified")
+    parser.add_argument(
+        "--sample_strategy", choices=["stratified", "random"], default="stratified"
+    )
     parser.add_argument("--models", default="")
     parser.add_argument("--k_list", default="")
     parser.add_argument("--rff_k_list", default="")
@@ -642,7 +670,9 @@ def main() -> None:
     parser.add_argument("--ransac_min_inliers", type=int, default=4)
     parser.add_argument("--ransac_threshold_scale", type=float, default=2.5)
     parser.add_argument("--backend", choices=["auto", "cpu", "cuda"], default="cpu")
-    parser.add_argument("--map_dtype", choices=["float32", "float64"], default="float32")
+    parser.add_argument(
+        "--map_dtype", choices=["float32", "float64"], default="float32"
+    )
     parser.add_argument(
         "--store_maps",
         action="store_true",
@@ -652,27 +682,35 @@ def main() -> None:
     parser.add_argument(
         "--include_self",
         action="store_true",
-        help="Also store model_i -> model_i directions. Pairwise metrics do not need this.",
+        help=(
+            "Также сохранять направления model_i -> model_i. "
+            "Для попарных метрик это не требуется."
+        ),
     )
     parser.add_argument(
         "--source_shard_index",
         type=int,
         default=0,
-        help="Index of the source-model shard to compute. Default 0 keeps the full old behavior.",
+        help=(
+            "Индекс части исходных моделей, которую нужно посчитать. "
+            "Значение 0 при --source_shard_count 1 сохраняет старое поведение."
+        ),
     )
     parser.add_argument(
         "--source_shard_count",
         type=int,
         default=1,
-        help="Number of source-model shards. Default 1 keeps the full old behavior.",
+        help=(
+            "Общее число частей исходных моделей. "
+            "Значение 1 сохраняет старое поведение."
+        ),
     )
     args = parser.parse_args()
     if int(args.source_shard_count) < 1:
         raise ValueError("--source_shard_count должен быть >= 1")
     if not (0 <= int(args.source_shard_index) < int(args.source_shard_count)):
         raise ValueError(
-            "--source_shard_index должен быть в диапазоне "
-            "[0, --source_shard_count)"
+            "--source_shard_index должен быть в диапазоне " "[0, --source_shard_count)"
         )
 
     k_list = _parse_k_list(args.k_list)
@@ -700,8 +738,10 @@ def main() -> None:
     legacy._LOCAL_GEOMETRY_MODE = str(args.local_geometry_mode)
     legacy._COMPUTE_BACKEND = legacy._resolve_compute_backend(str(args.backend))
 
-    # The old centered_offsets_v2 protocol excludes the center for kNN rows.
-    args.exclude_center_from_fit = bool(args.local_geometry_mode == "centered_offsets_v2")
+    # Старый протокол centered_offsets_v2 исключает центр из строк kNN.
+    args.exclude_center_from_fit = bool(
+        args.local_geometry_mode == "centered_offsets_v2"
+    )
 
     model_names, embeddings = _load_embeddings(args.embeddings_dir, args.models)
     legacy._PRECOMPUTED_ZSCORES = {
@@ -736,7 +776,9 @@ def main() -> None:
 
     cache_key = legacy.NeighborCacheKey(
         n_centers=int(args.n_centers),
-        ks=tuple(int(k) + 1 if args.exclude_center_from_fit else int(k) for k in k_list),
+        ks=tuple(
+            int(k) + 1 if args.exclude_center_from_fit else int(k) for k in k_list
+        ),
         percentile=None,
         eps_scale=float(args.weighted_eps_scale),
     )
@@ -750,7 +792,9 @@ def main() -> None:
                 embeddings[model_name],
                 cache_key,
                 seed=int(args.seed),
-                X_norm=legacy._get_precomputed_zscore(model_name, embeddings[model_name]),
+                X_norm=legacy._get_precomputed_zscore(
+                    model_name, embeddings[model_name]
+                ),
             )
             for percentile in percentile_values:
                 eps_cache = legacy._build_neighbor_cache_from_key(
@@ -763,12 +807,20 @@ def main() -> None:
                     ),
                     seed=int(args.seed),
                     center_indices=cache.center_indices,
-                    X_norm=legacy._get_precomputed_zscore(model_name, embeddings[model_name]),
+                    X_norm=legacy._get_precomputed_zscore(
+                        model_name, embeddings[model_name]
+                    ),
                 )
                 cache.eps[int(percentile)] = eps_cache.eps[int(percentile)]
-                cache.eps_distances[int(percentile)] = eps_cache.eps_distances[int(percentile)]
-                cache.sigma_values[int(percentile)] = eps_cache.sigma_values[int(percentile)]
-                cache.eps_values[int(percentile)] = eps_cache.eps_values[int(percentile)]
+                cache.eps_distances[int(percentile)] = eps_cache.eps_distances[
+                    int(percentile)
+                ]
+                cache.sigma_values[int(percentile)] = eps_cache.sigma_values[
+                    int(percentile)
+                ]
+                cache.eps_values[int(percentile)] = eps_cache.eps_values[
+                    int(percentile)
+                ]
             cache_by_model[model_name] = cache
         return cache_by_model[model_name]
 
@@ -805,7 +857,7 @@ def main() -> None:
             )
         return rff_cache_by_model[model_name]
 
-    print(f"Local map store: {store_dir}")
+    print(f"Хранилище локальных отображений: {store_dir}")
     source_model_names = model_names[
         int(args.source_shard_index) :: int(args.source_shard_count)
     ]
@@ -813,27 +865,36 @@ def main() -> None:
     shard_directed_pairs = len(source_model_names) * (
         len(model_names) - (0 if args.include_self else 1)
     )
-    print(f"Models: {len(model_names)} | directed pairs: {full_directed_pairs}")
+    print(f"Моделей: {len(model_names)} | направленных пар: {full_directed_pairs}")
     print(
-        "Source shard: "
+        "Часть исходных моделей: "
         f"{args.source_shard_index}/{args.source_shard_count} | "
-        f"source models: {len(source_model_names)} | "
-        f"shard directed pairs: {shard_directed_pairs}"
+        f"исходных моделей в части: {len(source_model_names)} | "
+        f"направленных пар в части: {shard_directed_pairs}"
     )
-    print(f"k candidates: {k_list} | n_centers={args.n_centers}")
+    print(f"Кандидаты k: {k_list} | n_centers={args.n_centers}")
     if rff_k_list:
         print(
-            "rff candidates: "
+            "Кандидаты RFF: "
             f"{rff_k_list} | n_features={args.rff_n_features} | "
             f"gamma={args.rff_gamma} | seed={args.rff_seed}"
         )
-    print(f"geometry={legacy._LOCAL_GEOMETRY_MODE} | backend={legacy._COMPUTE_BACKEND.name}")
+    print(
+        f"Геометрия={legacy._LOCAL_GEOMETRY_MODE} | "
+        f"вычислительный режим={legacy._COMPUTE_BACKEND.name}"
+    )
 
     for model_i in tqdm(source_model_names, desc="model_i"):
         Xn = legacy._get_precomputed_zscore(model_i, embeddings[model_i])
         cache_i = cache_for(model_i)
-        Xn_rff = rff_features_for(model_i) if rff_k_list else np.empty((0, 0), dtype=np.float32)
-        cache_i_rff = rff_cache_for(model_i, cache_i.center_indices) if rff_k_list else None
+        Xn_rff = (
+            rff_features_for(model_i)
+            if rff_k_list
+            else np.empty((0, 0), dtype=np.float32)
+        )
+        cache_i_rff = (
+            rff_cache_for(model_i, cache_i.center_indices) if rff_k_list else None
+        )
         for model_j in model_names:
             if model_i == model_j and not args.include_self:
                 continue

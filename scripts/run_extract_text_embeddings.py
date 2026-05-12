@@ -34,11 +34,11 @@ def _read_jsonl(path: Path) -> tuple[List[str], np.ndarray]:
                 continue
             obj = json.loads(raw)
             if "text" not in obj or "label" not in obj:
-                raise ValueError(f"{path}:{line_no}: expected keys 'text' and 'label'")
+                raise ValueError(f"{path}:{line_no}: ожидались ключи 'text' и 'label'")
             texts.append(str(obj["text"]))
             labels.append(int(obj["label"]))
     if not texts:
-        raise ValueError(f"No rows found in {path}")
+        raise ValueError(f"В файле нет строк: {path}")
     return texts, np.asarray(labels, dtype=np.int64)
 
 
@@ -53,10 +53,13 @@ def _resolve_input_jsonl(args: argparse.Namespace) -> Path:
     if canonical_path.exists():
         return canonical_path
 
-    legacy_path = Path("data") / "text_classification" / args.dataset / f"{args.split}.jsonl"
+    legacy_path = (
+        Path("data") / "text_classification" / args.dataset / f"{args.split}.jsonl"
+    )
     if legacy_path.exists():
         print(
-            "[WARN] Using legacy text dataset path. Prefer moving data to: "
+            "[ПРЕДУПРЕЖДЕНИЕ] Используется старый путь к текстовому набору. "
+            "Лучше перенести данные в: "
             f"{canonical_path}"
         )
         return legacy_path
@@ -84,7 +87,8 @@ def _parse_models(raw: str) -> List[str]:
     unknown = [x for x in model_ids if x not in TEXT_EMBEDDING_MODEL_BY_ID]
     if unknown:
         raise ValueError(
-            f"Unknown text model ids: {unknown}. Available: {TEXT_EMBEDDING_MODEL_IDS}"
+            f"Неизвестные идентификаторы текстовых моделей: {unknown}. "
+            f"Доступно: {TEXT_EMBEDDING_MODEL_IDS}"
         )
     return model_ids
 
@@ -109,8 +113,9 @@ def _import_transformers_and_torch():
         return AutoTokenizer, AutoModel, torch
     except Exception as exc:
         raise RuntimeError(
-            "Failed to import transformers/torch for text embedding extraction. "
-            f"Original error: {type(exc).__name__}: {exc}"
+            "Не удалось импортировать transformers/torch для извлечения "
+            "текстовых эмбеддингов. "
+            f"Исходная ошибка: {type(exc).__name__}: {exc}"
         ) from exc
 
 
@@ -128,9 +133,9 @@ def _check_runtime_requirements() -> None:
 
     if missing:
         raise RuntimeError(
-            "Text embedding extraction requirements failed: "
+            "Не выполнены требования для извлечения текстовых эмбеддингов: "
             + ", ".join(missing)
-            + f". Details: {exc}"
+            + f". Подробности: {exc}"
         )
 
 
@@ -157,7 +162,7 @@ def _pool_outputs(outputs: Any, attention_mask: Any, torch: Any, pooling: str) -
         return _mean_pool(outputs.last_hidden_state, attention_mask, torch)
     if pooling == "cls":
         return outputs.last_hidden_state[:, 0]
-    raise ValueError(f"Unsupported pooling mode: {pooling}")
+    raise ValueError(f"Неподдерживаемый режим pooling: {pooling}")
 
 
 def _encode_model(
@@ -172,7 +177,9 @@ def _encode_model(
 ) -> np.ndarray:
     AutoTokenizer, AutoModel, torch = _import_transformers_and_torch()
     _configure_torch_threads(torch, int(num_threads))
-    runtime_device = torch.device(device if device == "cpu" or torch.cuda.is_available() else "cpu")
+    runtime_device = torch.device(
+        device if device == "cpu" or torch.cuda.is_available() else "cpu"
+    )
     tokenizer = AutoTokenizer.from_pretrained(
         spec.hf_name,
         cache_dir=model_cache_dir,
@@ -206,7 +213,9 @@ def _encode_model(
             )
             inputs = {k: v.to(runtime_device) for k, v in inputs.items()}
             outputs = model(**inputs)
-            pooled = _pool_outputs(outputs, inputs["attention_mask"], torch, spec.pooling)
+            pooled = _pool_outputs(
+                outputs, inputs["attention_mask"], torch, spec.pooling
+            )
             if normalize_embeddings:
                 pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
             chunks.append(pooled.detach().cpu().numpy().astype(np.float32))
@@ -229,7 +238,7 @@ def _download_model_assets(
         Path(model_cache_dir).mkdir(parents=True, exist_ok=True)
 
     print(f"Моделей к скачиванию: {len(specs)}")
-    print(f"Кэш моделей: {model_cache_dir or 'HuggingFace default cache'}")
+    print(f"Кэш моделей: {model_cache_dir or 'кэш HuggingFace по умолчанию'}")
 
     for spec in tqdm(specs, desc="Модели", unit="model"):
         print(f"\n=== Модель: {spec.model_id} ===")
@@ -238,7 +247,7 @@ def _download_model_assets(
         if spec.prompt_prefix:
             print(f"Префикс текста: {spec.prompt_prefix!r}")
         print(f"Pooling: {spec.pooling}")
-        print(f"Trust remote code: {bool(spec.trust_remote_code)}")
+        print(f"Доверять удалённому коду: {bool(spec.trust_remote_code)}")
 
         tokenizer = AutoTokenizer.from_pretrained(
             spec.hf_name,
@@ -265,34 +274,33 @@ def _download_model_assets(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Extract transformer embeddings from local JSONL files into "
-            "the project's .npy layout."
+            "Извлечь эмбеддинги трансформерных моделей из локальных JSONL-файлов "
+            "и сохранить их в формате .npy, принятом в проекте."
         )
     )
     parser.add_argument(
         "--dataset",
         default="",
-        help="Dataset key used for default paths, e.g. banking77.",
+        help="Ключ набора данных для стандартных путей, например banking77.",
     )
-    parser.add_argument("--split", default="", help="Split key, e.g. train/test/val.")
+    parser.add_argument(
+        "--split", default="", help="Ключ разбиения, например train/test/val."
+    )
     parser.add_argument(
         "--input_jsonl",
         default="",
-        help=(
-                        "Explicit local JSONL path. Default: "
-            "data/<dataset>/<split>.jsonl."
-        ),
+        help="Явный путь к локальному JSONL. По умолчанию: data/<dataset>/<split>.jsonl.",
     )
     parser.add_argument(
         "--output_dir",
         default="",
-        help="Output dir. Default: data/embeddings/<dataset>_<split>.",
+        help="Папка вывода. По умолчанию: data/embeddings/<dataset>_<split>.",
     )
     parser.add_argument(
         "--models",
         default="primary",
         help=(
-            "Comma-separated text model ids, or 'primary'. "
+            "Идентификаторы текстовых моделей через запятую или 'primary'. "
             f"Primary: {TEXT_EMBEDDING_MODEL_IDS_CSV}. "
             f"CPU: {TEXT_EMBEDDING_CPU_MODEL_IDS_CSV}. "
             f"Snowflake: {TEXT_EMBEDDING_SNOWFLAKE_MODEL_IDS_CSV}. "
@@ -305,38 +313,47 @@ def parse_args() -> argparse.Namespace:
         "--num_threads",
         type=int,
         default=0,
-        help="CPU threads for torch. 0 keeps torch default.",
+        help="Число CPU-потоков для torch. 0 оставляет значение torch по умолчанию.",
     )
     parser.add_argument(
         "--num_interop_threads",
         type=int,
         default=0,
-        help="CPU interop threads for torch. 0 uses a small default derived from --num_threads.",
+        help=(
+            "Число interop-потоков CPU для torch. 0 использует небольшое "
+            "значение, выведенное из --num_threads."
+        ),
     )
     parser.add_argument(
         "--model_cache_dir",
         default="data/.hf_model_cache",
-        help="HuggingFace cache dir for model/tokenizer files.",
+        help="Папка кэша HuggingFace для файлов модели и токенайзера.",
     )
     parser.add_argument(
         "--download_models_only",
         action="store_true",
-        help="Download selected model/tokenizer files and exit; does not read datasets.",
+        help=(
+            "Скачать файлы выбранных моделей/токенайзеров и выйти; "
+            "наборы данных не читаются."
+        ),
     )
     parser.add_argument(
         "--normalize_embeddings",
         action="store_true",
-        help="Save L2-normalized sentence embeddings.",
+        help="Сохранять L2-нормированные эмбеддинги предложений.",
     )
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Recompute model embeddings even when output file exists.",
+        help="Пересчитывать эмбеддинги модели, даже если выходной файл уже существует.",
     )
     parser.add_argument(
         "--check_requirements",
         action="store_true",
-        help="Only check Python dependencies and exit; does not download datasets or models.",
+        help=(
+            "Только проверить зависимости Python и выйти; "
+            "данные и модели не скачиваются."
+        ),
     )
     return parser.parse_args()
 
@@ -345,7 +362,7 @@ def main() -> None:
     args = parse_args()
     if args.check_requirements:
         _check_runtime_requirements()
-        print("Text embedding extraction requirements: OK")
+        print("Требования для извлечения текстовых эмбеддингов: OK")
         return
 
     model_ids = _parse_models(args.models)
@@ -371,11 +388,13 @@ def main() -> None:
         return
 
     if not args.dataset or not args.split:
-        raise ValueError("--dataset and --split are required for embedding extraction.")
+        raise ValueError(
+            "Для извлечения эмбеддингов нужно указать --dataset и --split."
+        )
 
     input_jsonl = _resolve_input_jsonl(args)
     if not input_jsonl.exists():
-        raise FileNotFoundError(f"Input JSONL not found: {input_jsonl}")
+        raise FileNotFoundError(f"Входной JSONL не найден: {input_jsonl}")
 
     output_dir = _resolve_output_dir(args)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -395,12 +414,12 @@ def main() -> None:
     print(f"Классов: {classes.size}")
     print(f"Мин/макс объектов на класс: {int(counts.min())} / {int(counts.max())}")
     print(f"Моделей: {len(model_specs)}")
-    print(f"Batch size: {int(args.batch_size)}")
-    print(f"Device request: {args.device}")
-    print(f"Torch CPU threads request: {int(args.num_threads)}")
-    print(f"Torch CPU threads actual: {torch.get_num_threads()}")
-    print(f"Torch interop threads actual: {torch.get_num_interop_threads()}")
-    print(f"Кэш моделей: {model_cache_dir or 'HuggingFace default cache'}")
+    print(f"Размер батча: {int(args.batch_size)}")
+    print(f"Запрошенное устройство: {args.device}")
+    print(f"Запрошено CPU-потоков torch: {int(args.num_threads)}")
+    print(f"Фактически CPU-потоков torch: {torch.get_num_threads()}")
+    print(f"Фактически interop-потоков torch: {torch.get_num_interop_threads()}")
+    print(f"Кэш моделей: {model_cache_dir or 'кэш HuggingFace по умолчанию'}")
 
     for model_idx, spec in enumerate(tqdm(model_specs, desc="Модели", unit="model"), 1):
         out_path = output_dir / f"{spec.model_id}.npy"
@@ -427,10 +446,10 @@ def main() -> None:
         if spec.prompt_prefix:
             print(f"Префикс текста: {spec.prompt_prefix!r}")
         print(f"Pooling: {spec.pooling}")
-        print(f"Trust remote code: {bool(spec.trust_remote_code)}")
+        print(f"Доверять удалённому коду: {bool(spec.trust_remote_code)}")
         print(f"Файл: {out_path}")
         effective_batch_size = int(args.batch_size)
-        print(f"Effective batch size: {effective_batch_size}")
+        print(f"Фактический размер батча: {effective_batch_size}")
         embeddings = _encode_model(
             spec,
             texts,
@@ -442,9 +461,9 @@ def main() -> None:
         )
         if embeddings.shape[0] != labels.shape[0]:
             raise RuntimeError(
-                f"Embedding row count mismatch for {spec.model_id}: "
-                f"{embeddings.shape[0]} vs labels {labels.shape[0]}"
-        )
+                f"Число строк эмбеддингов не совпадает с числом меток для "
+                f"{spec.model_id}: {embeddings.shape[0]} против {labels.shape[0]}"
+            )
         np.save(out_path, embeddings.astype(np.float32))
         print(f"Сохранено: {out_path} | shape={embeddings.shape}")
         saved_models.append(
@@ -487,7 +506,7 @@ def main() -> None:
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(f"Saved manifest: {output_dir / 'embeddings_manifest.json'}")
+    print(f"Сохранён манифест: {output_dir / 'embeddings_manifest.json'}")
 
 
 if __name__ == "__main__":

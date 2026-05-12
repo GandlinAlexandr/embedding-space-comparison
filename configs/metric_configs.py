@@ -1,49 +1,5 @@
 """
 Единое место, где описаны конфигурации embedding-метрик для протокола на реальных данных.
-
-Важно (текущее устройство проекта):
-- Сами вычисления метрик реализованы в scripts/run_compute_embedding_metrics.py.
-- Этот файл хранит ТОЛЬКО список конфигураций и метаданные (k, eps-percentile, multiscale, rff-параметры,
-  sample_size и т.п.), чтобы:
-    1) не плодить "ручные" конфиги в ноутбуках,
-    2) воспроизводимо запускать одни и те же эксперименты,
-    3) легко добавлять/выключать конфиги через CLI (--include/--exclude).
-
-Имена метрик генерируются автоматически из параметров по шаблону:
-
-    {kind}_{key_param}[_rsc][_hr][_antisym|_sym]
-
-  где:
-    kind       — тип окрестности: lin_k | lin_eps | w_eps | multiscale | rff_k
-    key_param  — главный числовой параметр: k, eps_percentile, sigma_percentile,
-                 aggregator (для multiscale)
-    _rsc       — суффикс, если solver="ransac"
-    _hr        — суффикс для hard-rank-конфигов
-    _antisym   — суффикс для антисимметричных метрик
-    _sym       — суффикс для симметричных метрик
-    (без суффикса) — только directed
-
-Примеры:
-    lin_k10_antisym      — linear kNN, k=10, antisym
-    lin_k10_sym          — linear kNN, k=10, sym
-    lin_eps_10_antisym   — linear eps, eps_percentile=10, antisym
-    w_eps_10_antisym     — weighted eps, sigma_percentile=10, lstsq, antisym
-    w_eps_10_rsc_antisym — weighted eps, sigma_percentile=10, RANSAC, antisym
-    w_eps_10_hr_antisym  — weighted eps, hard-rank, antisym
-    w_eps_10_rsc_sym     — weighted eps, sigma_percentile=10, RANSAC, sym
-    multiscale_mean_antisym — multiscale kNN, aggregator=mean, antisym
-    rff_k10_antisym      — RFF kNN, k=10, antisym
-    directed_k10         — directed (asymmetric), k=10
-
-Чтобы добавить новый конфиг, достаточно вызвать одну из фабричных функций:
-    _lin_knn(k, pair_agg)
-    _lin_eps(eps_percentile, pair_agg)
-    _w_eps(sigma_percentile, pair_agg, solver)
-    _multiscale(k_list, aggregator, pair_agg)
-    _rff(k, pair_agg)
-    _id_diff_knn(k, estimator, pair_agg)
-    _id_diff_eps(eps_percentile, estimator, pair_agg)
-и добавить её в список METRIC_SPECS ниже.
 """
 
 from __future__ import annotations
@@ -59,10 +15,9 @@ from typing import Dict, Any, List, Optional, Tuple
 _N_CENTERS = 200
 _SAMPLE_SIZE = None
 
-# k для kNN-метрик: менять здесь, список определяет абляцию.
 _K_DEFAULT = 10
-_K_KNN_ABLATION = [5, 10, 20, 40, 60, 80, 100]   # antisym и sym
-_K_LIST_DEFAULT = [5, 10, 20, 40]        # для multiscale
+_K_KNN_ABLATION = [5, 10, 20, 40, 60, 80, 100]  # antisym и sym
+_K_LIST_DEFAULT = [5, 10, 20, 40]  # для multiscale
 _AGG_DEFAULT = "mean"
 
 _SIGMA_PERCENTILES = [1, 2, 3, 5, 10, 20]
@@ -83,13 +38,14 @@ _RFF_SEED = 42
 # Суффикс pair_agg в имени и variant
 # ============================================================
 
+
 def _agg_suffix(pair_agg: str) -> str:
     """Возвращает суффикс имени для pair_agg."""
     if pair_agg == "sym":
         return "_sym"
     if pair_agg == "antisym":
         return "_antisym"
-    return ""  # directed — без суффикса
+    return ""
 
 
 def _variant_suffix(pair_agg: str) -> str:
@@ -98,7 +54,7 @@ def _variant_suffix(pair_agg: str) -> str:
         return "_sym"
     if pair_agg == "antisym":
         return "_antisym"
-    return ""  # directed
+    return ""
 
 
 def _rank_suffix(rank_aggregation: str) -> str:
@@ -113,6 +69,7 @@ def _rank_suffix(rank_aggregation: str) -> str:
 # ============================================================
 # Фабричные функции: каждая возвращает (name, config_dict)
 # ============================================================
+
 
 def _lin_knn(k: int, pair_agg: str = "antisym") -> Tuple[str, Dict[str, Any]]:
     """linear kNN, окрестность из k соседей."""
@@ -134,7 +91,9 @@ def _lin_knn(k: int, pair_agg: str = "antisym") -> Tuple[str, Dict[str, Any]]:
     }
 
 
-def _lin_eps(eps_percentile: int, pair_agg: str = "antisym") -> Tuple[str, Dict[str, Any]]:
+def _lin_eps(
+    eps_percentile: int, pair_agg: str = "antisym"
+) -> Tuple[str, Dict[str, Any]]:
     """linear eps, порог окрестности = percentile попарных расстояний."""
     name = f"lin_eps_{eps_percentile}{_agg_suffix(pair_agg)}"
     variant = f"linear_epsilon{_variant_suffix(pair_agg)}"
@@ -185,12 +144,14 @@ def _w_eps(
     if rank_aggregation == "weak_rankme":
         meta["weak_spectrum_count"] = weak_spectrum_count
     if solver == "ransac":
-        meta.update({
-            "ransac_n_iter": _RANSAC_N_ITER,
-            "ransac_sample_frac": _RANSAC_SAMPLE_FRAC,
-            "ransac_min_inliers": _RANSAC_MIN_INLIERS,
-            "ransac_threshold_scale": _RANSAC_THRESHOLD_SCALE,
-        })
+        meta.update(
+            {
+                "ransac_n_iter": _RANSAC_N_ITER,
+                "ransac_sample_frac": _RANSAC_SAMPLE_FRAC,
+                "ransac_min_inliers": _RANSAC_MIN_INLIERS,
+                "ransac_threshold_scale": _RANSAC_THRESHOLD_SCALE,
+            }
+        )
 
     return name, {"sample_size": _SAMPLE_SIZE, "meta": meta}
 
@@ -392,8 +353,7 @@ def _id_diff_eps(
 # ============================================================
 # Реестр метрик
 # ============================================================
-# Добавить новую метрику = одна строка здесь.
-# Порядок определяет порядок в отчётах и графиках.
+
 
 def _build_metric_specs() -> List[Tuple[str, Dict[str, Any]]]:
     specs = []
@@ -582,10 +542,8 @@ def get_embedding_metric_configs() -> Dict[str, Dict[str, Any]]:
 # Legacy-таблица: старые длинные имена -> короткие
 # ============================================================
 # Нужна только для чтения артефактов, посчитанных до перехода
-# на короткие имена. В новых запусках не используется.
 
 LEGACY_TO_SHORT_METRIC_NAMES: Dict[str, str] = {
-    # Старые длинные имена -> новые короткие с _antisym/_sym
     "local_map_rank_linear_knn_k5_antisym": "lin_k5_antisym",
     "local_map_rank_linear_knn_k10_antisym": "lin_k10_antisym",
     "local_map_rank_linear_knn_k20_antisym": "lin_k20_antisym",
@@ -619,8 +577,6 @@ LEGACY_TO_SHORT_METRIC_NAMES: Dict[str, str] = {
     "local_map_rank_multiscale_knn_mean_sym": "multiscale_mean_sym",
     "local_map_rank_rff_knn_k10_antisym": "rff_k10_antisym",
     "local_map_rank_rff_knn_k10_sym": "rff_k10_sym",
-    # Прежние короткие имена без суффикса -> новые с _antisym
-    # (для совместимости с уже посчитанными артефактами)
     "lin_k5": "lin_k5_antisym",
     "lin_k10": "lin_k10_antisym",
     "lin_k20": "lin_k20_antisym",
@@ -644,6 +600,7 @@ LEGACY_TO_SHORT_METRIC_NAMES: Dict[str, str] = {
 # short_metric_name: имя для графиков
 # ============================================================
 
+
 def short_metric_name(name: str) -> str:
     """
     Возвращает каноническое короткое название метрики для использования в графиках.
@@ -665,5 +622,4 @@ def short_metric_name(name: str) -> str:
     if name in LEGACY_TO_SHORT_METRIC_NAMES:
         return LEGACY_TO_SHORT_METRIC_NAMES[name]
 
-    # Короткие имена уже канонические.
     return name

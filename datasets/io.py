@@ -2,24 +2,6 @@ from __future__ import annotations
 
 """
 Утилиты для датасетов.
-
-Зачем отдельный модуль:
-- не трогаем основную логику расчёта метрик/даунстрима;
-- проще добавлять новые датасеты (ImageNet, CIFAR-100, etc.);
-- проще гарантировать, что рефакторинг не меняет результаты: все преобразования и загрузки лежат в одном месте.
-
-ВАЖНО:
-- Для сохранения воспроизводимости на CIFAR-10 здесь намеренно оставлен
-  простой deterministic transform до размера ImageNet.
-  ВАЖНО: используем именно Resize((224, 224)), а не Resize(224), потому что
-  для прямоугольных изображений (например, Food101) Resize(224) сохраняет
-  aspect ratio и даёт батчи с разными spatial-size.
-
-- Внешний API модуля остаётся единым для всего проекта:
-  build_dataset(..., split=...) и load_labels(..., split=...).
-  По умолчанию используются project split-имена: train / val / test / trainval.
-  Дальше они при необходимости отображаются в формат конкретного датасета
-  (например, ImageNet val вместо test, Flowers102 trainval = train + val).
 """
 
 from pathlib import Path
@@ -57,9 +39,7 @@ class IndexedDataset(Dataset):
 def default_transform_imagenet224(image_size: int = 224) -> transforms.Compose:
     return transforms.Compose(
         [
-            transforms.Resize(
-                (image_size, image_size)
-            ),  # гарантируем одинаковый spatial-size для всех изображений
+            transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
         ]
@@ -97,7 +77,9 @@ def _canonical_dataset_name(dataset_name: str) -> str:
 def _validate_project_split(split: str) -> str:
     split = split.lower().strip()
     if split not in ("train", "val", "test", "trainval"):
-        raise ValueError("split должен быть одним из: 'train', 'val', 'test', 'trainval'")
+        raise ValueError(
+            "split должен быть одним из: 'train', 'val', 'test', 'trainval'"
+        )
     return split
 
 
@@ -130,8 +112,7 @@ def _extract_labels(dataset: Dataset) -> np.ndarray:
         return np.asarray([label for _, label in dataset.samples], dtype=np.int64)
 
     raise ValueError(
-        "Не удалось извлечь labels из датасета. "
-        f"Тип: {type(dataset).__name__}"
+        "Не удалось извлечь labels из датасета. " f"Тип: {type(dataset).__name__}"
     )
 
 
@@ -172,7 +153,9 @@ def _load_sun397_indices(
     split: str,
     partition: int = 1,
 ) -> np.ndarray:
-    train_path, test_path = _sun397_partition_paths(base_dataset.root, partition=partition)
+    train_path, test_path = _sun397_partition_paths(
+        base_dataset.root, partition=partition
+    )
     list_path = train_path if split == "train" else test_path
 
     path_to_idx = {
@@ -229,7 +212,9 @@ def _build_raw_dataset(
 
     if dataset_name == "cifar10":
         if split in {"val", "trainval"}:
-            raise ValueError("Для cifar10 поддерживаются только split='train' и split='test'.")
+            raise ValueError(
+                "Для cifar10 поддерживаются только split='train' и split='test'."
+            )
         return datasets.CIFAR10(
             root=data_root,
             train=(split == "train"),
@@ -310,7 +295,6 @@ def build_dataset(
     dataset_name = _canonical_dataset_name(dataset_name)
     split = _validate_project_split(split)
 
-    # По умолчанию используем тот же transform, что раньше.
     if transform is None:
         transform = default_transform_imagenet224()
 
@@ -328,7 +312,7 @@ def build_loader(
     num_workers: int = 4,
     shuffle: bool = False,
 ) -> DataLoader:
-    # ВАЖНО: shuffle=False, чтобы индексы subset_indices.npy однозначно соответствовали порядку объектов.
+
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers
     )

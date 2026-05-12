@@ -185,7 +185,6 @@ def _make_registry() -> Dict[str, ModelSpec]:
         apply_extractor=as_vit_feature_extractor,
     )
 
-    # DenseNet / MobileNet
     add(
         "densenet121",
         base_name="densenet121",
@@ -201,7 +200,6 @@ def _make_registry() -> Dict[str, ModelSpec]:
         apply_extractor=as_mobilenet_v2_feature_extractor,
     )
 
-    # VGG11: два варианта (чтобы было честно и воспроизводимо)
     add(
         "vgg11_fc4096",
         base_name="vgg11",
@@ -218,7 +216,6 @@ def _make_registry() -> Dict[str, ModelSpec]:
     )
     reg["vgg11"] = reg["vgg11_conv512"]
 
-    # VGG13: те же два extractor-варианта, как и для остальных VGG
     add(
         "vgg13_fc4096",
         base_name="vgg13",
@@ -235,7 +232,6 @@ def _make_registry() -> Dict[str, ModelSpec]:
     )
     reg["vgg13"] = reg["vgg13_conv512"]
 
-    # VGG16: два варианта (чтобы было честно и воспроизводимо)
     add(
         "vgg16_fc4096",
         base_name="vgg16",
@@ -252,7 +248,6 @@ def _make_registry() -> Dict[str, ModelSpec]:
     )
     reg["vgg16"] = reg["vgg16_conv512"]
 
-    # VGG19: два варианта (чтобы было честно и воспроизводимо)
     add(
         "vgg19_fc4096",
         base_name="vgg19",

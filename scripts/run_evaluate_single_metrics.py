@@ -209,8 +209,6 @@ def adjust_single_correct_ratio(cr: float) -> float:
 
 # ============================================================
 # Загрузка single metrics
-# Canonical формат: <single_metrics_dir>/metrics/<metric_name>/<model>.json
-# Legacy формат:    <single_metrics_dir>/<metric_name>/<model>.json
 # ============================================================
 
 
@@ -272,7 +270,6 @@ def load_single_metric_scores(metric_dir: Path) -> tuple[str, dict[str, float], 
 
 # ============================================================
 # Downstream
-# Формат проекта: model -> task -> score
 # ============================================================
 
 
@@ -319,7 +316,8 @@ def intersect_models(
     common = sorted(set(single_scores.keys()) & set(downstream.keys()))
     if len(common) < 2:
         raise ValueError(
-            "Слишком мало общих моделей между single-metrics и downstream: " f"{common}"
+            "Слишком мало общих моделей между одиночными метриками и "
+            f"downstream-оценками: {common}"
         )
     return common
 
@@ -357,9 +355,6 @@ def build_pairs_for_task(
         delta_metric_signed = metric_i - metric_j
         delta_metric_abs = abs(delta_metric_signed)
 
-        # ВАЖНО:
-        # порядок вычитания должен совпадать с delta_metric_signed,
-        # иначе signed-корреляция инвертируется по знаку.
         delta_score_signed = score_i - score_j
         delta_score_abs = abs(delta_score_signed)
 
@@ -524,7 +519,9 @@ def safe_filename(s: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in str(s))
 
 
-def pairs_xy_and_info(df_pairs: pd.DataFrame, protocol: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+def pairs_xy_and_info(
+    df_pairs: pd.DataFrame, protocol: str
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     if protocol == "signed":
         x = df_pairs["delta_metric_signed"].to_numpy(dtype=np.float64)
         y = df_pairs["delta_score_signed"].to_numpy(dtype=np.float64)
@@ -543,15 +540,19 @@ def pairs_xy_and_info(df_pairs: pd.DataFrame, protocol: str) -> tuple[np.ndarray
     else:
         cr = cr_adj = float("nan")
 
-    return x, y, {
-        "target": target_name,
-        "n_pairs": corr["n_pairs_used"],
-        "spearman": corr["spearman"],
-        "pearson": corr["pearson"],
-        "kendall": corr["kendall"],
-        "correct_ratio": cr,
-        "correct_ratio_adjusted": cr_adj,
-    }
+    return (
+        x,
+        y,
+        {
+            "target": target_name,
+            "n_pairs": corr["n_pairs_used"],
+            "spearman": corr["spearman"],
+            "pearson": corr["pearson"],
+            "kendall": corr["kendall"],
+            "correct_ratio": cr,
+            "correct_ratio_adjusted": cr_adj,
+        },
+    )
 
 
 def plot_scatter(
@@ -572,8 +573,8 @@ def plot_scatter(
     ax.axvline(0.0)
     ax.axhline(0.0)
     ax.set_title(title)
-    ax.set_xlabel("single metric diff")
-    ax.set_ylabel("target")
+    ax.set_xlabel("Разность одиночной метрики")
+    ax.set_ylabel("Целевая величина")
     fig.text(0.01, 0.01, subtitle, fontsize=9)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
 
@@ -665,8 +666,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Папка с single-metrics. Поддерживает canonical "
-            "<dataset>/metrics/<metric>/<model>.json и legacy <metric>/<model>.json."
+            "Папка с одиночными метриками. Поддерживает основной формат "
+            "<dataset>/metrics/<metric>/<model>.json и старый совместимый "
+            "формат <metric>/<model>.json."
         ),
     )
     parser.add_argument(
@@ -679,7 +681,7 @@ def parse_args() -> argparse.Namespace:
         "--single_metrics_root",
         type=Path,
         default=Path("data") / "single_metrics",
-        help="Корень single metrics store для режима --dataset_key.",
+        help="Корень хранилища одиночных метрик для режима --dataset_key.",
     )
     parser.add_argument(
         "--experiment_dir",
@@ -712,7 +714,7 @@ def parse_args() -> argparse.Namespace:
         "--plots_dir",
         type=Path,
         default=None,
-        help="Необязательная папка для scatter-графиков single metric diff vs target.",
+        help="Необязательная папка для точечных графиков: разность одиночной метрики против целевой величины.",
     )
     parser.add_argument(
         "--plots_mode",
@@ -755,14 +757,18 @@ def main() -> None:
     dataset_key = str(args.dataset_key).strip()
     if args.single_metrics_dir is None:
         if not dataset_key:
-            raise ValueError("Нужно указать либо --single_metrics_dir, либо --dataset_key.")
+            raise ValueError(
+                "Нужно указать либо --single_metrics_dir, либо --dataset_key."
+            )
         args.single_metrics_dir = args.single_metrics_root / dataset_key
     if args.downstream_json is None:
         if not dataset_key:
             dataset_key = args.single_metrics_dir.name
         args.downstream_json = _infer_downstream_json(dataset_key)
     if args.experiment_dir is not None:
-        dataset_base = _dataset_base_from_key(dataset_key or args.single_metrics_dir.name)
+        dataset_base = _dataset_base_from_key(
+            dataset_key or args.single_metrics_dir.name
+        )
         if args.out_csv is None:
             args.out_csv = (
                 args.experiment_dir
@@ -795,7 +801,7 @@ def main() -> None:
 
     if not single_metrics_dir.exists():
         raise FileNotFoundError(
-            f"Папка single-metrics не найдена: {single_metrics_dir}"
+            f"Папка одиночных метрик не найдена: {single_metrics_dir}"
         )
 
     if not downstream_json.exists():
@@ -812,12 +818,12 @@ def main() -> None:
     print("============================================================")
     print("ОЦЕНКА ОДИНОЧНЫХ МЕТРИК")
     print("============================================================")
-    print(f"Папка single-metrics : {single_metrics_dir}")
+    print(f"Папка одиночных метрик: {single_metrics_dir}")
     print(f"Папка значений       : {resolve_metrics_dir(single_metrics_dir)}")
     print(f"Файл downstream      : {downstream_json}")
     print(f"Найдено метрик       : {len(metric_dirs)}")
     print(f"Найдено моделей down : {len(downstream)}")
-    print(f"Protocol             : {protocol}")
+    print(f"Протокол             : {protocol}")
     print("============================================================")
 
     all_results: list[dict[str, Any]] = []

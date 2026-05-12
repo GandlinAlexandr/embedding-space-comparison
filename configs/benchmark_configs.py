@@ -1,12 +1,5 @@
 """
 Конфигурации benchmark'ов.
-
-Сейчас здесь зафиксирован benchmark прошлого ВКР, чтобы:
-- не держать список из 21 моделей только в переписке или ноутбуках;
-- воспроизводимо запускать extraction / downstream / evaluation;
-- не дублировать family-map в нескольких местах.
-
-Имена ниже соответствуют текущему model_zoo.registry проекта.
 """
 
 from __future__ import annotations
@@ -15,12 +8,9 @@ from typing import Dict, List
 
 
 # ============================================================
-# Benchmark ВКР 2024/2025
+# Бенчмарк ВКР 2024/2025
 # ============================================================
 
-# 21 конфигурация моделей:
-# - дубли прошлого года реализованы через разные torchvision weights
-# - короткие имена остаются canonical aliases для V1-вариантов
 VKR_2024_2025_MODEL_NAMES: List[str] = [
     "resnet18",
     "resnet34",
@@ -95,4 +85,3 @@ def benchmark_models_csv(model_names: List[str]) -> str:
 
 VKR_2024_2025_MODEL_NAMES_CSV: str = benchmark_models_csv(VKR_2024_2025_MODEL_NAMES)
 VKR_2024_2025_RESNET_ONLY_CSV: str = benchmark_models_csv(VKR_2024_2025_RESNET_ONLY)
-

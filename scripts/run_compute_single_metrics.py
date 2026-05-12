@@ -102,7 +102,9 @@ def sampled_dataset_key(
     sample_seed: int,
     sample_strategy: str = "stratified",
 ) -> str:
-    key = f"{slugify_dataset_key(dataset_key)}_s{int(sample_size)}_seed{int(sample_seed)}"
+    key = (
+        f"{slugify_dataset_key(dataset_key)}_s{int(sample_size)}_seed{int(sample_seed)}"
+    )
     if str(sample_strategy):
         key = f"{key}_{sample_strategy}"
     return key
@@ -114,11 +116,15 @@ def infer_sampled_embeddings_dir(
     sample_seed: int,
     sample_strategy: str = "stratified",
 ) -> Path:
-    return DEFAULT_EMBEDDINGS_ROOT / "samples" / sampled_dataset_key(
-        dataset_key,
-        sample_size,
-        sample_seed,
-        sample_strategy,
+    return (
+        DEFAULT_EMBEDDINGS_ROOT
+        / "samples"
+        / sampled_dataset_key(
+            dataset_key,
+            sample_size,
+            sample_seed,
+            sample_strategy,
+        )
     )
 
 
@@ -536,7 +542,9 @@ def _torch_available_device(requested: str):
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     elif requested_norm == "cuda":
         if not torch.cuda.is_available():
-            raise RuntimeError("Запрошен --device cuda, но torch.cuda.is_available() == False")
+            raise RuntimeError(
+                "Запрошен --device cuda, но torch.cuda.is_available() == False"
+            )
         device_name = "cuda"
     elif requested_norm == "cpu":
         device_name = "cpu"
@@ -617,9 +625,7 @@ def compute_single_metrics_numpy(
                 else:
                     p = s / total
                     p = p[p > 0.0]
-                    values[metric_name] = float(
-                        np.exp(-float(np.sum(p * np.log(p))))
-                    )
+                    values[metric_name] = float(np.exp(-float(np.sum(p * np.log(p)))))
 
         elif metric_name == "nesum":
             if eigvals.size == 0 or float(eigvals[0]) <= epsilon:
@@ -685,7 +691,9 @@ def compute_single_metrics_torch(
         eigvals = torch.linalg.eigvalsh(cov).flip(0)
         eigvals = torch.clamp(eigvals, min=0.0)
         eigvals = eigvals[eigvals > epsilon]
-        artifacts["covariance_eigenvalues"] = eigvals.detach().cpu().numpy().astype(np.float64)
+        artifacts["covariance_eigenvalues"] = (
+            eigvals.detach().cpu().numpy().astype(np.float64)
+        )
     else:
         eigvals = torch.empty((0,), dtype=xt.dtype, device=xt.device)
 
@@ -706,7 +714,9 @@ def compute_single_metrics_torch(
             if s.numel() == 0 or s_pos.numel() == 0:
                 values[metric_name] = float("inf")
             else:
-                values[metric_name] = float((torch.max(s) / torch.min(s_pos)).detach().cpu())
+                values[metric_name] = float(
+                    (torch.max(s) / torch.min(s_pos)).detach().cpu()
+                )
 
         elif metric_name == "coherence":
             rank = int(torch.sum(s > epsilon).detach().cpu())
@@ -733,13 +743,17 @@ def compute_single_metrics_torch(
                 else:
                     p = s / total
                     p = p[p > 0.0]
-                    values[metric_name] = float(torch.exp(-torch.sum(p * torch.log(p))).detach().cpu())
+                    values[metric_name] = float(
+                        torch.exp(-torch.sum(p * torch.log(p))).detach().cpu()
+                    )
 
         elif metric_name == "nesum":
             if eigvals.numel() == 0 or float(eigvals[0].detach().cpu()) <= epsilon:
                 values[metric_name] = 0.0
             else:
-                values[metric_name] = float((torch.sum(eigvals) / eigvals[0]).detach().cpu())
+                values[metric_name] = float(
+                    (torch.sum(eigvals) / eigvals[0]).detach().cpu()
+                )
 
         elif metric_name == "self_cluster":
             n, d = int(xt.shape[0]), int(xt.shape[1])
@@ -808,7 +822,10 @@ def compute_single_metrics(
         except Exception as exc:
             if requested_device.lower() == "cuda":
                 raise
-            print(f"[warn] GPU/torch расчёт не удался ({exc!r}); fallback на numpy/CPU")
+            print(
+                f"[ПРЕДУПРЕЖДЕНИЕ] GPU/torch расчёт не удался ({exc!r}); "
+                "переход на numpy/CPU"
+            )
 
     return compute_single_metrics_numpy(x=x, metric_names=metric_names)
 
@@ -859,7 +876,9 @@ def collect_saved_value_rows(metrics_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def build_metric_output_path(metrics_dir: Path, metric_name: str, model_name: str) -> Path:
+def build_metric_output_path(
+    metrics_dir: Path, metric_name: str, model_name: str
+) -> Path:
     return metrics_dir / metric_name / f"{model_name}.json"
 
 
@@ -902,7 +921,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_SINGLE_METRICS_ROOT,
         help=(
-            "Корневая папка canonical single-metrics store. "
+            "Корневая папка основного хранилища одиночных метрик. "
             "Результаты пишутся в <out_root>/<dataset_key>/."
         ),
     )
@@ -922,13 +941,15 @@ def parse_args() -> argparse.Namespace:
         help="Если >0, читать embeddings из data/embeddings/samples/<dataset_key>_sN_seedS_<sample_strategy>.",
     )
     parser.add_argument("--sample_seed", type=int, default=42)
-    parser.add_argument("--sample_strategy", choices=["stratified", "random"], default="stratified")
+    parser.add_argument(
+        "--sample_strategy", choices=["stratified", "random"], default="stratified"
+    )
     parser.add_argument(
         "--out_dir",
         type=Path,
         default=None,
         help=(
-            "Legacy/override: конкретная папка результата. "
+            "Совместимый режим/переопределение: конкретная папка результата. "
             "Если задано, используется вместо <out_root>/<dataset_key>."
         ),
     )
@@ -936,7 +957,7 @@ def parse_args() -> argparse.Namespace:
         "--device",
         type=str,
         default="auto",
-        help="Устройство для расчёта: auto, cuda, cpu или torch device string.",
+        help="Устройство для расчёта: auto, cuda, cpu или строка устройства torch.",
     )
     parser.add_argument(
         "--metrics",
@@ -958,7 +979,7 @@ def parse_args() -> argparse.Namespace:
         "--models",
         type=str,
         default="",
-        help="Модели через запятую или alias primary/cpu/snowflake/text20.",
+        help="Модели через запятую или псевдоним primary/cpu/snowflake/text20.",
     )
     parser.add_argument(
         "--center",
@@ -1053,7 +1074,7 @@ def main() -> None:
     print("============================================================")
     print("ВЫЧИСЛЕНИЕ ОДИНОЧНЫХ МЕТРИК")
     print("============================================================")
-    print(f"Dataset key            : {dataset_key}")
+    print(f"Ключ датасета          : {dataset_key}")
     print(f"Папка эмбеддингов      : {embeddings_dir}")
     print(f"Директория результатов : {dataset_dir}")
     print(f"Папка значений метрик  : {metrics_dir}")
