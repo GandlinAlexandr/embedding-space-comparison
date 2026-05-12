@@ -44,7 +44,6 @@
   * [![Pandas][Рandas.pydata.org]][Pandas-url]
   * [![Pytorch][Pytorch]][Pytorch-url]
   * [![scikit-learn][scikit-learn]][scikit-learn-url]
-  * [![Spacy][SpaCy]][Spacy-url]
 
 
 <p align="right">(<a href="#readme-top">Вернуться к началу</a>)</p>
@@ -495,9 +494,6 @@
 
 [Matplotlib-url]: https://matplotlib.org/
 [Matplotlib.org]: https://img.shields.io/badge/Matplotlib-%23ffffff.svg?style=for-the-badge&logo=Matplotlib&logoColor=black
-
-[Spacy-url]: https://spacy.io/
-[Spacy]: https://img.shields.io/badge/-spaCy-09A3D5?style=for-the-badge&logo=spacy&logoColor=white
 
 [Pytorch-url]: https://pytorch.org/
 [Pytorch]: https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white
