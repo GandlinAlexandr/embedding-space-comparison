@@ -470,8 +470,6 @@
 
 # Контакты
 
-Гандлин Александр — [Stepik](https://stepik.org/users/79694206/profile)
-
 Ссылка на проект: [https://github.com/GandlinAlexandr/embedding-space-comparison](https://github.com/GandlinAlexandr/embedding-space-comparison)
 
 <p align="right">(<a href="#readme-top">Вернуться к началу</a>)</p>
